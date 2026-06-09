@@ -84,6 +84,61 @@ test('worker records row exceptions and continues safe batches', async () => {
   }
 });
 
+test('worker runs queued rows concurrently when job concurrency is greater than one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-concurrency-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {concurrency: 2};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: TWO_ROW_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: TWO_ROW_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    let active = 0;
+    let maxActive = 0;
+    const started = [];
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async (_csvText, rawIndex) => {
+        started.push(rawIndex);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        active -= 1;
+        return {
+          status: 'completed',
+          stage: 'closed_loop.complete',
+          message: 'completed',
+          details: {
+            purchaseStatus: 'verified',
+            purchaseAmount: '10',
+            balanceBefore: '20',
+            balanceAfter: '30',
+            cardLast4: rawIndex === 0 ? '0001' : '0002',
+            autoTopupStatus: 'updated',
+            autoTopupThreshold: '2',
+            autoTopupAmount: '25',
+          },
+          safeToContinue: true,
+          stopProfile: true,
+          profileStop: {attempted: false},
+        };
+      },
+    });
+
+    await worker.runJob(created.job.id);
+    const details = jobDetails(db, created.job.id);
+    assert.deepEqual(started.sort(), [0, 1]);
+    assert.equal(maxActive, 2);
+    assert.equal(details.job.status, 'completed');
+    assert.equal(details.rows.every((row) => row.status === 'completed'), true);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('worker writes OPOM failure result when an unexpected row exception occurs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-opom-failure-'));
   try {

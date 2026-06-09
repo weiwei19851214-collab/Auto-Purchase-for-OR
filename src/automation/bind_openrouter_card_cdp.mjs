@@ -2612,6 +2612,9 @@ async function findAndClickAutoTopupAction(page, action) {
       };
       const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
       const hasAutoTopup = (node) => /Auto\\s*Top[- ]?Up/i.test(textOf(node));
+      const pageAnchors = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
+        .filter((node) => visible(node) && hasAutoTopup(node))
+        .map((node) => node.getBoundingClientRect());
       const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
         .map((node) => ({node, rect: node.getBoundingClientRect(), text: textOf(node), disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true'}))
         .filter((item) => visible(item.node) && !item.disabled && new RegExp('^' + action + '$', 'i').test(item.text));
@@ -2633,22 +2636,25 @@ async function findAndClickAutoTopupAction(page, action) {
           : [];
         const nearestAnchorDistance = anchors.length
           ? Math.min(...anchors.map((rect) => Math.abs(rect.y - button.rect.y) + Math.abs(rect.x - button.rect.x) / 8))
-          : 5000;
+          : (pageAnchors.length
+            ? Math.min(...pageAnchors.map((rect) => Math.abs(rect.y - button.rect.y) + Math.abs(rect.x - button.rect.x) / 8))
+            : 5000);
         const area = containerRect.width * containerRect.height;
         const isPageWide = container === document.body || area > window.innerWidth * window.innerHeight * 0.85;
         return {
           ...button,
           score: (container ? 100000 : 0) - nearestAnchorDistance - (isPageWide ? 10000 : 0) - area / 1000,
+          nearestAnchorDistance,
           containerText: container ? textOf(container).slice(0, 300) : '',
         };
       }).sort((a, b) => b.score - a.score);
 
       const target = scored[0] || null;
-      if (!target || !/Auto\\s*Top[- ]?Up/i.test(target.containerText || '')) {
+      if (!target || (!/Auto\\s*Top[- ]?Up/i.test(target.containerText || '') && target.nearestAnchorDistance > 350)) {
         return {
           clicked:false,
           buttonTexts:buttons.map((button) => button.text),
-          scored: scored.map((item) => ({text:item.text, score:item.score, containerText:item.containerText})).slice(0, 5),
+          scored: scored.map((item) => ({text:item.text, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
           tail:(document.body.innerText || '').slice(-2500),
         };
       }

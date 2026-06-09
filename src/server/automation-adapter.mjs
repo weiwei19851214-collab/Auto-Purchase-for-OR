@@ -49,9 +49,11 @@ export function safeFileName(name) {
 
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
+  const concurrency = Math.min(5, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
   return {
     removeExisting: options.removeExisting !== false,
     stopProfiles: options.stopProfiles !== false,
+    concurrency,
     confirmPurchase: scopePurchase && options.confirmPurchase !== false,
     preparePurchaseOnly: scopePurchase && options.preparePurchaseOnly !== false,
     scopeBillingAddress: options.scopeBillingAddress !== false,
@@ -187,6 +189,7 @@ export function publicJob(row) {
     options: {
       removeExisting: args.removeExisting,
       stopProfiles: args.stopProfiles,
+      concurrency: args.concurrency,
       confirmPurchase: args.confirmPurchase,
       preparePurchaseOnly: args.preparePurchaseOnly,
       rowTimeoutMs: args.rowTimeoutMs,

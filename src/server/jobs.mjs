@@ -192,6 +192,7 @@ function publicOptions(options) {
   return {
     removeExisting: args.removeExisting,
     stopProfiles: args.stopProfiles,
+    concurrency: args.concurrency,
     confirmPurchase: args.confirmPurchase,
     preparePurchaseOnly: !args.confirmPurchase && args.preparePurchaseOnly,
     executionScope: runnerScope(args),

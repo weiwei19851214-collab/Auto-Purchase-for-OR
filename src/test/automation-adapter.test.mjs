@@ -65,6 +65,13 @@ test('runnerArgs supports no-purchase test mode', () => {
   assert.equal(args.preparePurchaseOnly, true);
 });
 
+test('runnerArgs clamps concurrency to a safe local range', () => {
+  assert.equal(runnerArgs({concurrency: 2}).concurrency, 2);
+  assert.equal(runnerArgs({concurrency: 0}).concurrency, 1);
+  assert.equal(runnerArgs({concurrency: 99}).concurrency, 5);
+  assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
+});
+
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {
   const args = runnerArgs({scopePurchase: false, confirmPurchase: true, preparePurchaseOnly: true});
   assert.equal(args.scopePurchase, false);

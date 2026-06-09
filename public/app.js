@@ -55,6 +55,7 @@ const els = {
   removeExisting: document.querySelector('#removeExisting'),
   stopProfiles: document.querySelector('#stopProfiles'),
   noPurchaseMode: document.querySelector('#noPurchaseMode'),
+  concurrency: document.querySelector('#concurrency'),
   adspowerStatusMode: document.querySelector('#adspowerStatusMode'),
   adspowerSuccessGroupId: document.querySelector('#adspowerSuccessGroupId'),
   adspowerFailureGroupId: document.querySelector('#adspowerFailureGroupId'),
@@ -141,6 +142,7 @@ function optionsPayload() {
     scopeAutoTopup: els.scopeAutoTopup.checked,
     removeExisting: els.removeExisting.checked,
     stopProfiles: els.stopProfiles.checked,
+    concurrency: els.concurrency.value.trim(),
     confirmPurchase: scopePurchase && !els.noPurchaseMode.checked,
     preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
@@ -959,8 +961,9 @@ async function refreshAll() {
   const data = await api('/api/jobs');
   clearError();
   const current = data.worker?.current;
+  const currentRows = data.worker?.currentRows || [];
   els.worker.textContent = data.worker?.running
-    ? `Worker: running row=${current?.rowNumber || '-'} profile=${current?.profileId || '-'} stage=${current?.stage || '-'} elapsed=${formatDuration(current?.elapsedMs)}`
+    ? `Worker: running ${currentRows.length || 1} row${(currentRows.length || 1) > 1 ? 's' : ''} row=${current?.rowNumber || '-'} profile=${current?.profileId || '-'} stage=${current?.stage || '-'} elapsed=${formatDuration(current?.elapsedMs)}`
     : 'Worker: idle';
   renderJobs(data.jobs || []);
   if (selectedJobId) await loadJob(selectedJobId);
@@ -1128,6 +1131,7 @@ els.allocateCards.addEventListener('click', () => withButtonBusy(els.allocateCar
 els.createCards.addEventListener('click', () => withButtonBusy(els.createCards, 'Creating...', () => allocateCards({createCards: true})).catch(showError));
 els.removeExisting.addEventListener('change', () => invalidateDryRun());
 els.stopProfiles.addEventListener('change', () => invalidateDryRun());
+els.concurrency.addEventListener('input', () => invalidateDryRun('并发数量已变化，启动执行时会重新预检。'));
 els.adspowerStatusMode?.addEventListener('change', () => {
   els.adspowerUseDiscoveredTargets.disabled = true;
   invalidateDryRun();

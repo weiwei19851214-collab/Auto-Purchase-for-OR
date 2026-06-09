@@ -17,6 +17,7 @@ export class JobWorker {
     this.timer = null;
     this.running = false;
     this.current = null;
+    this.currentRows = new Map();
   }
 
   start() {
@@ -35,15 +36,15 @@ export class JobWorker {
   }
 
   status() {
-    const current = this.current
-      ? {
-          ...this.current,
-          elapsedMs: this.current.startedAtMs ? Date.now() - this.current.startedAtMs : 0,
-        }
-      : null;
+    const currentRows = [...this.currentRows.values()].map((row) => ({
+      ...row,
+      elapsedMs: row.startedAtMs ? Date.now() - row.startedAtMs : 0,
+    })).sort((a, b) => Number(a.rowNumber || 0) - Number(b.rowNumber || 0));
+    const current = currentRows[0] || null;
     return {
       running: this.running,
       current,
+      currentRows,
     };
   }
 
@@ -74,16 +75,7 @@ export class JobWorker {
       let job = getJob(this.db, jobId);
       const csvText = readFileSync(job.csv_path, 'utf8');
       const rows = listRows(this.db, jobId).filter((row) => row.status === 'queued');
-      for (const row of rows) {
-        job = getJob(this.db, jobId);
-        if (job.cancel_requested) {
-          addEvent(this.db, jobId, 'job.canceled', 'job canceled before next row');
-          break;
-        }
-        await this.runRow(job, row, csvText);
-        const afterRow = getJob(this.db, jobId);
-        if (afterRow.status === 'blocked') break;
-      }
+      await this.runRows(jobId, rows, csvText);
       await this.finishJob(jobId);
     } catch (error) {
       const now = nowIso();
@@ -98,13 +90,38 @@ export class JobWorker {
       if (failedJob) cleanupJobUpload(failedJob);
     } finally {
       this.current = null;
+      this.currentRows.clear();
       this.running = false;
     }
   }
 
+  async runRows(jobId, rows, csvText) {
+    if (!rows.length) return;
+    const options = JSON.parse(getJob(this.db, jobId)?.options_json || '{}');
+    const args = runnerArgs(options);
+    const concurrency = Math.min(rows.length, args.concurrency || 1);
+    let nextIndex = 0;
+    const takeNextRow = () => rows[nextIndex++];
+    const workers = Array.from({length: concurrency}, async () => {
+      while (nextIndex < rows.length) {
+        const job = getJob(this.db, jobId);
+        if (!job || job.cancel_requested || ['blocked', 'failed'].includes(job.status)) {
+          if (job?.cancel_requested) addEvent(this.db, jobId, 'job.canceled', 'job canceled before next row');
+          break;
+        }
+        const row = takeNextRow();
+        if (!row) break;
+        await this.runRow(job, row, csvText);
+        const afterRow = getJob(this.db, jobId);
+        if (!afterRow || ['blocked', 'failed'].includes(afterRow.status)) break;
+      }
+    });
+    await Promise.all(workers);
+  }
+
   async runRow(job, row, csvText) {
     const now = nowIso();
-    this.current = {
+    const current = {
       jobId: job.id,
       rowId: row.id,
       rowNumber: row.row_number,
@@ -113,6 +130,8 @@ export class JobWorker {
       startedAt: now,
       startedAtMs: Date.now(),
     };
+    this.currentRows.set(row.id, current);
+    this.refreshCurrent();
     this.db.prepare(`
       UPDATE job_rows
       SET status = 'running', stage = 'worker.running', started_at = COALESCE(started_at, ?), updated_at = ?
@@ -135,71 +154,82 @@ export class JobWorker {
     } finally {
       clearInterval(heartbeat);
     }
-    const finishedAt = nowIso();
-    const adsPowerStatus = await this.recordAdsPowerStatus(job, row, result, options);
-    const adspowerStatusTarget = adsPowerStatus.target || result.details?.adspowerStatusTarget || 'waived_by_user';
-    result.details = {
-      ...(result.details || {}),
-      adspowerTagStatus: adsPowerStatus.status || result.details?.adspowerTagStatus || 'skipped_user_waived',
-      adspowerStatusMode: adsPowerStatus.mode || options.adspowerStatusMode || 'disabled',
-      adspowerStatusTarget,
-      adspowerStatusReason: adsPowerStatus.reason || result.details?.adspowerStatusReason || (adspowerStatusTarget === 'waived_by_user' ? 'user_waived_status_writeback' : ''),
-    };
-    this.db.prepare(`
-      UPDATE job_rows
-      SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
-        balance_before = ?, balance_after = ?,
-        card_no = COALESCE(NULLIF(?, ''), card_no),
-        card_last4 = COALESCE(NULLIF(?, ''), card_last4),
-        auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
-        opom_card_writeback_status = COALESCE(NULLIF(?, ''), opom_card_writeback_status),
-        opom_result_writeback_status = COALESCE(NULLIF(?, ''), opom_result_writeback_status),
-        adspower_tag_status = COALESCE(NULLIF(?, ''), adspower_tag_status),
-        adspower_status_mode = COALESCE(NULLIF(?, ''), adspower_status_mode),
-        adspower_status_target = COALESCE(NULLIF(?, ''), adspower_status_target),
-        adspower_status_reason = COALESCE(NULLIF(?, ''), adspower_status_reason),
-        finished_at = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      result.status,
-      result.stage || '',
-      result.message || '',
-      result.details?.purchaseStatus || '',
-      result.details?.purchaseAmount || '',
-      String(result.details?.balanceBefore ?? ''),
-      String(result.details?.balanceAfter ?? ''),
-      result.details?.cardNo || '',
-      result.details?.cardLast4 || '',
-      result.details?.autoTopupStatus || '',
-      result.details?.autoTopupThreshold || '',
-      result.details?.autoTopupAmount || '',
-      result.details?.opomCardWritebackStatus || '',
-      result.details?.opomResultWritebackStatus || '',
-      result.details?.adspowerTagStatus || '',
-      result.details?.adspowerStatusMode || '',
-      result.details?.adspowerStatusTarget || '',
-      result.details?.adspowerStatusReason || '',
-      finishedAt,
-      finishedAt,
-      row.id,
-    );
-    addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
-      status: result.status,
-      stage: result.stage,
-      profileStop: result.profileStop,
-      adsPowerStatus,
-    }, row.id);
-    updateJobCounts(this.db, job.id);
-    await this.writeCurrentResult(job.id);
-
-    if (!result.safeToContinue) {
+    try {
+      const finishedAt = nowIso();
+      const adsPowerStatus = await this.recordAdsPowerStatus(job, row, result, options);
+      const adspowerStatusTarget = adsPowerStatus.target || result.details?.adspowerStatusTarget || 'waived_by_user';
+      result.details = {
+        ...(result.details || {}),
+        adspowerTagStatus: adsPowerStatus.status || result.details?.adspowerTagStatus || 'skipped_user_waived',
+        adspowerStatusMode: adsPowerStatus.mode || options.adspowerStatusMode || 'disabled',
+        adspowerStatusTarget,
+        adspowerStatusReason: adsPowerStatus.reason || result.details?.adspowerStatusReason || (adspowerStatusTarget === 'waived_by_user' ? 'user_waived_status_writeback' : ''),
+      };
       this.db.prepare(`
-        UPDATE jobs
-        SET status = 'blocked', error = ?, updated_at = ?
+        UPDATE job_rows
+        SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
+          balance_before = ?, balance_after = ?,
+          card_no = COALESCE(NULLIF(?, ''), card_no),
+          card_last4 = COALESCE(NULLIF(?, ''), card_last4),
+          auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
+          opom_card_writeback_status = COALESCE(NULLIF(?, ''), opom_card_writeback_status),
+          opom_result_writeback_status = COALESCE(NULLIF(?, ''), opom_result_writeback_status),
+          adspower_tag_status = COALESCE(NULLIF(?, ''), adspower_tag_status),
+          adspower_status_mode = COALESCE(NULLIF(?, ''), adspower_status_mode),
+          adspower_status_target = COALESCE(NULLIF(?, ''), adspower_status_target),
+          adspower_status_reason = COALESCE(NULLIF(?, ''), adspower_status_reason),
+          finished_at = ?, updated_at = ?
         WHERE id = ?
-      `).run(result.message || result.status, nowIso(), job.id);
-      addEvent(this.db, job.id, 'job.blocked', result.message || result.status, {}, row.id);
+      `).run(
+        result.status,
+        result.stage || '',
+        result.message || '',
+        result.details?.purchaseStatus || '',
+        result.details?.purchaseAmount || '',
+        String(result.details?.balanceBefore ?? ''),
+        String(result.details?.balanceAfter ?? ''),
+        result.details?.cardNo || '',
+        result.details?.cardLast4 || '',
+        result.details?.autoTopupStatus || '',
+        result.details?.autoTopupThreshold || '',
+        result.details?.autoTopupAmount || '',
+        result.details?.opomCardWritebackStatus || '',
+        result.details?.opomResultWritebackStatus || '',
+        result.details?.adspowerTagStatus || '',
+        result.details?.adspowerStatusMode || '',
+        result.details?.adspowerStatusTarget || '',
+        result.details?.adspowerStatusReason || '',
+        finishedAt,
+        finishedAt,
+        row.id,
+      );
+      addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
+        status: result.status,
+        stage: result.stage,
+        profileStop: result.profileStop,
+        adsPowerStatus,
+      }, row.id);
+      updateJobCounts(this.db, job.id);
+      await this.writeCurrentResult(job.id);
+
+      if (!result.safeToContinue) {
+        this.db.prepare(`
+          UPDATE jobs
+          SET status = 'blocked', error = ?, updated_at = ?
+          WHERE id = ?
+        `).run(result.message || result.status, nowIso(), job.id);
+        addEvent(this.db, job.id, 'job.blocked', result.message || result.status, {}, row.id);
+      }
+    } finally {
+      this.currentRows.delete(row.id);
+      this.refreshCurrent();
     }
+  }
+
+  refreshCurrent() {
+    const rows = [...this.currentRows.values()]
+      .sort((a, b) => Number(a.rowNumber || 0) - Number(b.rowNumber || 0));
+    this.current = rows[0] || null;
   }
 
   async recordAdsPowerStatus(job, row, result, options) {
@@ -249,8 +279,8 @@ export class JobWorker {
     return setInterval(() => {
       const now = nowIso();
       const elapsedMs = Date.now() - startedAtMs;
-      this.current = {
-        ...(this.current || {}),
+      const current = {
+        ...(this.currentRows.get(row.id) || {}),
         jobId: job.id,
         rowId: row.id,
         rowNumber: row.row_number,
@@ -259,6 +289,8 @@ export class JobWorker {
         elapsedMs,
         startedAtMs,
       };
+      this.currentRows.set(row.id, current);
+      this.refreshCurrent();
       try {
         this.db.prepare(`
           UPDATE job_rows

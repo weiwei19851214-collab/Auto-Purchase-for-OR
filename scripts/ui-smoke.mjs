@@ -78,6 +78,7 @@ try {
     ['Match AdsPower action', /id=["']adsPowerMatchBtn["'][\s\S]*?>Match AdsPower</],
     ['EJH card creation action', /id=["']createCardsBtn["'][\s\S]*?>Create EJH cards</],
     ['EJH safe CSV input', /id=["']ejhSafeCsv["']/],
+    ['Concurrency input default', /id=["']concurrency["'][^>]*value=["']1["']/],
     ['Live execution action', /id=["']liveRunBtn["']/],
     ['Result CSV download action', /id=["']downloadLink["'][\s\S]*?>下载 result CSV</],
     ['Jobs pagination controls', /id=["']jobsPrevPageBtn["'][\s\S]*id=["']jobsPageInfo["'][\s\S]*id=["']jobsNextPageBtn["']/],

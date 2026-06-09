@@ -13,6 +13,24 @@ import {
 import {addEvent, getJob, listEvents, listJobs, listRows, updateJobCounts} from './db.mjs';
 import {createLiveConfirmation, verifyLiveConfirmation} from './safety.mjs';
 
+export function defaultRechargeJobName(rechargeCount, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const datePart = `${parts.year}${parts.month}${parts.day}`;
+  const timePart = `${parts.hour}${parts.minute}`;
+  return `${datePart}-${timePart}-${Number(rechargeCount || 0)}`;
+}
+
 export async function dryRunPayload(payload) {
   const csvText = String(payload.csvText || '');
   if (!csvText.trim()) throw new Error('csvText is required');
@@ -43,6 +61,7 @@ export async function dryRunPayload(payload) {
       adsMatchStatus: row.adsMatchStatus,
       ejhOrderNo: row.ejhOrderNo,
       cardLast4: row.cardLast4,
+      cardNo: row.cardNo,
       executionScope: row.executionScope,
       purchasePlan: row.purchasePlan,
       amount: row.amount,
@@ -58,7 +77,7 @@ export async function dryRunPayload(payload) {
 export async function createJob(db, payload) {
   const csvText = String(payload.csvText || '');
   if (!csvText.trim()) throw new Error('csvText is required');
-  const fileName = payload.fileName || 'account.csv';
+  const sourceFileName = payload.fileName || 'account.csv';
   const options = payload.options || {};
   const plan = await parsePlan(csvText, options);
   const readyCount = plan.rows.filter((row) => row.status === 'ready').length;
@@ -68,7 +87,8 @@ export async function createJob(db, payload) {
     ...options,
     runId: options.runId || (runnerArgs(options).opomWriteback ? jobId : ''),
   };
-  const {csvPath, resultCsvPath} = await makeJobFiles(jobId, fileName, csvText);
+  const jobName = payload.jobName || defaultRechargeJobName(readyCount);
+  const {csvPath, resultCsvPath} = await makeJobFiles(jobId, sourceFileName, csvText);
   const now = nowIso();
 
   const insertJob = db.prepare(`
@@ -79,7 +99,7 @@ export async function createJob(db, payload) {
   `);
   insertJob.run(
     jobId,
-    fileName,
+    jobName,
     csvPath,
     resultCsvPath,
     JSON.stringify(jobOptions),
@@ -95,9 +115,9 @@ export async function createJob(db, payload) {
     INSERT INTO job_rows (
       id, job_id, row_number, raw_index, profile_id, opom_account_id,
       username_masked, login_email_masked, ads_power_user_id, ads_power_serial_number,
-      ads_match_status, ejh_order_no, card_last4, purchase_plan, amount,
+      ads_match_status, ejh_order_no, card_no, card_last4, purchase_plan, amount,
       status, stage, message, missing_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const row of plan.rows) {
     const item = rowInsertFromDryRun(jobId, row);
@@ -114,6 +134,7 @@ export async function createJob(db, payload) {
       item.adsPowerSerialNumber,
       item.adsMatchStatus,
       item.ejhOrderNo,
+      item.cardNo,
       item.cardLast4,
       item.purchasePlan,
       item.amount,
@@ -137,7 +158,7 @@ export async function createJob(db, payload) {
         message: row.message,
       details: {
           cardLast4: row.cardLast4,
-          cardNoLast4: row.cardNoLast4 || row.cardLast4,
+          cardNo: row.cardNo,
           opomAccountId: row.opomAccountId,
           username: row.username,
           loginEmail: row.loginEmail || row.username,
@@ -154,7 +175,8 @@ export async function createJob(db, payload) {
       })),
   });
   addEvent(db, jobId, 'job.created', 'job queued from uploaded CSV', {
-    fileName,
+    fileName: sourceFileName,
+    jobName,
     options: publicOptions(jobOptions),
     liveConfirmation: readyCount > 0 ? 'verified' : 'not_required_no_ready_rows',
   });
@@ -248,7 +270,7 @@ export async function cancelJob(db, jobId) {
         message: row.message,
         details: {
           cardLast4: row.card_last4,
-          cardNoLast4: row.card_last4,
+          cardNo: row.card_no,
           opomAccountId: row.opom_account_id,
           username: row.username_masked,
           loginEmail: row.login_email_masked,

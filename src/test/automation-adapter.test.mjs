@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
 import {getJob, openDatabase} from '../server/db.mjs';
-import {cancelJob, createJob, dryRunPayload, jobDetails} from '../server/jobs.mjs';
+import {cancelJob, createJob, defaultRechargeJobName, dryRunPayload, jobDetails} from '../server/jobs.mjs';
 import {executeRowWithAdapters, parsePlan, runnerArgs, writeResultCsv} from '../server/automation-adapter.mjs';
 import {readFileSync, existsSync} from 'node:fs';
 import * as rechargePlan from '../automation/lib/recharge-plan.mjs';
@@ -51,12 +51,12 @@ const OPOM_CANONICAL_CSV = `status,opom_account_id,login_email,ads_power_user_id
 ,acct_1,finance.owner@example.com,ads-user-1,1415,ok,,matched,ejh_order_1,10,5257970000000001,06,28,456,97001,2,25
 `;
 
-test('parsePlan returns ready rows without exposing raw card number', async () => {
+test('parsePlan returns ready rows with full card number for reconciliation', async () => {
   const plan = await parsePlan(VALID_CSV);
   assert.equal(plan.rows.length, 1);
   assert.equal(plan.rows[0].status, 'ready');
+  assert.equal(plan.rows[0].cardNo, '5257970000000001');
   assert.equal(plan.rows[0].cardLast4, '0001');
-  assert.doesNotMatch(JSON.stringify(plan.rows[0]), /5257970000000001/);
 });
 
 test('runnerArgs supports no-purchase test mode', () => {
@@ -166,6 +166,11 @@ test('dryRunPayload reports row-level missing fields', async () => {
   assert.deepEqual(result.rows[0].missing, ['amount']);
 });
 
+test('defaultRechargeJobName uses China time and recharge count', () => {
+  const name = defaultRechargeJobName(55, new Date('2026-06-09T02:27:00.000Z'));
+  assert.equal(name, '20260609-1027-55');
+});
+
 test('createJob stores queued row summaries in sqlite', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-'));
   try {
@@ -180,7 +185,10 @@ test('createJob stores queued row summaries in sqlite', async () => {
     assert.equal(result.rows.length, 1);
     assert.equal(result.rows[0].status, 'queued');
     assert.equal(result.rows[0].username, 'user@example.com');
-    assert.doesNotMatch(JSON.stringify(result), /5257970000000001|card_number|"cvv"|cvv=/i);
+    assert.equal(result.rows[0].cardNo, '5257970000000001');
+    assert.match(result.job.fileName, /^\d{8}-\d{4}-1$/);
+    assert.notEqual(result.job.fileName, 'account.csv');
+    assert.doesNotMatch(JSON.stringify(result), /card_number|"cvv"|cvv=/i);
     assert.equal(jobDetails(db, result.job.id).job.readyRows, 1);
   } finally {
     rmSync(dir, {recursive: true, force: true});
@@ -235,7 +243,8 @@ test('createJob allows all-blocked dry-run result without live confirmation toke
     const text = readFileSync(job.result_csv_path, 'utf8');
     assert.match(text, /missing_fields/);
     assert.match(text, new RegExp(result.job.id));
-    assert.doesNotMatch(text, /5257970000000001|,456,|card_number|cvv/);
+    assert.match(text, /5257970000000001/);
+    assert.doesNotMatch(text, /,456,|card_number|cvv/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -345,7 +354,7 @@ test('executeRow marks verified purchase as failed when OPOM completed writeback
   assert.equal(failedResults[0].context.stage, 'opom.writeback');
   assert.equal(failedResults[0].context.errorCode, 'opom_writeback_failed');
   assert.doesNotMatch(result.message, /token=secret|5257970000000001/);
-  assert.doesNotMatch(JSON.stringify(failedResults), /token=secret|5257970000000001|456/);
+  assert.doesNotMatch(JSON.stringify(failedResults), /token=secret|456/);
 });
 
 test('writeResultCsv appends result columns', async () => {
@@ -392,7 +401,8 @@ test('writeResultCsv appends result columns', async () => {
     assert.equal(firstRow.adspower_status_target, 'group:success:g-success');
     assert.equal(firstRow.completion_evidence_status, 'production_complete');
     assert.equal(firstRow.completion_evidence_missing, '');
-    assert.doesNotMatch(text, /5257970000000001|,456,|card_number|cvv/);
+    assert.equal(firstRow.cardno, '5257970000000001');
+    assert.doesNotMatch(text, /,456,|card_number|cvv/);
     assert.match(text, /username/);
     assert.match(text, /login_email/);
     assert.doesNotMatch(text, /username_masked|login_email_masked/);
@@ -408,7 +418,7 @@ test('writeResultCsv appends result columns', async () => {
       'username',
       'login_email',
       'ejh_order_no',
-      'card_no_last4',
+      'cardno',
       'task_status',
       'opom_card_writeback_status',
       'opom_result_writeback_status',
@@ -466,7 +476,7 @@ test('writeResultCsv preserves source metadata when outcome details omit it', as
     assert.equal(firstRow.username, 'finance.owner@example.com');
     assert.equal(firstRow.purchase_status, 'verified');
     assert.equal(firstRow.card_last4, '0001');
-    assert.equal(firstRow.card_no_last4, '0001');
+    assert.equal(firstRow.cardno, '5257970000000001');
     assert.equal(firstRow.completion_evidence_status, 'incomplete');
     assert.match(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
     assert.match(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
@@ -474,7 +484,7 @@ test('writeResultCsv preserves source metadata when outcome details omit it', as
     assert.equal(firstRow.adspower_status_target, 'waived_by_user');
     assert.doesNotMatch(firstRow.completion_evidence_missing, /adspower_tag_status/);
     assert.doesNotMatch(firstRow.completion_evidence_missing, /adspower_status_target/);
-    assert.doesNotMatch(readFileSync(resultPath, 'utf8'), /5257970000000001|,456,|card_number|cvv/);
+    assert.doesNotMatch(readFileSync(resultPath, 'utf8'), /,456,|card_number|cvv/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -662,7 +672,7 @@ test('writeResultCsv escapes formula-like cells for spreadsheet handoff', async 
     assert.match(text, /'=IMPORTXML/);
     assert.match(text, /'\+formula-like failure/);
     assert.doesNotMatch(text, /(^|,|\r?\n)"?[=+\-@][^,\r\n"]*/);
-    assert.doesNotMatch(text, /5257970000000001|,456,|card_number|cvv/);
+    assert.doesNotMatch(text, /,456,|card_number|cvv/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -688,7 +698,7 @@ test('cancelJob writes sanitized result and removes queued raw upload', async ()
     assert.match(text, /failed/);
     assert.match(text, /job canceled before execution/);
     assert.match(text, new RegExp(created.job.id));
-    assert.doesNotMatch(text, /5257970000000001|,456,|card_number|cvv/);
+    assert.doesNotMatch(text, /,456,|card_number|cvv/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -1104,7 +1114,7 @@ test('production preflight validates a candidate CSV contract without leaking se
     const csvContract = result.checks.find((check) => check.label === 'CSV dry-run contract');
     assert.equal(result.ok, true);
     assert.equal(csvContract.status, 'ready=1 blocked=0 skipped=0');
-    assert.doesNotMatch(output, /5257970000000001|,456,|card_number|cvv/i);
+    assert.doesNotMatch(output, /,456,|card_number|cvv/i);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -1156,7 +1166,7 @@ test('production preflight rejects EJH raw diagnostic columns without printing r
     assert.equal(result.ok, false);
     assert.equal(diagnostic.ok, false);
     assert.match(diagnostic.status, /requestPayload/);
-    assert.doesNotMatch(stdout, /5257970000000001|,456,|"cvv":"456"/i);
+    assert.doesNotMatch(stdout, /,456,|"cvv":"456"/i);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

@@ -118,9 +118,14 @@ h3 {
 }
 
 .status-strip {
+  position: sticky;
+  top: 62px;
+  z-index: 15;
   display: grid;
   grid-template-columns: repeat(5, minmax(130px, 1fr));
   gap: 10px;
+  padding-bottom: 2px;
+  background: var(--bg);
 }
 
 .metric-card {
@@ -167,8 +172,7 @@ h3 {
   align-items: start;
 }
 
-.control-rail > .optional-panel,
-.control-rail > .execute-bar {
+.control-rail > .optional-panel {
   grid-column: span 3;
 }
 
@@ -402,6 +406,15 @@ button:disabled,
   color: var(--warning);
 }
 
+.source-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.source-actions .action-row {
+  flex-wrap: wrap;
+}
+
 .worker {
   max-width: min(56vw, 760px);
   overflow: hidden;
@@ -578,6 +591,19 @@ tr[role="button"]:focus-visible td {
   max-height: 52vh;
 }
 
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.pagination span {
+  min-width: 150px;
+  text-align: center;
+}
+
 .message {
   min-width: 240px;
   max-width: 520px;
@@ -616,8 +642,7 @@ tr[role="button"]:focus-visible td {
     grid-template-columns: 1fr;
   }
 
-  .control-rail > .optional-panel,
-  .control-rail > .execute-bar {
+  .control-rail > .optional-panel {
     grid-column: auto;
   }
 
@@ -651,6 +676,10 @@ tr[role="button"]:focus-visible td {
   .form-grid.three,
   .check-group {
     grid-template-columns: 1fr;
+  }
+
+  .status-strip {
+    top: 112px;
   }
 
   .action-row {

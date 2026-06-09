@@ -234,7 +234,7 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     const resultCsv = readFileSync(job.result_csv_path, 'utf8');
     assert.match(resultCsv, /purchase_unverified/);
     assert.match(resultCsv, /server restarted during row execution/);
-    assert.doesNotMatch(resultCsv, /5257970000000001|,456,|card_number|cvv/i);
+    assert.doesNotMatch(resultCsv, /,456,|card_number|cvv/i);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

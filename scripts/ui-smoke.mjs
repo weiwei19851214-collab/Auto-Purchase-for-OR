@@ -29,7 +29,16 @@ try {
 
   const idsInHtml = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
   const queriedIds = [...new Set([...appJs.matchAll(/document\.querySelector\(['"]#([A-Za-z0-9_-]+)['"]\)/g)].map((match) => match[1]))];
-  const missingIds = queriedIds.filter((id) => !idsInHtml.has(id));
+  const optionalHiddenIds = new Set([
+    'adspowerStatusMode',
+    'adspowerSuccessGroupId',
+    'adspowerFailureGroupId',
+    'adspowerBlockerGroupId',
+    'adspowerDiscoverTargetsBtn',
+    'adspowerUseDiscoveredTargetsBtn',
+    'adspowerTargetsSummary',
+  ]);
+  const missingIds = queriedIds.filter((id) => !idsInHtml.has(id) && !optionalHiddenIds.has(id));
   add('app.js selector contract', missingIds.length === 0, missingIds.length ? `missing:${missingIds.join(',')}` : `ids=${queriedIds.length}`);
   add(
     'OPOM health fields retained in browser CSV contract',
@@ -51,26 +60,41 @@ try {
     /id=["']opomWriteback["'][^>]*checked/.test(html),
     'checked',
   );
+  add(
+    'sticky summary cards reflect current workflow',
+    />清单<\/span>/.test(html)
+      && />AdsPower<\/span>/.test(html)
+      && />Billing<\/span>/.test(html)
+      && />卡<\/span>/.test(html)
+      && />预检<\/span>/.test(html)
+      && /id=["']statBilling["']/.test(html)
+      && /\.status-strip\s*{[\s\S]*position:\s*sticky/.test(css),
+    'list/adspower/billing/card/preflight',
+  );
 
   for (const item of [
-    ['Ready to recharge action', /id=["']opomReadyBtn["'][\s\S]*?>Ready to recharge</],
-    ['OPOM pagination action', /id=["']opomLoadMoreBtn["'][\s\S]*?>Load more</],
+    ['Load OPOM group action', /id=["']opomReadyBtn["'][\s\S]*?>Load OPOM group</],
+    ['OPOM pagination action', /id=["']opomLoadMoreBtn["'][\s\S]*?>Load next page</],
     ['Match AdsPower action', /id=["']adsPowerMatchBtn["'][\s\S]*?>Match AdsPower</],
     ['EJH card creation action', /id=["']createCardsBtn["'][\s\S]*?>Create EJH cards</],
     ['EJH safe CSV input', /id=["']ejhSafeCsv["']/],
-    ['Dry-run action', /id=["']dryRunBtn["'][\s\S]*?>Dry-run</],
     ['Live execution action', /id=["']liveRunBtn["']/],
     ['Result CSV download action', /id=["']downloadLink["'][\s\S]*?>下载 result CSV</],
-    ['AdsPower status mode select', /id=["']adspowerStatusMode["']/],
-    ['AdsPower remark V2 status option', /<option\s+value=["']remark_append_v2["'][\s\S]*?>Append remark V2/],
-    ['AdsPower status target discovery action', /id=["']adspowerDiscoverTargetsBtn["']/],
-    ['AdsPower discovered target apply action', /id=["']adspowerUseDiscoveredTargetsBtn["']/],
+    ['Jobs pagination controls', /id=["']jobsPrevPageBtn["'][\s\S]*id=["']jobsPageInfo["'][\s\S]*id=["']jobsNextPageBtn["']/],
     ['OPOM writeback control', /id=["']opomWriteback["']/],
     ['OPOM health table column', />OPOM health</],
   ]) {
     add(item[0], item[1].test(html), item[1].test(html) ? 'present' : 'missing');
   }
 
+  add('job detail appears before job records', html.indexOf('<h2>任务详情</h2>') >= 0
+    && html.indexOf('<h2>任务记录</h2>') > html.indexOf('<h2>任务详情</h2>'), 'detail_first');
+  add('execution bar follows recharge preview', html.indexOf('<h2>待充值清单</h2>') >= 0
+    && html.indexOf('aria-label="预检和启动执行"') > html.indexOf('<h2>待充值清单</h2>')
+    && html.indexOf('<h2>任务详情</h2>') > html.indexOf('aria-label="预检和启动执行"'), 'after_preview');
+  add('manual Dry-run action hidden', !/id=["']dryRunBtn["']/.test(html), 'hidden');
+  add('auto preflight copy present', /自动预检/.test(html), 'present');
+  add('AdsPower status writeback UI hidden', !/adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'hidden');
   add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');
   add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}`), 'no_sensitive_literals');
 } catch (error) {

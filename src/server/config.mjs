@@ -13,7 +13,7 @@ export const AUTOMATION_LIB_DIR = join(AUTOMATION_DIR, 'lib');
 export const BIND_SCRIPT = join(AUTOMATION_DIR, 'bind_openrouter_card_cdp.mjs');
 export const BATCH_SCRIPT = join(AUTOMATION_DIR, 'batch_recharge_openrouter_cards_cdp.mjs');
 
-export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4173);
+export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4100);
 export const DEFAULT_ROW_TIMEOUT_MS = Number(process.env.ROW_TIMEOUT_MS || 600000);
 
 export const LIVE_STATUSES = new Set([

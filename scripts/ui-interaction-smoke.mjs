@@ -16,7 +16,7 @@ Ignored,UI Smoke,1 Main St,Portland,OR,97001,5551112222
 const DEFAULT_PLAYWRIGHT_PATH = '/Users/weiwei/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
 
 const args = parseArgs(process.argv.slice(2));
-const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4174');
+const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
 
 function add(label, ok, status = '') {
@@ -47,39 +47,52 @@ try {
 
   await page.goto(baseUrl, {waitUntil: 'networkidle'});
   add('operator page loaded', (await page.title()) === 'OpenRouter 充值执行器', 'title_present');
-  add('OPOM ready button visible', await page.locator('#opomReadyBtn').isVisible(), 'visible');
+  add('Load OPOM group button visible', await page.locator('#opomReadyBtn').isVisible(), 'visible');
   add('AdsPower match button visible', await page.locator('#adsPowerMatchBtn').isVisible(), 'visible');
-  add('AdsPower remark V2 option visible', await page.locator('#adspowerStatusMode option[value="remark_append_v2"]').count() === 1, 'present');
+  add('AdsPower status writeback UI hidden', await page.locator('#adspowerStatusMode, #adspowerDiscoverTargetsBtn, #adspowerUseDiscoveredTargetsBtn').count() === 0, 'hidden');
 
-  await page.route('**/api/adspower/status-targets', async (route) => {
+  await page.route('**/api/opom/ready', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
+    const payload = route.request().postDataJSON?.() || {};
+    const hasAddressCsv = Boolean(String(payload.addressCsvText || '').trim());
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         ok: true,
-        status: 'groups=3',
-        base: 'http://127.0.0.1:50325/',
-        groups: [
-          {groupId: 'g-success', groupName: 'Recharge Success'},
-          {groupId: 'g-failure', groupName: 'Recharge Failed'},
-          {groupId: 'g-blocker', groupName: 'Recharge Blocked'},
-        ],
-        targets: {
-          success: {status: 'missing', groupId: '', groupName: ''},
-          failure: {status: 'missing', groupId: '', groupName: ''},
-          blocker: {status: 'missing', groupId: '', groupName: ''},
-        },
-        candidates: {
-          success: [{groupId: 'g-success', groupName: 'Recharge Success'}],
-          failure: [{groupId: 'g-failure', groupName: 'Recharge Failed'}],
-          blocker: [{groupId: 'g-blocker', groupName: 'Recharge Blocked'}],
-        },
-        suggestedEnv: [
-          'export ADSPOWER_SUCCESS_GROUP_ID="g-success"',
-          'export ADSPOWER_FAILURE_GROUP_ID="g-failure"',
-          'export ADSPOWER_BLOCKER_GROUP_ID="g-blocker"',
-        ],
+        count: 1,
+        nextCursor: '',
+        addressMappingCount: hasAddressCsv ? 1 : 0,
+        csvText: '',
+        rows: [{
+          status: '',
+          opom_account_id: 'acct-ui-opom-1',
+          login_email: 'opom-ui-smoke@example.com',
+          ads_power_user_id: 'profile-ui-opom-1',
+          ads_power_serial_number: '1416',
+          ads_power_group_name: 'recharge',
+          opom_health_status: 'ok',
+          opom_health_reason: '',
+          ads_match_status: '',
+          order_no: '',
+          card_no: '',
+          exp_month: '',
+          exp_year: '',
+          cvv: '',
+          amount: '0',
+          postal_code: hasAddressCsv ? '97001' : '',
+          holder_name: hasAddressCsv ? 'UI Smoke' : '',
+          country: hasAddressCsv ? 'US' : '',
+          address_line1: hasAddressCsv ? '1 Main St' : '',
+          city: hasAddressCsv ? 'Portland' : '',
+          state: hasAddressCsv ? 'OR' : '',
+          balance_threshold: '40',
+          amount_below_threshold: '150',
+          amount_at_or_above_threshold: '100',
+          auto_topup_threshold: '100',
+          auto_topup_amount: '100',
+          idempotency_key: 'recharge_plan:acct-ui-opom-1:v1',
+        }],
       }),
     });
   });
@@ -133,24 +146,20 @@ try {
     });
   });
 
-  await page.selectOption('#adspowerStatusMode', 'group_move');
-  await page.click('#adspowerDiscoverTargetsBtn');
-  await page.waitForFunction(() => /groups=3/.test(document.querySelector('#adspowerTargetsSummary')?.textContent || ''));
-  add('AdsPower target discovery summary rendered', /Recharge Success/.test(await page.locator('#adspowerTargetsSummary').textContent() || ''), 'summary_present');
-  add('AdsPower discovered target apply enabled', await page.locator('#adspowerUseDiscoveredTargetsBtn').isEnabled(), 'enabled');
-  await page.click('#adspowerUseDiscoveredTargetsBtn');
-  add('AdsPower discovered targets fill local fields', await page.locator('#adspowerSuccessGroupId').inputValue() === 'id:g-success'
-    && await page.locator('#adspowerFailureGroupId').inputValue() === 'id:g-failure'
-    && await page.locator('#adspowerBlockerGroupId').inputValue() === 'id:g-blocker', 'filled');
+  await page.click('#opomReadyBtn');
+  await page.waitForFunction(() => /group=recharge status=needs_recharge rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
+  const opomPreviewText = await page.locator('#opomPreviewBody').textContent();
+  add('Load OPOM group works without Billing CSV', /opom-ui-smoke/.test(opomPreviewText || '') && /missing_fields/.test(opomPreviewText || ''), 'loaded_with_missing_billing');
 
   await page.setInputFiles('#csvFile', csvPath);
   await page.waitForFunction(() => /local selector rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
   add('local selector CSV creates one canonical row before address upload', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
   await page.click('#adsPowerMatchBtn');
-  await page.waitForFunction(() => /OPOM resolved=1\/1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('local selector match resolves OPOM before AdsPower', /AdsPower matched=1 failed=0 OPOM resolved=1\/1/.test(await page.locator('#opomSummary').textContent() || ''), 'resolved=1/1');
+  await page.waitForFunction(() => /AdsPower matched=1 failed=0/.test(document.querySelector('#opomSummary')?.textContent || ''));
+  add('local selector match completes AdsPower lookup', /AdsPower matched=1 failed=0/.test(await page.locator('#opomSummary').textContent() || ''), 'matched=1');
   await page.setInputFiles('#addressMappingCsv', addressCsvPath);
-  await page.click('#dryRunBtn');
+  await page.check('#confirmLive');
+  await page.click('#liveRunBtn');
   await page.waitForFunction(() => {
     const summary = document.querySelector('#dryRunSummary')?.textContent || '';
     return /ready\s*[:=]\s*0|blocked\s*[:=]\s*1|missing_fields|缺/.test(summary);
@@ -158,9 +167,9 @@ try {
 
   const dryRunSummary = await page.locator('#dryRunSummary').textContent();
   const bodyText = await page.locator('body').textContent();
-  add('blocked dry-run summary rendered', /ready\s*[:=]\s*0|blocked\s*[:=]\s*1|missing_fields|缺/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('blocked dry-run stays local-only', !(await page.locator('#confirmLive').isEnabled()), 'live_confirmation_disabled');
-  add('UI text redaction after dry-run', !containsSensitive(bodyText), 'no_sensitive_values');
+  add('blocked auto preflight summary rendered', /ready\s*[:=]\s*0|blocked\s*[:=]\s*1|missing_fields|缺/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
+  add('blocked auto preflight stays local-only', !(await page.locator('#confirmLive').isChecked()), 'live_confirmation_reset');
+  add('UI text redaction after auto preflight', !containsSensitive(bodyText), 'no_sensitive_values');
   add('no browser console errors', consoleErrors.length === 0, consoleErrors.length ? redact(consoleErrors.join(' | ')) : 'none');
   add('no page runtime errors', pageErrors.length === 0, pageErrors.length ? redact(pageErrors.join(' | ')) : 'none');
 } catch (error) {

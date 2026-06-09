@@ -6,7 +6,7 @@ const BLOCKED_CSV = `status,ID,username,amount,card_number,exp_month,exp_year,cv
 `;
 
 const args = parseArgs(process.argv.slice(2));
-const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4173');
+const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
 
 function add(label, ok, status = '') {
@@ -91,7 +91,7 @@ function parseArgs(argv) {
 }
 
 function normalizeBase(value) {
-  const url = new URL(String(value || 'http://127.0.0.1:4173'));
+  const url = new URL(String(value || 'http://127.0.0.1:4100'));
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('base URL must be http(s)');
   return String(url).replace(/\/$/, '');
 }
@@ -128,5 +128,5 @@ async function safeJson(response) {
 }
 
 function containsSensitive(value) {
-  return /5257970000000001|,456,|card_number|cvv|"cvc"|"cardCvc"/i.test(String(value || ''));
+  return /,456,|card_number|cvv|"cvc"|"cardCvc"/i.test(String(value || ''));
 }

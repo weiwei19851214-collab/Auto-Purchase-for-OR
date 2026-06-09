@@ -24,24 +24,24 @@
 
         <section class="status-strip" aria-label="执行状态总览">
           <div class="metric-card">
-            <span>队列</span>
+            <span>清单</span>
             <strong id="statQueue">未拉取</strong>
           </div>
           <div class="metric-card">
-            <span>匹配</span>
+            <span>AdsPower</span>
             <strong id="statMatch">0/0</strong>
           </div>
           <div class="metric-card">
-            <span>卡分配</span>
+            <span>Billing</span>
+            <strong id="statBilling">0/0</strong>
+          </div>
+          <div class="metric-card">
+            <span>卡</span>
             <strong id="statCards">0/0</strong>
           </div>
           <div class="metric-card">
-            <span>Dry-run</span>
+            <span>预检</span>
             <strong id="statDryRun">未执行</strong>
-          </div>
-          <div class="metric-card">
-            <span>执行模式</span>
-            <strong id="statMode">Live Run</strong>
           </div>
         </section>
 
@@ -52,7 +52,7 @@
                 <span class="step-index">1</span>
                 <div>
                   <h2>任务来源</h2>
-                  <p class="muted">从 OPOM 队列或本地 CSV 生成待执行清单。</p>
+                  <p class="muted">从 OPOM group 或本地 CSV 生成待执行清单。</p>
                 </div>
               </div>
 
@@ -77,10 +77,14 @@
                 </label>
               </div>
 
-              <div class="action-row">
-                <button id="opomReadyBtn" type="button" class="primary">Ready to recharge</button>
-                <button id="opomLoadMoreBtn" type="button" disabled>Load more</button>
-                <button id="adsPowerMatchBtn" type="button">Match AdsPower</button>
+              <div class="source-actions">
+                <div class="action-row">
+                  <button id="opomReadyBtn" type="button">Load OPOM group</button>
+                  <button id="opomLoadMoreBtn" type="button" disabled>Load next page</button>
+                </div>
+                <div class="action-row">
+                  <button id="adsPowerMatchBtn" type="button" class="primary">Match AdsPower</button>
+                </div>
               </div>
 
               <label class="field file-field">
@@ -138,7 +142,7 @@
                 <span class="step-index">3</span>
                 <div>
                   <h2>开卡与执行范围</h2>
-                  <p class="muted">先分配卡，再 dry-run；真实开卡和真实充值都有确认门禁。</p>
+                  <p class="muted">先分配卡；启动执行前会自动预检，真实开卡和真实充值都有确认门禁。</p>
                 </div>
               </div>
 
@@ -163,7 +167,7 @@
               </label>
 
               <div class="action-row">
-                <button id="allocateCardsBtn" type="button">Allocate cards</button>
+                <button id="allocateCardsBtn" type="button" class="primary">Allocate cards</button>
                 <button id="createCardsBtn" type="button">Create EJH cards</button>
               </div>
 
@@ -184,58 +188,6 @@
               </fieldset>
             </section>
 
-            <details class="panel step-panel optional-panel" open>
-              <summary>
-                <span class="step-index optional">+</span>
-                <span>
-                  <strong>AdsPower 状态写入</strong>
-                  <small>当前默认 waived，不影响完成判定</small>
-                </span>
-              </summary>
-              <div class="form-grid one">
-                <label class="field">
-                  <span>Mode</span>
-                  <select id="adspowerStatusMode">
-                    <option value="disabled">Disabled - 记录 waived</option>
-                    <option value="group_move">Move group - 移动分组</option>
-                    <option value="remark_append">Append remark - 追加状态备注</option>
-                    <option value="remark_append_v2">Append remark V2 - 新版备注接口</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>Success group ID or name:xxx</span>
-                  <input id="adspowerSuccessGroupId" type="text" />
-                </label>
-                <label class="field">
-                  <span>Failure group ID or name:xxx</span>
-                  <input id="adspowerFailureGroupId" type="text" />
-                </label>
-                <label class="field">
-                  <span>Blocker group ID or name:xxx</span>
-                  <input id="adspowerBlockerGroupId" type="text" />
-                </label>
-              </div>
-              <div class="action-row">
-                <button id="adspowerDiscoverTargetsBtn" type="button">Discover groups</button>
-                <button id="adspowerUseDiscoveredTargetsBtn" type="button" disabled>Use discovered targets</button>
-              </div>
-              <div id="adspowerTargetsSummary" class="summary muted">未读取 AdsPower 分组。</div>
-            </details>
-
-            <section class="execute-bar" aria-label="Dry-run 和启动执行">
-              <div>
-                  <strong id="confirmationState" role="status" aria-live="polite">未生成执行确认</strong>
-                  <div id="dryRunSummary" class="muted" role="status" aria-live="polite">先选择来源并执行 dry-run。</div>
-              </div>
-              <label class="confirm-line">
-                <input id="confirmLive" type="checkbox" disabled />
-                <span id="confirmLiveText">我确认 dry-run 明细和金额规则无误。</span>
-              </label>
-              <div class="action-row">
-                <button id="dryRunBtn" type="button">Dry-run</button>
-                <button id="liveRunBtn" class="primary danger-action" type="button" disabled>启动执行</button>
-              </div>
-            </section>
           </aside>
 
           <section class="review-stack" aria-label="执行审查">
@@ -243,7 +195,7 @@
               <div class="section-head">
                 <div>
                   <h2>待充值清单</h2>
-                  <p id="opomPreviewMeta" class="muted">Ready to recharge 后显示。</p>
+                  <p id="opomPreviewMeta" class="muted">Load OPOM group 或上传 CSV 后显示。</p>
                 </div>
               </div>
               <div class="table-wrap preview-table">
@@ -267,60 +219,21 @@
               </div>
             </section>
 
-            <section class="panel dry-run-panel">
-              <div class="section-head">
-                <div>
-                  <h2>Dry-run 明细</h2>
-                  <p class="muted">只允许 ready 行进入执行。</p>
-                </div>
+            <section class="execute-bar" aria-label="预检和启动执行">
+              <div>
+                  <strong id="confirmationState" role="status" aria-live="polite">等待执行确认</strong>
+                  <div id="dryRunSummary" class="muted" role="status" aria-live="polite">选择来源、完成匹配和分配卡后，启动执行前会自动预检。</div>
               </div>
-              <div class="table-wrap dryrun-table">
-                <table>
-                  <caption>Dry-run 明细</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">行</th>
-                      <th scope="col">Profile</th>
-                      <th scope="col">账号</th>
-                      <th scope="col">状态</th>
-                      <th scope="col">执行范围</th>
-                      <th scope="col">充值规则</th>
-                      <th scope="col">Auto top-up</th>
-                      <th scope="col">缺失/消息</th>
-                    </tr>
-                  </thead>
-                  <tbody id="dryRunBody"></tbody>
-                </table>
+              <label class="confirm-line">
+                <input id="confirmLive" type="checkbox" disabled />
+                <span id="confirmLiveText">我确认待充值清单和金额规则无误，允许启动前自动预检并执行。</span>
+              </label>
+              <div class="action-row">
+                <button id="liveRunBtn" class="primary danger-action" type="button" disabled>启动执行</button>
               </div>
             </section>
-          </section>
-        </section>
 
-        <section id="jobsSection" class="panel jobs-panel">
-          <div class="section-head">
-            <div>
-              <h2>任务记录</h2>
-              <p class="muted">点击任务行查看结果和事件。</p>
-            </div>
-            <button id="refreshBtn" type="button">刷新</button>
-          </div>
-          <div class="table-wrap">
-                <table>
-                  <caption>任务记录</caption>
-                  <thead>
-                    <tr>
-                  <th scope="col">任务</th>
-                  <th scope="col">状态</th>
-                  <th scope="col">总数</th>
-                  <th scope="col">完成</th>
-                  <th scope="col">失败</th>
-                  <th scope="col">阻塞</th>
-                  <th scope="col">创建时间</th>
-                </tr>
-              </thead>
-              <tbody id="jobsBody"></tbody>
-            </table>
-          </div>
+          </section>
         </section>
 
         <section class="panel detail">
@@ -358,6 +271,40 @@
           <div class="events-wrap">
             <h3>事件流水</h3>
             <div id="eventsBody" class="events muted">选择任务后显示最近事件。</div>
+          </div>
+        </section>
+
+        <section id="jobsSection" class="panel jobs-panel">
+          <div class="section-head">
+            <div>
+              <h2>任务记录</h2>
+              <p class="muted">点击任务行查看结果和事件。</p>
+            </div>
+            <div class="action-row">
+              <button id="refreshBtn" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+                <table>
+                  <caption>任务记录</caption>
+                  <thead>
+                    <tr>
+                  <th scope="col">任务</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">总数</th>
+                  <th scope="col">完成</th>
+                  <th scope="col">失败</th>
+                  <th scope="col">阻塞</th>
+                  <th scope="col">创建时间</th>
+                </tr>
+              </thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+          <div class="pagination" aria-label="任务记录分页">
+            <button id="jobsPrevPageBtn" type="button">上一页</button>
+            <span id="jobsPageInfo" class="muted" role="status" aria-live="polite">第 1 / 1 页</span>
+            <button id="jobsNextPageBtn" type="button">下一页</button>
           </div>
         </section>
       </main>

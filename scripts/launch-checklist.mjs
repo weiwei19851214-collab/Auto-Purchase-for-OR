@@ -25,7 +25,7 @@ const checklist = {
   rechargeRepo: ROOT_DIR,
   opomRepo,
   requiredCommands: [
-    'npm run verify:integration -- --base http://127.0.0.1:4174',
+    'npm run verify:integration -- --base http://127.0.0.1:4100',
     'npm run preflight:production -- --with-opom-read --marker-file ./var/production-preflight-marker.json',
     'npm run audit:completion -- --preflight-marker ./var/production-preflight-marker.json',
   ],
@@ -40,7 +40,7 @@ const checklist = {
   ],
   firstOperationalSequence: [
     'Ops prepares AdsPower profiles and OPOM group=recharge',
-    'Ready to recharge pulls OPOM queue',
+    'Load OPOM group pulls OPOM queue',
     'Operator reviews pending rows and OPOM health',
     'Match AdsPower validates unique profile and identity',
     'Operator enters amount/rules and optional billing mapping CSV',

@@ -19,7 +19,7 @@
 ## User Stories
 
 1. As an operator, I want to upload a recharge CSV, so that I can start from the same template already used by the current skill.
-2. As an operator, I want to run dry-run before live execution, so that missing fields are found without opening browsers.
+2. As an operator, I want live execution to run an automatic preflight first, so that missing fields are found without opening browsers.
 3. As an operator, I want to see per-row validation results, so that I know which profiles are ready and which need data fixes.
 4. As an operator, I want to start a live batch only after dry-run, so that real payment actions are intentional.
 5. As an operator, I want the system to process one AdsPower profile at a time, so that browser state stays stable.

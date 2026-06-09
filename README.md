@@ -9,7 +9,8 @@ not a SaaS service and does not use an LLM during production execution.
 
 ## Features
 
-- Upload CSV and run dry-run validation before any browser automation.
+- Upload CSV or pull OPOM rows, then run automatic preflight before any browser
+  automation starts.
 - Pull OPOM `recharge` group accounts into a canonical local CSV through a
   machine API.
 - Match OPOM accounts to AdsPower profiles through the AdsPower Local API
@@ -32,11 +33,11 @@ not a SaaS service and does not use an LLM during production execution.
 
 - The API server binds to `127.0.0.1`.
 - All API calls require a local session token after page load.
-- Execution requires dry-run confirmation tied to the exact CSV, options, and
-  purchase submission mode.
+- Execution requires an automatic preflight confirmation tied to the exact CSV,
+  options, and purchase submission mode.
 - No-purchase mode fills the purchase form but does not submit payment.
-- Switching between no-purchase and Live Run invalidates the prior dry-run
-  confirmation and requires a new dry-run.
+- Switching between no-purchase and Live Run invalidates the prior preflight
+  confirmation; the next execution attempt runs preflight again.
 - CVV, cookies, sessions, passwords, API keys, and raw browser
   storage must not be committed or shown in logs/results.
 - Runtime files under `data/` are ignored except `.gitkeep` placeholders.
@@ -56,7 +57,7 @@ npm start
 Then open:
 
 ```text
-http://127.0.0.1:4173
+http://127.0.0.1:4100
 ```
 
 ## CSV Template
@@ -108,15 +109,15 @@ export OPOM_BASE_URL="https://opom.example.internal"
 export OPOM_RECHARGE_TOKEN="..."
 ```
 
-The local console `Ready to recharge` button calls OPOM
+The local console `Load OPOM group` button calls OPOM
 `/api/v1/recharge/accounts` for `group=recharge`, converts the response into a
-canonical CSV, and reuses the existing dry-run/live confirmation flow. A live
-job writes OPOM only when job options include `opomWriteback`; ordinary CSV jobs
-remain local-only.
+canonical CSV, and reuses the existing automatic preflight/live confirmation
+flow. A live job writes OPOM only when job options include `opomWriteback`;
+ordinary CSV jobs remain local-only.
 
 For rows carrying `opom_account_id`, confirmed purchase mode requires
-`opomWriteback=true` before dry-run will mark the row ready. No-purchase mode can
-still be used for local validation, but a real OPOM-sourced recharge is not
+`opomWriteback=true` before preflight will mark the row ready. No-purchase mode
+can still be used for local validation, but a real OPOM-sourced recharge is not
 allowed to reach `completed` without OPOM card/result writeback.
 OPOM card binding writeback requires an EJH `order_no`, card number, and card
 expiration (`exp_month`/`exp_year` or equivalent allocation output); rows
@@ -125,11 +126,11 @@ missing those fields fail before any OPOM write request is sent.
 The OPOM queue excludes accounts blocked by Credits 401 from executable
 `needs_recharge` and `failed_retryable` queues. `status=all` can still display
 them with `opom_health_status` and `opom_health_reason` for operator review.
-If OPOM returns a `nextCursor`, use `Load more` to append the next queue page;
+If OPOM returns a `nextCursor`, use `Load next page` to append the next queue page;
 the operator console keeps `opom_health_status` and `opom_health_reason` in the
 regenerated canonical CSV after AdsPower matching and card allocation.
 
-Before clicking `Ready to recharge`, the operator can enter this run's recharge
+Before clicking `Load OPOM group`, the operator can enter this run's recharge
 defaults:
 
 - fixed `amount`, or the balance-rule set
@@ -145,7 +146,7 @@ acct_1,user@example.com,Example User,US,97001,1 Main St,Portland,OR
 ```
 
 Rows match by `opom_account_id` first, then `login_email`. Mapping values
-override the default billing address before dry-run validation.
+override the default billing address before preflight validation.
 
 ## EJH Card Creation
 
@@ -250,10 +251,11 @@ duplicate column names.
 Stable handoff columns include:
 
 ```csv
-run_id,row_number,opom_account_id,profile_id,ads_power_user_id,ads_power_serial_number,username_masked,login_email_masked,opom_health_status,opom_health_reason,ejh_order_no,task_status,task_message,purchase_status,purchase_amount,balance_before,balance_after,card_last4,auto_topup_status,auto_topup_threshold,auto_topup_amount,opom_card_writeback_status,opom_result_writeback_status,adspower_tag_status,adspower_status_mode,adspower_status_target,adspower_status_reason,completion_evidence_status,completion_evidence_missing
+run_id,row_number,opom_account_id,profile_id,ads_power_user_id,ads_power_serial_number,username,login_email,opom_health_status,opom_health_reason,ejh_order_no,cardno,task_status,task_message,purchase_status,purchase_amount,balance_before,balance_after,card_last4,auto_topup_status,auto_topup_threshold,auto_topup_amount,opom_card_writeback_status,opom_result_writeback_status,adspower_tag_status,adspower_status_mode,adspower_status_target,adspower_status_reason,completion_evidence_status,completion_evidence_missing
 ```
 
-The result CSV must not contain CVV, cookies, sessions,
+The result CSV may contain the full short-lived card number in `cardno` for
+offline reconciliation. It must not contain CVV, cookies, sessions,
 OpenRouter keys, or raw EJH diagnostic payloads. Formula-like cells beginning
 with `=`, `+`, `-`, or `@` are prefixed with `'` before CSV export so spreadsheet
 imports do not evaluate operator-controlled text as formulas.
@@ -275,8 +277,8 @@ npm run smoke:feishu
 ```
 
 The smoke test generates a temporary result CSV with formula-like source values,
-then verifies unique headers, stable handoff columns, masked account data,
-last4-only card output, completion evidence, and no sensitive source columns.
+then verifies unique headers, stable handoff columns, account data, full
+`cardno` output, completion evidence, and no CVV or raw diagnostic columns.
 
 To scan user-facing docs/templates and production scripts for accidental card,
 CVV, token, OpenRouter key, or raw EJH diagnostic literals:
@@ -407,34 +409,35 @@ To smoke-test a running local operator console without touching external
 systems, start the server and run:
 
 ```bash
-npm run smoke:local -- --base http://127.0.0.1:4174
+npm run smoke:local -- --base http://127.0.0.1:4100
 ```
 
 The smoke test checks `/api/health`, local session auth, `/api/preflight`,
-dry-run behavior, an all-blocked job, and the downloadable result CSV. It uses a
+preflight behavior, an all-blocked job, and the downloadable result CSV. It uses a
 missing-amount row so no browser automation, OPOM writeback, EJH card creation,
 or AdsPower status write can run.
 
 To check the operator console selector contract and required controls:
 
 ```bash
-npm run smoke:ui -- --base http://127.0.0.1:4174
-npm run smoke:ui:opom-flow -- --base http://127.0.0.1:4174
-npm run smoke:ui:identity-mismatch -- --base http://127.0.0.1:4174
+npm run smoke:ui -- --base http://127.0.0.1:4100
+npm run smoke:ui:opom-flow -- --base http://127.0.0.1:4100
+npm run smoke:ui:identity-mismatch -- --base http://127.0.0.1:4100
 ```
 
 This verifies that the served HTML, JS, and CSS are reachable, every
 `document.querySelector('#...')` target used by `app.js` exists in the page, and
-the OPOM, AdsPower, EJH card allocation, dry-run/live execution, and result CSV
-controls are present. The OPOM browser smokes also exercise the happy-path
-`Ready to recharge -> Match AdsPower -> Allocate cards -> dry-run` flow and the
-`identity_mismatch` path where dry-run must block live execution.
+the OPOM, AdsPower, EJH card allocation, automatic preflight/live execution, and
+result CSV controls are present. The OPOM browser smokes also exercise the
+happy-path `Load OPOM group -> Match AdsPower -> Allocate cards -> automatic
+preflight` flow and the `identity_mismatch` path where preflight must block live
+execution.
 
 For a complete local integration gate across Recharge and OPOM, keep the local
 Recharge server running and execute:
 
 ```bash
-npm run verify:integration -- --base http://127.0.0.1:4174
+npm run verify:integration -- --base http://127.0.0.1:4100
 ```
 
 This command runs the Recharge API/UI smoke tests, Recharge syntax checks and

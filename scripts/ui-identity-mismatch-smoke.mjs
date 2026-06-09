@@ -1,12 +1,17 @@
 #!/usr/bin/env node
-import {existsSync} from 'node:fs';
+import {existsSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {redact} from '../src/server/redact.mjs';
 
 const DEFAULT_PLAYWRIGHT_PATH = '/Users/weiwei/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
+const ADDRESS_CSV = `LastName,FirstName,Street,City,State,Zip,PhoneNumber
+Ignored,Mismatch,1 Main St,Portland,OR,97001,5551112222
+`;
 
 const args = parseArgs(process.argv.slice(2));
-const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4174');
+const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
 
 function add(label, ok, status = '') {
@@ -14,11 +19,16 @@ function add(label, ok, status = '') {
 }
 
 let browser;
+let tempDir = '';
 
 try {
   const playwright = await loadPlaywright();
   const chromium = playwright.chromium || playwright.default?.chromium;
   if (!chromium) throw new Error('Loaded Playwright package does not expose chromium');
+
+  tempDir = mkdtempSync(join(tmpdir(), 'recharge-identity-smoke-'));
+  const addressCsvPath = join(tempDir, 'addresses.csv');
+  writeFileSync(addressCsvPath, ADDRESS_CSV, 'utf8');
 
   browser = await chromium.launch({headless: true});
   const page = await browser.newPage({viewport: {width: 1440, height: 1200}});
@@ -92,25 +102,26 @@ try {
   });
 
   await page.goto(baseUrl, {waitUntil: 'networkidle'});
+  await page.setInputFiles('#addressMappingCsv', addressCsvPath);
   await page.click('#opomReadyBtn');
   await page.waitForFunction(() => /rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Ready to recharge renders mismatch candidate', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
+  add('Load OPOM group renders mismatch candidate', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
 
   await page.click('#adsPowerMatchBtn');
   await page.waitForFunction(() => /failed=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
   const previewText = await page.locator('#opomPreviewBody').textContent();
   add('AdsPower mismatch is visible in preview', /identity_mismatch/.test(previewText || ''), redact(previewText || 'missing'));
 
-  await page.click('#dryRunBtn');
+  await page.check('#confirmLive');
+  await page.click('#liveRunBtn');
   await page.waitForFunction(() => {
     const summary = document.querySelector('#dryRunSummary')?.textContent || '';
     return /ready\s*[:=]\s*0/.test(summary) && /blocked\s*[:=]\s*1/.test(summary);
   });
   const dryRunSummary = await page.locator('#dryRunSummary').textContent();
-  const dryRunRows = await page.locator('#dryRunBody').textContent();
-  add('identity_mismatch row is blocked by dry-run', /ready\s*[:=]\s*0/.test(dryRunSummary || '') && /blocked\s*[:=]\s*1/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('dry-run explains AdsPower mismatch', /ads_match_status:identity_mismatch/.test(dryRunRows || ''), redact(dryRunRows || 'missing'));
-  add('live confirmation disabled for mismatch', await page.locator('#confirmLive').isDisabled(), 'disabled');
+  add('identity_mismatch row is blocked by auto preflight', /ready\s*[:=]\s*0/.test(dryRunSummary || '') && /blocked\s*[:=]\s*1/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
+  add('preview explains AdsPower mismatch', /identity_mismatch/.test(previewText || ''), redact(previewText || 'missing'));
+  add('live confirmation reset for mismatch', !(await page.locator('#confirmLive').isChecked()), 'unchecked');
   add('live run button disabled for mismatch', await page.locator('#liveRunBtn').isDisabled(), 'disabled');
 
   const bodyText = await page.locator('body').textContent();
@@ -121,6 +132,7 @@ try {
   add('ui identity mismatch smoke exception', false, redact(error.message || 'unknown error'));
 } finally {
   if (browser) await browser.close();
+  if (tempDir) rmSync(tempDir, {recursive: true, force: true});
 }
 
 const failed = checks.filter((check) => !check.ok);
@@ -181,5 +193,5 @@ function normalizeBase(value) {
 }
 
 function containsSensitive(value) {
-  return /5257970000000001|expected@example\.com|,456,|cvv|card_no/i.test(String(value || ''));
+  return /,456,|cvv/i.test(String(value || ''));
 }

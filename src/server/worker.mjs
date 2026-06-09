@@ -148,7 +148,9 @@ export class JobWorker {
     this.db.prepare(`
       UPDATE job_rows
       SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
-        balance_before = ?, balance_after = ?, card_last4 = COALESCE(NULLIF(?, ''), card_last4),
+        balance_before = ?, balance_after = ?,
+        card_no = COALESCE(NULLIF(?, ''), card_no),
+        card_last4 = COALESCE(NULLIF(?, ''), card_last4),
         auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
         opom_card_writeback_status = COALESCE(NULLIF(?, ''), opom_card_writeback_status),
         opom_result_writeback_status = COALESCE(NULLIF(?, ''), opom_result_writeback_status),
@@ -166,6 +168,7 @@ export class JobWorker {
       result.details?.purchaseAmount || '',
       String(result.details?.balanceBefore ?? ''),
       String(result.details?.balanceAfter ?? ''),
+      result.details?.cardNo || '',
       result.details?.cardLast4 || '',
       result.details?.autoTopupStatus || '',
       result.details?.autoTopupThreshold || '',
@@ -277,7 +280,7 @@ export class JobWorker {
       message: contract.message || redact(error?.message || 'row execution failed'),
       details: {
         cardLast4: row.card_last4 || '',
-        cardNoLast4: row.card_last4 || '',
+        cardNo: row.card_no || '',
         opomAccountId: row.opom_account_id || '',
         username: row.username_masked || row.login_email_masked || '',
         loginEmail: row.login_email_masked || row.username_masked || '',
@@ -357,7 +360,7 @@ export class JobWorker {
           balanceBefore: row.balance_before,
           balanceAfter: row.balance_after,
           cardLast4: row.card_last4,
-          cardNoLast4: row.card_last4,
+          cardNo: row.card_no,
           autoTopupStatus: row.auto_topup_status,
           autoTopupThreshold: row.auto_topup_threshold,
           autoTopupAmount: row.auto_topup_amount,

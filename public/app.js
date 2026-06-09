@@ -10,6 +10,9 @@ let loadSequence = 0;
 let sessionToken = '';
 let sessionConfig = {};
 let lastAdsPowerTargets = null;
+let jobsPage = 1;
+let lastJobs = [];
+const JOBS_PAGE_SIZE = 10;
 
 const els = {
   file: document.querySelector('#csvFile'),
@@ -34,13 +37,15 @@ const els = {
   ejhCardholder: document.querySelector('#ejhCardholder'),
   ejhSafeCsv: document.querySelector('#ejhSafeCsv'),
   opomSummary: document.querySelector('#opomSummary'),
-  dryRun: document.querySelector('#dryRunBtn'),
   liveRun: document.querySelector('#liveRunBtn'),
   refresh: document.querySelector('#refreshBtn'),
   dryRunSummary: document.querySelector('#dryRunSummary'),
   opomPreviewMeta: document.querySelector('#opomPreviewMeta'),
   opomPreviewBody: document.querySelector('#opomPreviewBody'),
   jobsBody: document.querySelector('#jobsBody'),
+  jobsPrevPage: document.querySelector('#jobsPrevPageBtn'),
+  jobsNextPage: document.querySelector('#jobsNextPageBtn'),
+  jobsPageInfo: document.querySelector('#jobsPageInfo'),
   rowsBody: document.querySelector('#rowsBody'),
   eventsBody: document.querySelector('#eventsBody'),
   worker: document.querySelector('#worker'),
@@ -61,7 +66,6 @@ const els = {
   scopePaymentMethod: document.querySelector('#scopePaymentMethod'),
   scopePurchase: document.querySelector('#scopePurchase'),
   scopeAutoTopup: document.querySelector('#scopeAutoTopup'),
-  dryRunBody: document.querySelector('#dryRunBody'),
   confirmLive: document.querySelector('#confirmLive'),
   confirmLiveText: document.querySelector('#confirmLiveText'),
   confirmationState: document.querySelector('#confirmationState'),
@@ -69,9 +73,9 @@ const els = {
   alert: document.querySelector('#alert'),
   statQueue: document.querySelector('#statQueue'),
   statMatch: document.querySelector('#statMatch'),
+  statBilling: document.querySelector('#statBilling'),
   statCards: document.querySelector('#statCards'),
   statDryRun: document.querySelector('#statDryRun'),
-  statMode: document.querySelector('#statMode'),
 };
 
 const CANONICAL_HEADER = [
@@ -142,10 +146,10 @@ function optionsPayload() {
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
     autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
     opomWriteback: els.opomWriteback.checked && !els.opomWriteback.disabled,
-    adspowerStatusMode: els.adspowerStatusMode.value,
-    adspowerSuccessGroupId: els.adspowerSuccessGroupId.value.trim(),
-    adspowerFailureGroupId: els.adspowerFailureGroupId.value.trim(),
-    adspowerBlockerGroupId: els.adspowerBlockerGroupId.value.trim(),
+    adspowerStatusMode: els.adspowerStatusMode?.value || 'disabled',
+    adspowerSuccessGroupId: els.adspowerSuccessGroupId?.value.trim() || '',
+    adspowerFailureGroupId: els.adspowerFailureGroupId?.value.trim() || '',
+    adspowerBlockerGroupId: els.adspowerBlockerGroupId?.value.trim() || '',
   };
 }
 
@@ -163,7 +167,7 @@ function executionMode() {
     return {
       label: '非充值执行',
       button: '启动执行',
-      confirm: '我确认 dry-run 明细无误，允许执行所选非充值步骤。',
+      confirm: '我确认待执行清单无误，允许启动前自动预检并执行所选非充值步骤。',
       requireText: '请先勾选执行确认',
       action: '即将启动所选非充值步骤',
     };
@@ -172,7 +176,7 @@ function executionMode() {
     return {
       label: 'No-purchase 测试',
       button: '启动 No-purchase Run',
-      confirm: '我确认 dry-run 明细和金额规则无误，允许执行 no-purchase 测试；不会点击 Purchase。',
+      confirm: '我确认待充值清单和金额规则无误，允许启动前自动预检并执行 no-purchase 测试；不会点击 Purchase。',
       requireText: '请先勾选 no-purchase 执行确认',
       action: '即将启动 no-purchase 测试；不会点击 Purchase',
     };
@@ -180,7 +184,7 @@ function executionMode() {
   return {
     label: 'Live Run',
     button: '启动 Live Run',
-    confirm: '我确认 dry-run 明细和金额规则无误，允许执行真实充值闭环。',
+    confirm: '我确认待充值清单和金额规则无误，允许启动前自动预检并执行真实充值闭环。',
     requireText: '请先勾选真实充值确认',
     action: '即将启动真实充值 Live Run',
   };
@@ -190,21 +194,32 @@ function syncExecutionCopy() {
   const mode = executionMode();
   els.liveRun.textContent = mode.button;
   els.confirmLiveText.textContent = mode.confirm;
-  if (els.statMode) els.statMode.textContent = mode.label;
 }
 
 function updateRunStats() {
   if (!els.statQueue) return;
   const total = opomRows.length;
   const matched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
+  const billing = opomRows.filter((row) => isAddressReady(row)).length;
   const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
   els.statQueue.textContent = total ? `${total} 行` : (selectedFile ? 'CSV' : '未拉取');
   els.statMatch.textContent = total ? `${matched}/${total}` : '0/0';
+  els.statBilling.textContent = total ? `${billing}/${total}` : '0/0';
   els.statCards.textContent = total ? `${cards}/${total}` : '0/0';
   els.statDryRun.textContent = lastDryRun
     ? `${lastDryRun.ready || 0} ready / ${lastDryRun.blocked || 0} blocked`
     : '未执行';
-  els.statMode.textContent = executionMode().label;
+}
+
+function canAttemptExecution() {
+  return Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0;
+}
+
+function syncExecutionAvailability() {
+  const canAttempt = canAttemptExecution();
+  els.confirmLive.disabled = !canAttempt;
+  if (!canAttempt) els.confirmLive.checked = false;
+  els.liveRun.disabled = !canAttempt || !els.confirmLive.checked;
 }
 
 function syncScopeControls() {
@@ -223,15 +238,13 @@ function currentSignature() {
   });
 }
 
-function invalidateDryRun(reason = '选项已变化，请重新 dry-run。') {
+function invalidateDryRun(reason = '选项已变化，启动执行时会重新预检。') {
   lastDryRun = null;
   dryRunSignature = '';
   liveConfirmationToken = '';
   syncExecutionCopy();
-  els.liveRun.disabled = true;
-  els.confirmLive.checked = false;
-  els.confirmLive.disabled = true;
   els.confirmationState.textContent = reason;
+  syncExecutionAvailability();
   updateRunStats();
 }
 
@@ -342,9 +355,28 @@ function canonicalCsvFromRows(rows) {
 
 function sanitizeMessage(value) {
   return String(value || '')
-    .replace(/\b\d{13,19}\b/g, (digits) => `${digits.slice(0, 2)}***${digits.slice(-4)}`)
     .replace(/\b\d{3,4}\b/g, (digits) => (digits.length <= 4 ? '***' : digits))
     .replace(/([A-Z0-9._%+-]{2})[A-Z0-9._%+-]*(@[A-Z0-9.-]+\.[A-Z]{2,})/gi, '$1***$2');
+}
+
+function formatChinaTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} UTC+8`;
 }
 
 function formatDuration(ms) {
@@ -359,8 +391,10 @@ function maskEmail(value) {
 }
 
 function cardNoLabel(row = {}) {
-  const last4 = row.cardLast4 || row.cardNoLast4 || String(row.card_no || '').replace(/\D/g, '').slice(-4);
-  return [row.ejhOrderNo || row.order_no || '', last4 ? `card ****${last4}` : ''].filter(Boolean).join(' / ');
+  const cardNo = row.cardNo || row.cardno || row.card_no || row.card_number || '';
+  const last4 = row.cardLast4 || String(cardNo).replace(/\D/g, '').slice(-4);
+  const cardLabel = cardNo ? `card ${cardNo}` : (last4 ? `card ****${last4}` : '');
+  return [row.ejhOrderNo || row.order_no || '', cardLabel].filter(Boolean).join(' / ');
 }
 
 function purchaseRuleLabel(row) {
@@ -387,9 +421,13 @@ function opomHealthBadge(row) {
   return `${statusBadge(badgeState)}${reason ? ` <span class="muted">${escapeHtml(reason)}</span>` : ''}`;
 }
 
+function isAddressReady(row) {
+  return ADDRESS_FIELDS.every((field) => String(row[field] || '').trim());
+}
+
 function renderOpomPreview(stage = '') {
   if (!opomRows.length) {
-    els.opomPreviewMeta.textContent = 'Ready to recharge 后显示。';
+    els.opomPreviewMeta.textContent = 'Load OPOM group 或上传 CSV 后显示。';
     els.opomPreviewBody.innerHTML = '';
     updateRunStats();
     return;
@@ -400,7 +438,7 @@ function renderOpomPreview(stage = '') {
   els.opomPreviewBody.innerHTML = opomRows.map((row) => {
     const adspower = row.ads_power_serial_number || row.ads_power_user_id || '';
     const matchStatus = row.ads_match_status || (adspower ? 'not_verified' : 'missing');
-    const addressReady = row.holder_name && row.country && row.postal_code && row.address_line1 && row.city && row.state;
+    const addressReady = isAddressReady(row);
     const cardReady = row.order_no && row.card_no && row.exp_month && row.exp_year && row.cvv;
     return `
       <tr>
@@ -434,6 +472,11 @@ async function addressCsvTextRequired() {
   const file = els.addressMappingCsv.files?.[0] || null;
   if (!file) throw new Error('请先上传 Billing address CSV');
   return file.text();
+}
+
+async function optionalAddressCsvText() {
+  const file = els.addressMappingCsv.files?.[0] || null;
+  return file ? file.text() : '';
 }
 
 const ADDRESS_FIELDS = ['postal_code', 'holder_name', 'country', 'address_line1', 'city', 'state'];
@@ -626,7 +669,7 @@ async function loadOpomPage({append = false} = {}) {
   const rawLimit = Number(els.opomLimit.value || 100);
   const limit = Math.min(200, Math.max(1, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 100));
   els.opomLimit.value = String(limit);
-  const addressCsvText = await addressCsvTextRequired();
+  const addressCsvText = await optionalAddressCsvText();
   const data = await api('/api/opom/ready', {
     method: 'POST',
     body: JSON.stringify({
@@ -649,8 +692,7 @@ async function loadOpomPage({append = false} = {}) {
     : `已从 OPOM 拉取 ${data.count || 0} 行，请先执行 AdsPower 匹配。`);
   els.file.value = '';
   els.opomSummary.textContent = `group=${group} status=${status} rows=${opomRows.length} pageRows=${incomingRows.length} addressMaps=${data.addressMappingCount || 0}${opomNextCursor ? ' hasMore=true' : ''}`;
-  els.dryRunSummary.textContent = `已生成 ${selectedFile.name}，请先 Match AdsPower 后再 dry-run。`;
-  els.dryRunBody.innerHTML = '';
+  els.dryRunSummary.textContent = `已生成 ${selectedFile.name}，请先 Match AdsPower；启动执行时会自动预检。`;
   syncOpomPagination();
 }
 
@@ -691,7 +733,7 @@ async function matchAdsPower() {
   }
   selectedCsvText = canonicalCsvFromRows(opomRows);
   renderOpomPreview('adspower_match');
-  invalidateDryRun(`AdsPower 匹配完成：matched=${data.matched || 0}, failed=${data.failed || 0}。请重新 dry-run。`);
+  invalidateDryRun(`AdsPower 匹配完成：matched=${data.matched || 0}, failed=${data.failed || 0}。启动执行时会自动预检。`);
   const opomResolveText = opomResolved
     ? ` OPOM resolved=${opomResolved.matched || 0}/${opomResolved.total || 0}`
     : '';
@@ -726,6 +768,7 @@ function renderAdsPowerTargets(data) {
     candidateLine('blocker'),
   ];
   if (data.suggestedEnv?.length) lines.push(`suggested: ${data.suggestedEnv.join(' | ')}`);
+  if (!els.adspowerTargetsSummary || !els.adspowerUseDiscoveredTargets || !els.adspowerStatusMode) return;
   els.adspowerTargetsSummary.innerHTML = lines.map((line) => escapeHtml(line)).join('<br>');
   els.adspowerTargetsSummary.classList.toggle('danger', !data.ok);
   els.adspowerUseDiscoveredTargets.disabled = els.adspowerStatusMode.value !== 'group_move'
@@ -738,6 +781,9 @@ function discoveredTargetValue(data, role) {
 }
 
 async function useDiscoveredAdsPowerTargets() {
+  if (!els.adspowerStatusMode || !els.adspowerSuccessGroupId || !els.adspowerFailureGroupId || !els.adspowerBlockerGroupId) {
+    throw new Error('AdsPower 状态写入界面已隐藏');
+  }
   if (els.adspowerStatusMode.value !== 'group_move') {
     throw new Error('Use discovered targets 仅适用于 group_move 模式');
   }
@@ -755,7 +801,7 @@ async function useDiscoveredAdsPowerTargets() {
     filled += 1;
   }
   if (!filled) throw new Error('没有可采用的 AdsPower 分组目标');
-  invalidateDryRun(`已填入 ${filled} 个 AdsPower group_move 目标，请重新 dry-run。`);
+  invalidateDryRun(`已填入 ${filled} 个 AdsPower group_move 目标，启动执行时会自动预检。`);
   renderAdsPowerTargets(lastAdsPowerTargets);
 }
 
@@ -794,7 +840,7 @@ async function allocateCards({createCards = false} = {}) {
   selectedCsvText = data.csvText || canonicalCsvFromRows(opomRows);
   renderOpomPreview('card_allocated');
   if (!selectedFile) selectedFile = {name: 'opom-recharge.csv'};
-  invalidateDryRun(`已分配卡 ${data.summary?.allocated || 0} 张，请重新 dry-run。`);
+  invalidateDryRun(`已分配卡 ${data.summary?.allocated || 0} 张，启动执行时会自动预检。`);
   const cardPath = data.cardCsvPath ? ` cardCsv=${data.cardCsvPath}` : '';
   els.opomSummary.textContent = `cards allocated=${data.summary?.allocated || 0} skipped=${data.summary?.skippedNotMatched || 0} rejected=${data.summary?.rejected || 0}${cardPath}`;
 }
@@ -823,8 +869,7 @@ async function readSelectedFile() {
   renderOpomPreview(file ? 'local_selector' : '');
   syncOpomPagination();
   invalidateDryRun(selectedFile ? `已从账号选择 CSV 载入 ${opomRows.length} 行，请先 Match AdsPower。` : '先选择账号选择 CSV，或从 OPOM 拉取。');
-  els.dryRunSummary.textContent = selectedFile ? `已生成 ${selectedFile.name} 的内部执行 CSV，请先 Match AdsPower。` : '先选择账号选择 CSV，或从 OPOM 拉取。';
-  els.dryRunBody.innerHTML = '';
+  els.dryRunSummary.textContent = selectedFile ? `已生成 ${selectedFile.name} 的内部执行 CSV，请先 Match AdsPower；启动执行时会自动预检。` : '先选择账号选择 CSV，或从 OPOM 拉取。';
   updateRunStats();
 }
 
@@ -839,7 +884,7 @@ async function withButtonBusy(button, label, task) {
     button.disabled = false;
     syncOpomPagination();
     if (button === els.liveRun) {
-      button.disabled = !els.confirmLive.checked || !lastDryRun || dryRunSignature !== currentSignature();
+      syncExecutionAvailability();
     }
   }
 }
@@ -869,21 +914,28 @@ async function runDryRun() {
     `blocked: ${lastDryRun.blocked}`,
     `skipped: ${lastDryRun.skipped}`,
   ].map(escapeHtml).join(' | ');
-  renderDryRunRows(lastDryRun.rows || []);
-  els.confirmLive.disabled = lastDryRun.ready < 1 || !liveConfirmationToken;
-  els.confirmLive.checked = false;
+  if (lastDryRun.ready < 1 || !liveConfirmationToken) {
+    els.confirmLive.checked = false;
+  }
   els.confirmationState.textContent = liveConfirmationToken
-    ? `确认 token 有效至 ${lastDryRun.liveConfirmationExpiresAt}`
+    ? `预检通过，确认 token 有效至 ${lastDryRun.liveConfirmationExpiresAt}`
     : '没有可执行行';
-  els.liveRun.disabled = true;
+  syncExecutionAvailability();
   updateRunStats();
 }
 
 async function createLiveJob() {
-  if (!lastDryRun) await runDryRun();
   if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
-  if (dryRunSignature !== currentSignature()) throw new Error('CSV 或选项已变化，请重新 dry-run');
   const mode = executionMode();
+  if (!els.confirmLive.checked) throw new Error(mode.requireText);
+  if (!lastDryRun || dryRunSignature !== currentSignature()) {
+    els.confirmationState.textContent = '正在自动预检...';
+    await runDryRun();
+  }
+  if (dryRunSignature !== currentSignature()) throw new Error('CSV 或选项已变化，请重新预检');
+  if (!lastDryRun || lastDryRun.ready < 1 || !liveConfirmationToken) {
+    throw new Error(`预检未通过：ready=${lastDryRun?.ready || 0} blocked=${lastDryRun?.blocked || 0}`);
+  }
   if (!els.confirmLive.checked) throw new Error(mode.requireText);
   const scopeText = selectedScopeLabels().join(' / ');
   const actionText = `${mode.action}，执行范围：${scopeText}。确认继续？`;
@@ -898,23 +950,9 @@ async function createLiveJob() {
     }),
   });
   selectedJobId = data.job.id;
+  jobsPage = 1;
   clearError();
   await refreshAll();
-}
-
-function renderDryRunRows(rows) {
-  els.dryRunBody.innerHTML = rows.map((row) => `
-    <tr>
-      <td>${row.rowNumber}</td>
-      <td>${escapeHtml(row.profileId)}</td>
-      <td>${escapeHtml(row.loginEmail || row.username)}</td>
-      <td>${statusBadge(row.status)}</td>
-      <td>${escapeHtml(row.executionScope || '')}</td>
-      <td>${escapeHtml(row.purchasePlan)} ${escapeHtml(row.amount || '')}</td>
-      <td>${escapeHtml(row.autoTopup?.threshold || '')}/${escapeHtml(row.autoTopup?.amount || '')}</td>
-      <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
-    </tr>
-  `).join('');
 }
 
 async function refreshAll() {
@@ -929,7 +967,12 @@ async function refreshAll() {
 }
 
 function renderJobs(jobs) {
-  els.jobsBody.innerHTML = jobs.map((job) => `
+  lastJobs = Array.isArray(jobs) ? jobs : [];
+  const totalPages = Math.max(1, Math.ceil(lastJobs.length / JOBS_PAGE_SIZE));
+  jobsPage = Math.min(Math.max(1, jobsPage), totalPages);
+  const start = (jobsPage - 1) * JOBS_PAGE_SIZE;
+  const pageJobs = lastJobs.slice(start, start + JOBS_PAGE_SIZE);
+  els.jobsBody.innerHTML = pageJobs.map((job) => `
     <tr data-job-id="${escapeHtml(job.id)}" class="${job.id === selectedJobId ? 'selected' : ''}" tabindex="0" role="button" aria-selected="${job.id === selectedJobId ? 'true' : 'false'}">
       <td>${escapeHtml(job.fileName)}<br><span class="muted">${escapeHtml(job.id)}</span></td>
       <td>${statusBadge(job.status)}</td>
@@ -937,9 +980,16 @@ function renderJobs(jobs) {
       <td>${job.completedRows}</td>
       <td>${job.failedRows}</td>
       <td>${job.blockedRows}</td>
-      <td>${escapeHtml(job.createdAt || '')}</td>
+      <td>${escapeHtml(formatChinaTime(job.createdAt))}</td>
     </tr>
   `).join('');
+  if (els.jobsPageInfo) {
+    const rangeStart = lastJobs.length ? start + 1 : 0;
+    const rangeEnd = Math.min(start + JOBS_PAGE_SIZE, lastJobs.length);
+    els.jobsPageInfo.textContent = `第 ${jobsPage} / ${totalPages} 页 · ${rangeStart}-${rangeEnd} / ${lastJobs.length}`;
+  }
+  if (els.jobsPrevPage) els.jobsPrevPage.disabled = jobsPage <= 1;
+  if (els.jobsNextPage) els.jobsNextPage.disabled = jobsPage >= totalPages;
   for (const row of els.jobsBody.querySelectorAll('tr[data-job-id]')) {
     const select = () => {
       selectedJobId = row.dataset.jobId;
@@ -953,6 +1003,11 @@ function renderJobs(jobs) {
       select();
     });
   }
+}
+
+function setJobsPage(page) {
+  jobsPage = page;
+  renderJobs(lastJobs);
 }
 
 async function loadJob(jobId) {
@@ -989,8 +1044,8 @@ function renderJobDetail(job, rows, events = []) {
       <td>${escapeHtml(row.purchaseAmount || row.amount || '')}</td>
       <td>${escapeHtml(row.balanceBefore)} → ${escapeHtml(row.balanceAfter)}</td>
       <td>${escapeHtml(row.autoTopupStatus)} ${escapeHtml(row.autoTopupThreshold)}/${escapeHtml(row.autoTopupAmount)}</td>
-      <td>${escapeHtml([cardNoLabel(row), row.adspowerTagStatus, row.adspowerStatusMode, row.adspowerStatusTarget].filter(Boolean).join(' / '))}</td>
-      <td>${escapeHtml(row.updatedAt || '')}</td>
+      <td>${escapeHtml(cardNoLabel(row))}</td>
+      <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
       <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
     </tr>
   `).join('');
@@ -1002,7 +1057,7 @@ function renderEvents(events) {
   els.eventsBody.innerHTML = recent.length
     ? recent.map((event) => `
       <div class="event-line">
-        <span>${escapeHtml(event.createdAt || '')}</span>
+        <span>${escapeHtml(formatChinaTime(event.createdAt))}</span>
         <strong>${escapeHtml(event.type || '')}</strong>
         <span>${escapeHtml(sanitizeMessage(event.message || ''))}</span>
       </div>
@@ -1061,24 +1116,24 @@ els.file.addEventListener('change', () => readSelectedFile().catch(showError));
 els.opomReady.addEventListener('click', () => withButtonBusy(els.opomReady, 'Loading...', loadOpomReady).catch(showError));
 els.opomLoadMore.addEventListener('click', () => withButtonBusy(els.opomLoadMore, 'Loading...', loadMoreOpomRows).catch(showError));
 els.adsPowerMatch.addEventListener('click', () => withButtonBusy(els.adsPowerMatch, 'Matching...', matchAdsPower).catch(showError));
-els.adspowerDiscoverTargets.addEventListener('click', () => withButtonBusy(els.adspowerDiscoverTargets, 'Discovering...', discoverAdsPowerStatusTargets).catch(showError));
-els.adspowerUseDiscoveredTargets.addEventListener('click', () => useDiscoveredAdsPowerTargets().catch(showError));
+els.adspowerDiscoverTargets?.addEventListener('click', () => withButtonBusy(els.adspowerDiscoverTargets, 'Discovering...', discoverAdsPowerStatusTargets).catch(showError));
+els.adspowerUseDiscoveredTargets?.addEventListener('click', () => useDiscoveredAdsPowerTargets().catch(showError));
 els.opomWriteback.addEventListener('change', () => invalidateDryRun());
 els.addressMappingCsv.addEventListener('change', () => {
   applyUploadedAddressCsvToRows()
-    .then(() => invalidateDryRun('Billing address CSV 已变化，请重新 dry-run。'))
+    .then(() => invalidateDryRun('Billing address CSV 已变化，启动执行时会重新预检。'))
     .catch(showError);
 });
 els.allocateCards.addEventListener('click', () => withButtonBusy(els.allocateCards, 'Allocating...', () => allocateCards()).catch(showError));
 els.createCards.addEventListener('click', () => withButtonBusy(els.createCards, 'Creating...', () => allocateCards({createCards: true})).catch(showError));
 els.removeExisting.addEventListener('change', () => invalidateDryRun());
 els.stopProfiles.addEventListener('change', () => invalidateDryRun());
-els.adspowerStatusMode.addEventListener('change', () => {
+els.adspowerStatusMode?.addEventListener('change', () => {
   els.adspowerUseDiscoveredTargets.disabled = true;
   invalidateDryRun();
 });
 for (const input of [els.adspowerSuccessGroupId, els.adspowerFailureGroupId, els.adspowerBlockerGroupId]) {
-  input.addEventListener('input', () => invalidateDryRun());
+  input?.addEventListener('input', () => invalidateDryRun());
 }
 for (const input of [
   els.defaultAmount,
@@ -1090,7 +1145,7 @@ for (const input of [
 ]) {
   input.addEventListener('input', () => {
     syncRowsWithCurrentDefaults();
-    invalidateDryRun('规则已变化，请重新 Match AdsPower 或 dry-run。');
+    invalidateDryRun('规则已变化，请重新 Match AdsPower；启动执行时会重新预检。');
   });
 }
 els.noPurchaseMode.addEventListener('change', () => {
@@ -1104,11 +1159,12 @@ for (const checkbox of [els.scopeBillingAddress, els.scopePaymentMethod, els.sco
   });
 }
 els.confirmLive.addEventListener('change', () => {
-  els.liveRun.disabled = !els.confirmLive.checked || !lastDryRun || dryRunSignature !== currentSignature();
+  syncExecutionAvailability();
 });
-els.dryRun.addEventListener('click', () => withButtonBusy(els.dryRun, 'Dry-running...', runDryRun).catch(showError));
 els.liveRun.addEventListener('click', () => withButtonBusy(els.liveRun, 'Starting...', createLiveJob).catch(showError));
 els.refresh.addEventListener('click', () => withButtonBusy(els.refresh, 'Refreshing...', refreshAll).catch(showError));
+els.jobsPrevPage?.addEventListener('click', () => setJobsPage(jobsPage - 1));
+els.jobsNextPage?.addEventListener('click', () => setJobsPage(jobsPage + 1));
 els.cancel.addEventListener('click', () => cancelSelectedJob().catch(showError));
 els.download.addEventListener('click', (event) => downloadSelectedResult(event).catch(showError));
 

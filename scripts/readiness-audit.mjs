@@ -17,14 +17,14 @@ try {
   addRequirement({
     id: '0-manual-prep',
     title: 'Ops prepares AdsPower and OPOM recharge group',
-    status: hasReadmeText(/group=recharge|Ready to recharge/i) ? 'pending_manual_ops' : 'fail',
+    status: hasReadmeText(/group=recharge|Load OPOM group/i) ? 'pending_manual_ops' : 'fail',
     evidence: ['README documents recharge group and operator flow'],
     next: 'Operator must move eligible OPOM accounts into group=recharge before live work.',
   });
 
   addRequirement({
     id: '1-opom-ready',
-    title: 'Ready to recharge pulls OPOM recharge accounts',
+    title: 'Load OPOM group pulls OPOM recharge accounts',
     status: all([
       hasFile('src/server/opom-client.mjs'),
       hasFile('src/server/opom-orchestrator.mjs'),
@@ -42,11 +42,11 @@ try {
     title: 'Recharge lists pending rows for operator confirmation',
     status: all([
       hasText('public/index.html', /opomPreviewBody/),
-      hasText('public/index.html', /dryRunBtn/),
       hasText('public/index.html', /liveRunBtn/),
+      hasText('public/index.html', /自动预检/),
       hasText('src/server/safety.mjs', /dry-run confirmation token/i),
     ]) ? 'ready' : 'fail',
-    evidence: ['Operator preview table', 'dry-run confirmation token gate'],
+    evidence: ['Operator preview table', 'automatic preflight token gate'],
   });
 
   addRequirement({
@@ -95,7 +95,7 @@ try {
       hasText('src/server/worker.mjs', /writeCurrentResult|recordAdsPowerStatus/),
     ]) ? 'ready' : 'fail',
     evidence: ['Closed-loop automation adapter', 'worker execution path'],
-    next: 'Live OpenRouter purchase requires explicit dry-run token and user authorization.',
+    next: 'Live OpenRouter purchase requires automatic preflight token and user authorization.',
   });
 
   addRequirement({

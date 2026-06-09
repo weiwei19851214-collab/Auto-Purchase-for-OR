@@ -18,7 +18,7 @@ const STABLE_COLUMNS = [
   'opom_health_status',
   'opom_health_reason',
   'ejh_order_no',
-  'card_no_last4',
+  'cardno',
   'task_status',
   'task_message',
   'purchase_status',
@@ -39,7 +39,7 @@ const STABLE_COLUMNS = [
   'completion_evidence_missing',
 ];
 
-const SENSITIVE_PATTERN = /5257970000000001|,456,|card_number|^card_no$|cvv|requestPayload|encryptedParam|rawResponse/im;
+const SENSITIVE_PATTERN = /,456,|card_number|^card_no$|cvv|requestPayload|encryptedParam|rawResponse/im;
 const FORMULA_PATTERN = /(?:^|,|\r?\n)"?[=+\-@][^,\r\n"]*/;
 
 const checks = [];
@@ -90,10 +90,10 @@ try {
   add('header columns are unique', new Set(header).size === header.length, `columns=${header.length}`);
   const missingColumns = STABLE_COLUMNS.filter((column) => !header.includes(column));
   add('stable Feishu handoff columns', missingColumns.length === 0, missingColumns.length ? `missing:${missingColumns.join(',')}` : 'present');
-  add('source card secrets are not exported', !SENSITIVE_PATTERN.test(text), 'no_sensitive_fields');
+  add('CVV and diagnostic secrets are not exported', !SENSITIVE_PATTERN.test(text), 'no_sensitive_fields');
   add('login email is plain text', row.login_email === 'finance.owner@example.com' && row.username === 'finance.owner@example.com', row.login_email || 'missing');
-  add('card last4 only', row.card_last4 === '0001', row.card_last4 || 'missing');
-  add('card_no_last4 is exported', row.card_no_last4 === '0001', row.card_no_last4 || 'missing');
+  add('card last4 compatibility field remains', row.card_last4 === '0001', row.card_last4 || 'missing');
+  add('full cardno is exported', row.cardno === '5257970000000001', row.cardno || 'missing');
   add('formula-like cells are escaped', !FORMULA_PATTERN.test(text), 'spreadsheet_safe');
   add('status is structured', row.task_status === 'completed' && row.purchase_status === 'verified', `${row.task_status}/${row.purchase_status}`);
   add('completion evidence is explicit', row.completion_evidence_status === 'production_complete', row.completion_evidence_status || 'missing');

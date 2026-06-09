@@ -18,7 +18,7 @@ Ignored,UI Flow 2,2 Main St,Portland,OR,97002,5551113333
 `;
 
 const args = parseArgs(process.argv.slice(2));
-const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4174');
+const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
 
 function add(label, ok, status = '') {
@@ -40,6 +40,7 @@ try {
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
 
   await page.route('**/api/opom/ready', async (route) => {
     const request = route.request();
@@ -132,12 +133,12 @@ try {
 
   await page.click('#opomReadyBtn');
   await page.waitForFunction(() => /rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Ready to recharge renders OPOM row', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
+  add('Load OPOM group renders OPOM row', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
   add('OPOM pagination indicates more rows', await page.locator('#opomLoadMoreBtn').isEnabled(), 'hasMore=true');
 
   await page.click('#opomLoadMoreBtn');
   await page.waitForFunction(() => /rows=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Load more appends OPOM rows with de-duplication', await page.locator('#opomPreviewBody tr').count() === 2, 'rows=2');
+  add('Load next page appends OPOM rows with de-duplication', await page.locator('#opomPreviewBody tr').count() === 2, 'rows=2');
 
   await page.click('#adsPowerMatchBtn');
   await page.waitForFunction(() => /matched=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
@@ -150,14 +151,15 @@ try {
   await page.waitForFunction(() => /allocated=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
   add('Allocate cards updates OPOM rows', /allocated=2/.test(await page.locator('#opomSummary').textContent() || ''), 'allocated=2');
 
-  await page.click('#dryRunBtn');
+  await page.check('#confirmLive');
+  await page.click('#liveRunBtn');
   await page.waitForFunction(() => {
     const summary = document.querySelector('#dryRunSummary')?.textContent || '';
     return /ready\s*[:=]\s*2/.test(summary) && /blocked\s*[:=]\s*0/.test(summary);
   });
   const dryRunSummary = await page.locator('#dryRunSummary').textContent();
-  add('OPOM flow dry-run has two ready rows', /ready\s*[:=]\s*2/.test(dryRunSummary || '') && /blocked\s*[:=]\s*0/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('No-purchase confirmation enabled after ready dry-run', await page.locator('#confirmLive').isEnabled(), 'enabled');
+  add('OPOM flow auto preflight has two ready rows', /ready\s*[:=]\s*2/.test(dryRunSummary || '') && /blocked\s*[:=]\s*0/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
+  add('No-purchase confirmation stays enabled after ready preflight', await page.locator('#confirmLive').isEnabled(), 'enabled');
 
   const bodyText = await page.locator('body').textContent();
   add('OPOM flow UI redaction', !containsSensitive(bodyText), 'no_sensitive_values');
@@ -227,5 +229,5 @@ function normalizeBase(value) {
 }
 
 function containsSensitive(value) {
-  return /525797000000000[12]|,456,|,789,|cvv|card_no/i.test(String(value || ''));
+  return /,456,|,789,|cvv/i.test(String(value || ''));
 }

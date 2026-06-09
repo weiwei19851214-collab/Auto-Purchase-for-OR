@@ -79,7 +79,7 @@ export function resultColumns() {
     'opom_health_reason',
     'ads_match_status',
     'ejh_order_no',
-    'card_no_last4',
+    'cardno',
     'opom_card_writeback_status',
     'opom_result_writeback_status',
     'adspower_tag_status',
@@ -281,8 +281,8 @@ export function baseRowResult(rowNumber, row) {
     ejhOrderNo: ejhOrderNo(row),
     purchasePlan: safePurchasePlan(row).mode,
     amount: row.amount || '',
+    cardNo: cardNumber(row),
     cardLast4: cardLast4(cardNumber(row)),
-    cardNoLast4: cardLast4(cardNumber(row)),
   };
 }
 
@@ -309,7 +309,7 @@ export function rowMetadata(row, extra = {}) {
     opomHealthReason: extra.opomHealthReason || row.opom_health_reason || '',
     adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerSerialNumber(row) || adsPowerUserId(row) ? 'not_verified' : ''),
     ejhOrderNo: ejhOrderNo(row),
-    cardNoLast4: extra.cardNoLast4 || cardLast4(cardNumber(row)),
+    cardNo: extra.cardNo || cardNumber(row),
     opomCardWritebackStatus: extra.opomCardWritebackStatus || '',
     opomResultWritebackStatus: extra.opomResultWritebackStatus || '',
     adspowerTagStatus: extra.adspowerTagStatus || 'skipped_user_waived',
@@ -419,7 +419,7 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'opom_health_reason', details.opomHealthReason || '');
   setCell(header, row, 'ads_match_status', details.adsMatchStatus || '');
   setCell(header, row, 'ejh_order_no', details.ejhOrderNo || '');
-  setCell(header, row, 'card_no_last4', details.cardNoLast4 || details.cardLast4 || '');
+  setCell(header, row, 'cardno', details.cardNo || '');
   setCell(header, row, 'opom_card_writeback_status', details.opomCardWritebackStatus || '');
   setCell(header, row, 'opom_result_writeback_status', details.opomResultWritebackStatus || '');
   setCell(header, row, 'adspower_tag_status', details.adspowerTagStatus || '');

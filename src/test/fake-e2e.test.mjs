@@ -202,7 +202,7 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
       assert.match(resultCsv, /completed/);
       assert.match(resultCsv, /written/);
       assert.match(resultCsv, /group_move/);
-      assert.doesNotMatch(resultCsv, /5257970000000001|,456,|cvv/);
+      assert.doesNotMatch(resultCsv, /,456,|cvv/);
     });
   } finally {
     rmSync(dir, {recursive: true, force: true});

@@ -10,7 +10,7 @@ const DEFAULT_OPOM_REPO = '/Users/weiwei/project/manager-openrouter';
 const args = parseArgs(process.argv.slice(2));
 const rechargeRepo = ROOT_DIR;
 const opomRepo = resolve(args.opomRepo || process.env.OPOM_REPO || DEFAULT_OPOM_REPO);
-const smokeBase = args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4174';
+const smokeBase = args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100';
 const checks = [];
 
 function runCheck(label, cwd, command, commandArgs = [], options = {}) {

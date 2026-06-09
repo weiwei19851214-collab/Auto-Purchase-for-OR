@@ -31,7 +31,8 @@ test('parsePlan accepts canonical OPOM fields and maps profile id into closed-lo
   assert.equal(parsed.rows[0].adsPowerUserId, 'k1d7abc');
   assert.equal(parsed.rows[0].adsPowerSerialNumber, '1415');
   assert.equal(parsed.rows[0].ejhOrderNo, 'ejh_order_1');
-  assert.doesNotMatch(JSON.stringify(parsed.rows[0]), /5257970000000001|456/);
+  assert.equal(parsed.rows[0].cardNo, '5257970000000001');
+  assert.doesNotMatch(JSON.stringify(parsed.rows[0]), /456/);
 
   const row = {
     opom_account_id: 'acct_1',
@@ -851,7 +852,7 @@ test('executeRow writes failed opom.writeback result after verified purchase wri
   assert.equal(resultCalls[0].context.status, 'failed');
   assert.equal(resultCalls[0].context.stage, 'opom.writeback');
   assert.equal(resultCalls[0].context.errorCode, 'opom_writeback_failed');
-  assert.doesNotMatch(JSON.stringify(resultCalls), /token=secret|5257970000000001|456/);
+  assert.doesNotMatch(JSON.stringify(resultCalls), /token=secret|456/);
 });
 
 test('writeRowResult omits masked login email values from OPOM payload', async () => {

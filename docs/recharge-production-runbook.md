@@ -48,7 +48,7 @@ Run from `/Users/weiwei/project/Auto-Purchase-for-OR` while the local Recharge
 server is running:
 
 ```bash
-npm run verify:integration -- --base http://127.0.0.1:4174
+npm run verify:integration -- --base http://127.0.0.1:4100
 ```
 
 This must pass before any production action. It verifies Recharge API/UI smoke,
@@ -88,7 +88,7 @@ operational sequence.
 If the Recharge server is not running, start it locally only in this project:
 
 ```bash
-PORT=4174 npm start
+PORT=4100 npm start
 ```
 
 Do not start the OPOM local service for this release path.
@@ -188,7 +188,8 @@ it. The operator console `Discover groups` button uses the same read-only
 lookup against the current on-screen target fields, so operators can verify the
 targets without switching to a terminal. `Use discovered targets` only copies
 resolved or candidate group IDs into the local `group_move` form fields and
-forces a new dry-run; it does not call AdsPower write endpoints.
+forces the next execution attempt to run preflight again; it does not call
+AdsPower write endpoints.
 
 If a candidate CSV already exists, validate it read-only:
 
@@ -205,13 +206,14 @@ Use this order after OPOM production read-only verification passes:
 
 1. Operator prepares AdsPower profiles and moves eligible OPOM accounts into
    `group=recharge`.
-2. In Recharge, click `Ready to recharge`.
+2. In Recharge, click `Load OPOM group`.
 3. Review the pending rows and OPOM health status.
 4. Click `Match AdsPower`.
 5. Enter this run's amount or balance rule, Auto top-up values, and any billing
    address mapping CSV.
-6. Run dry-run and resolve all `missing_fields`, `identity_mismatch`, and
-   AdsPower match failures.
+6. Tick the execution confirmation and start the run; the console automatically
+   runs preflight first. Resolve all `missing_fields`, `identity_mismatch`, and
+   AdsPower match failures before any browser automation starts.
 7. Run no-purchase mode for one row. This may open AdsPower/OpenRouter and
    prepare the purchase form, but it must not click final Purchase.
 8. Validate one expected `identity_mismatch` row if test data is available.
@@ -230,7 +232,7 @@ Use this order after OPOM production read-only verification passes:
     no-purchase rehearsal only, and `incomplete` must be resolved using
     `completion_evidence_missing`.
     OPOM-sourced rows in confirmed purchase mode must have OPOM writeback
-    enabled before dry-run can mark them executable.
+    enabled before preflight can mark them executable.
 
 ## AdsPower Status Handling
 

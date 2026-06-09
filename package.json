@@ -1,0 +1,24 @@
+{
+  "name": "auto-purchase-for-or",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server/index.mjs",
+    "test": "node --test src/test/*.test.mjs",
+    "check": "find src scripts public \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check",
+    "preflight:production": "node scripts/production-preflight.mjs",
+    "adspower:status-targets": "node scripts/adspower-status-targets.mjs",
+    "audit:sensitive": "node scripts/sensitive-static-audit.mjs",
+    "audit:readiness": "node scripts/readiness-audit.mjs",
+    "audit:completion": "node scripts/readiness-audit.mjs --require-complete",
+    "checklist:launch": "node scripts/launch-checklist.mjs",
+    "smoke:feishu": "node scripts/feishu-handoff-smoke.mjs",
+    "smoke:local": "node scripts/local-smoke.mjs",
+    "smoke:ui": "node scripts/ui-smoke.mjs",
+    "smoke:ui:interaction": "node scripts/ui-interaction-smoke.mjs",
+    "smoke:ui:opom-flow": "node scripts/ui-opom-flow-smoke.mjs",
+    "smoke:ui:identity-mismatch": "node scripts/ui-identity-mismatch-smoke.mjs",
+    "verify:integration": "node scripts/verify-integration.mjs"
+  }
+}

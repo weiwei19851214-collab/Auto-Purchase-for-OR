@@ -1,0 +1,13 @@
+node_modules/
+backups/
+data/*.sqlite
+data/*.sqlite-*
+data/*.pid
+data/uploads/*
+data/results/*
+data/logs/*
+!data/uploads/.gitkeep
+!data/results/.gitkeep
+!data/logs/.gitkeep
+.DS_Store
+.recharge.local.env

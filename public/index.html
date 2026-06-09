@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenRouter 充值执行器</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="eyebrow">Recharge Runner</div>
+          <h1>OpenRouter 充值执行器</h1>
+        </div>
+        <div class="topbar-right">
+          <div id="worker" class="worker" aria-live="polite">Worker: -</div>
+          <a class="button secondary-link" href="#jobsSection">任务记录</a>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section id="alert" class="alert" role="alert" hidden></section>
+
+        <section class="status-strip" aria-label="执行状态总览">
+          <div class="metric-card">
+            <span>队列</span>
+            <strong id="statQueue">未拉取</strong>
+          </div>
+          <div class="metric-card">
+            <span>匹配</span>
+            <strong id="statMatch">0/0</strong>
+          </div>
+          <div class="metric-card">
+            <span>卡分配</span>
+            <strong id="statCards">0/0</strong>
+          </div>
+          <div class="metric-card">
+            <span>Dry-run</span>
+            <strong id="statDryRun">未执行</strong>
+          </div>
+          <div class="metric-card">
+            <span>执行模式</span>
+            <strong id="statMode">Live Run</strong>
+          </div>
+        </section>
+
+        <section class="workspace">
+          <aside class="control-rail" aria-label="充值操作步骤">
+            <section class="panel step-panel">
+              <div class="step-head">
+                <span class="step-index">1</span>
+                <div>
+                  <h2>任务来源</h2>
+                  <p class="muted">从 OPOM 队列或本地 CSV 生成待执行清单。</p>
+                </div>
+              </div>
+
+              <div id="preflight" class="preflight muted" role="status" aria-live="polite">环境预检加载中...</div>
+
+              <div class="form-grid three">
+                <label class="field">
+                  <span>OPOM Group</span>
+                  <input id="opomGroup" type="text" value="recharge" />
+                </label>
+                <label class="field">
+                  <span>队列状态</span>
+                  <select id="opomStatus">
+                    <option value="needs_recharge">Needs recharge</option>
+                    <option value="failed_retryable">Failed retryable</option>
+                    <option value="all">All in group</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>读取数量</span>
+                  <input id="opomLimit" type="number" min="1" max="200" value="100" />
+                </label>
+              </div>
+
+              <div class="action-row">
+                <button id="opomReadyBtn" type="button" class="primary">Ready to recharge</button>
+                <button id="opomLoadMoreBtn" type="button" disabled>Load more</button>
+                <button id="adsPowerMatchBtn" type="button">Match AdsPower</button>
+              </div>
+
+              <label class="field file-field">
+                <span>或上传账号选择 CSV</span>
+                <input id="csvFile" type="file" accept=".csv,text/csv" />
+              </label>
+
+              <div id="opomSummary" class="summary muted" role="status" aria-live="polite">未从 OPOM 拉取。</div>
+            </section>
+
+            <section class="panel step-panel">
+              <div class="step-head">
+                <span class="step-index">2</span>
+                <div>
+                  <h2>规则与地址</h2>
+                  <p class="muted">金额、Auto top-up 和账单地址会写入本次 canonical CSV。</p>
+                </div>
+              </div>
+
+              <div class="form-grid two">
+                <label class="field">
+                  <span>Fixed amount</span>
+                  <input id="defaultAmount" type="number" min="0" step="0.01" value="0" />
+                </label>
+                <label class="field">
+                  <span>Balance threshold</span>
+                  <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="40" />
+                </label>
+                <label class="field">
+                  <span>Below amount</span>
+                  <input id="defaultAmountBelow" type="number" min="0" step="0.01" value="150" />
+                </label>
+                <label class="field">
+                  <span>At/above amount</span>
+                  <input id="defaultAmountAtOrAbove" type="number" min="0" step="0.01" value="100" />
+                </label>
+                <label class="field">
+                  <span>Auto threshold</span>
+                  <input id="defaultAutoTopupThreshold" type="number" min="0" step="0.01" value="100" />
+                </label>
+                <label class="field">
+                  <span>Auto amount</span>
+                  <input id="defaultAutoTopupAmount" type="number" min="0" step="0.01" value="100" />
+                </label>
+              </div>
+
+              <label class="field file-field">
+                <span>Billing address CSV 必填</span>
+                <input id="addressMappingCsv" type="file" accept=".csv,text/csv" />
+              </label>
+            </section>
+
+            <section class="panel step-panel">
+              <div class="step-head">
+                <span class="step-index">3</span>
+                <div>
+                  <h2>开卡与执行范围</h2>
+                  <p class="muted">先分配卡，再 dry-run；真实开卡和真实充值都有确认门禁。</p>
+                </div>
+              </div>
+
+              <div class="form-grid three">
+                <label class="field">
+                  <span>EJH amount</span>
+                  <input id="ejhAmount" type="number" min="1" step="0.01" placeholder="10.00" />
+                </label>
+                <label class="field">
+                  <span>Active date</span>
+                  <input id="ejhActiveDate" type="date" />
+                </label>
+                <label class="field">
+                  <span>Cardholder</span>
+                  <input id="ejhCardholder" type="text" placeholder="operator-ref" />
+                </label>
+              </div>
+
+              <label class="field file-field">
+                <span>EJH cards CSV</span>
+                <input id="ejhSafeCsv" type="file" accept=".csv,text/csv" />
+              </label>
+
+              <div class="action-row">
+                <button id="allocateCardsBtn" type="button">Allocate cards</button>
+                <button id="createCardsBtn" type="button">Create EJH cards</button>
+              </div>
+
+              <fieldset class="check-group">
+                <legend>执行范围</legend>
+                <label><input id="scopeBillingAddress" type="checkbox" checked /> 添加付款地址</label>
+                <label><input id="scopePaymentMethod" type="checkbox" checked /> 换卡</label>
+                <label><input id="scopePurchase" type="checkbox" checked /> 充值</label>
+                <label><input id="scopeAutoTopup" type="checkbox" checked /> 自动充值规则</label>
+              </fieldset>
+
+              <fieldset class="check-group">
+                <legend>执行选项</legend>
+                <label><input id="removeExisting" type="checkbox" checked /> 替换旧卡</label>
+                <label><input id="stopProfiles" type="checkbox" checked /> 行结束后关闭 profile</label>
+                <label><input id="noPurchaseMode" type="checkbox" /> No-purchase 测试模式</label>
+                <label><input id="opomWriteback" type="checkbox" checked /> 成功后写回 OPOM</label>
+              </fieldset>
+            </section>
+
+            <details class="panel step-panel optional-panel" open>
+              <summary>
+                <span class="step-index optional">+</span>
+                <span>
+                  <strong>AdsPower 状态写入</strong>
+                  <small>当前默认 waived，不影响完成判定</small>
+                </span>
+              </summary>
+              <div class="form-grid one">
+                <label class="field">
+                  <span>Mode</span>
+                  <select id="adspowerStatusMode">
+                    <option value="disabled">Disabled - 记录 waived</option>
+                    <option value="group_move">Move group - 移动分组</option>
+                    <option value="remark_append">Append remark - 追加状态备注</option>
+                    <option value="remark_append_v2">Append remark V2 - 新版备注接口</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Success group ID or name:xxx</span>
+                  <input id="adspowerSuccessGroupId" type="text" />
+                </label>
+                <label class="field">
+                  <span>Failure group ID or name:xxx</span>
+                  <input id="adspowerFailureGroupId" type="text" />
+                </label>
+                <label class="field">
+                  <span>Blocker group ID or name:xxx</span>
+                  <input id="adspowerBlockerGroupId" type="text" />
+                </label>
+              </div>
+              <div class="action-row">
+                <button id="adspowerDiscoverTargetsBtn" type="button">Discover groups</button>
+                <button id="adspowerUseDiscoveredTargetsBtn" type="button" disabled>Use discovered targets</button>
+              </div>
+              <div id="adspowerTargetsSummary" class="summary muted">未读取 AdsPower 分组。</div>
+            </details>
+
+            <section class="execute-bar" aria-label="Dry-run 和启动执行">
+              <div>
+                  <strong id="confirmationState" role="status" aria-live="polite">未生成执行确认</strong>
+                  <div id="dryRunSummary" class="muted" role="status" aria-live="polite">先选择来源并执行 dry-run。</div>
+              </div>
+              <label class="confirm-line">
+                <input id="confirmLive" type="checkbox" disabled />
+                <span id="confirmLiveText">我确认 dry-run 明细和金额规则无误。</span>
+              </label>
+              <div class="action-row">
+                <button id="dryRunBtn" type="button">Dry-run</button>
+                <button id="liveRunBtn" class="primary danger-action" type="button" disabled>启动执行</button>
+              </div>
+            </section>
+          </aside>
+
+          <section class="review-stack" aria-label="执行审查">
+            <section class="panel opom-preview-panel">
+              <div class="section-head">
+                <div>
+                  <h2>待充值清单</h2>
+                  <p id="opomPreviewMeta" class="muted">Ready to recharge 后显示。</p>
+                </div>
+              </div>
+              <div class="table-wrap preview-table">
+                <table>
+                  <caption>待充值清单</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">OPOM</th>
+                      <th scope="col">账号</th>
+                      <th scope="col">OPOM health</th>
+                      <th scope="col">AdsPower</th>
+                      <th scope="col">匹配</th>
+                      <th scope="col">充值规则</th>
+                      <th scope="col">Auto top-up</th>
+                      <th scope="col">Billing</th>
+                      <th scope="col">Card</th>
+                    </tr>
+                  </thead>
+                  <tbody id="opomPreviewBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel dry-run-panel">
+              <div class="section-head">
+                <div>
+                  <h2>Dry-run 明细</h2>
+                  <p class="muted">只允许 ready 行进入执行。</p>
+                </div>
+              </div>
+              <div class="table-wrap dryrun-table">
+                <table>
+                  <caption>Dry-run 明细</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">行</th>
+                      <th scope="col">Profile</th>
+                      <th scope="col">账号</th>
+                      <th scope="col">状态</th>
+                      <th scope="col">执行范围</th>
+                      <th scope="col">充值规则</th>
+                      <th scope="col">Auto top-up</th>
+                      <th scope="col">缺失/消息</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dryRunBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section id="jobsSection" class="panel jobs-panel">
+          <div class="section-head">
+            <div>
+              <h2>任务记录</h2>
+              <p class="muted">点击任务行查看结果和事件。</p>
+            </div>
+            <button id="refreshBtn" type="button">刷新</button>
+          </div>
+          <div class="table-wrap">
+                <table>
+                  <caption>任务记录</caption>
+                  <thead>
+                    <tr>
+                  <th scope="col">任务</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">总数</th>
+                  <th scope="col">完成</th>
+                  <th scope="col">失败</th>
+                  <th scope="col">阻塞</th>
+                  <th scope="col">创建时间</th>
+                </tr>
+              </thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel detail">
+          <div class="section-head">
+            <div>
+              <h2>任务详情</h2>
+              <p id="jobMeta" class="muted" role="status" aria-live="polite">选择一个任务查看明细。</p>
+            </div>
+            <div class="action-row">
+              <button id="cancelBtn" type="button" disabled>取消排队</button>
+              <button id="downloadLink" class="button disabled" type="button" disabled>下载 result CSV</button>
+            </div>
+          </div>
+          <div class="table-wrap rows">
+            <table>
+              <caption>任务行明细</caption>
+              <thead>
+                <tr>
+                  <th scope="col">行</th>
+                  <th scope="col">Profile</th>
+                  <th scope="col">账号</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">阶段</th>
+                  <th scope="col">充值</th>
+                  <th scope="col">余额</th>
+                  <th scope="col">Auto top-up</th>
+                  <th scope="col">AdsPower</th>
+                  <th scope="col">更新时间</th>
+                  <th scope="col">消息</th>
+                </tr>
+              </thead>
+              <tbody id="rowsBody"></tbody>
+            </table>
+          </div>
+          <div class="events-wrap">
+            <h3>事件流水</h3>
+            <div id="eventsBody" class="events muted">选择任务后显示最近事件。</div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

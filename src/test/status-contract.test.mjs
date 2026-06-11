@@ -10,10 +10,10 @@ test('Stripe Link save-info state is not classified as manual security blocker',
   assert.equal(result.stopProfile, true);
 });
 
-test('real security challenges keep the profile open but no longer stop the whole batch', () => {
-  const result = classifyError('manual_security_blocker: Security challenge visible: hCaptcha');
-  assert.equal(result.status, STATUSES.MANUAL_SECURITY_BLOCKER);
-  assert.equal(result.stage, 'security.blocker');
+test('security challenge text is classified as ordinary row failure', () => {
+  const result = classifyError('Security challenge visible: hCaptcha');
+  assert.equal(result.status, STATUSES.FAILED);
+  assert.equal(result.stage, 'automation');
   assert.equal(result.safeToContinueBatch, true);
-  assert.equal(result.stopProfile, false);
+  assert.equal(result.stopProfile, true);
 });

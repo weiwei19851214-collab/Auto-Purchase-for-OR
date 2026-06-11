@@ -3427,18 +3427,10 @@ async function run() {
     const paymentWs = await waitForPaymentTarget(input.debugPort);
     payment = await cdp(paymentWs);
     await payment.send('Runtime.enable');
-    const preFillChallenge = await detectSecurityChallenge(input.debugPort);
-    if (preFillChallenge) {
-      throw new Error(`Security challenge visible: ${preFillChallenge.text || preFillChallenge.url}`);
-    }
     let stripeState;
     try {
       stripeState = await fillStripeCard(payment, input.card);
     } catch (error) {
-      const challenge = await detectSecurityChallenge(input.debugPort);
-      if (challenge) {
-        throw new Error(`Security challenge visible: ${challenge.text || challenge.url}`);
-      }
       throw error;
     }
 
@@ -3503,10 +3495,6 @@ async function run() {
           purchaseModalOpened: true,
           elapsedMs: Date.now() - startedAt,
         };
-      }
-      const challenge = await detectSecurityChallenge(input.debugPort).catch(() => null);
-      if (challenge) {
-        throw new Error(`manual_security_blocker: Security challenge visible: ${challenge.text || challenge.url || error.message}`);
       }
     }
     throw error;

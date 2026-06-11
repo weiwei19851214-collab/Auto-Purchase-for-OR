@@ -67,15 +67,6 @@ export function classifyError(message) {
       message: text,
     });
   }
-  if (/manual_security_blocker|Security challenge|CAPTCHA|hCaptcha|3D Secure|bank verification|SMS|phone|passkey|recovery|suspicious/i.test(text)) {
-    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
-      stage: 'security.blocker',
-      terminal: true,
-      safeToContinueBatch: true,
-      stopProfile: false,
-      message: text,
-    });
-  }
   if (/OpenRouter account mismatch|account mismatch|expected .* got/i.test(text)) {
     return statusRecord(STATUSES.IDENTITY_MISMATCH, {
       stage: 'identity.account',

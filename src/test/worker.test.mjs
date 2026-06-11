@@ -7,7 +7,6 @@ import test from 'node:test';
 import {openDatabase, getJob, recoverInterruptedWork} from '../server/db.mjs';
 import {createJob, dryRunPayload, jobDetails} from '../server/jobs.mjs';
 import {JobWorker} from '../server/worker.mjs';
-import {cleanupJobUpload} from '../server/automation-adapter.mjs';
 
 const TWO_ROW_CSV = `status,ID,username,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
 ,1415,first@example.com,10,5257970000000001,06,28,456,97001,2,25
@@ -84,6 +83,65 @@ test('worker records row exceptions and continues safe batches', async () => {
   }
 });
 
+test('worker continues later rows after manual security blocker', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-security-continue-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: TWO_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: TWO_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const calls = [];
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async (_csvText, rawIndex) => {
+        calls.push(rawIndex);
+        if (rawIndex === 0) {
+          return {
+            status: 'manual_security_blocker',
+            stage: 'security.blocker',
+            message: 'manual_security_blocker: Security challenge visible: hCaptcha',
+            details: {},
+            safeToContinue: true,
+            stopProfile: false,
+            profileStop: {attempted: false},
+          };
+        }
+        return {
+          status: 'completed',
+          stage: 'closed_loop.complete',
+          message: 'completed',
+          details: {
+            purchaseStatus: 'verified',
+            purchaseAmount: '10',
+            balanceBefore: '20',
+            balanceAfter: '30',
+            cardLast4: '0002',
+            autoTopupStatus: 'updated',
+            autoTopupThreshold: '2',
+            autoTopupAmount: '25',
+          },
+          safeToContinue: true,
+          stopProfile: true,
+          profileStop: {attempted: false},
+        };
+      },
+    });
+
+    await worker.runJob(created.job.id);
+    const details = jobDetails(db, created.job.id);
+    assert.deepEqual(calls, [0, 1]);
+    assert.equal(details.job.status, 'completed');
+    assert.equal(details.rows[0].status, 'manual_security_blocker');
+    assert.equal(details.rows[0].stage, 'security.blocker');
+    assert.equal(details.rows[1].status, 'completed');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('worker runs queued rows concurrently when job concurrency is greater than one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-concurrency-'));
   try {
@@ -134,6 +192,10 @@ test('worker runs queued rows concurrently when job concurrency is greater than 
     assert.equal(maxActive, 2);
     assert.equal(details.job.status, 'completed');
     assert.equal(details.rows.every((row) => row.status === 'completed'), true);
+    const concurrencyEvent = details.events.find((event) => event.type === 'job.concurrency');
+    assert.equal(concurrencyEvent?.data.requested, 2);
+    assert.equal(concurrencyEvent?.data.effective, 2);
+    assert.equal(concurrencyEvent?.data.queuedRows, 2);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -177,7 +239,7 @@ test('worker writes OPOM failure result when an unexpected row exception occurs'
     assert.equal(calls[0].body.opomAccountId, 'acct_1');
     assert.equal(calls[0].body.status, 'failed');
     assert.equal(calls[0].body.errorCode, 'failed');
-    assert.match(calls[0].body.idempotencyKey, new RegExp(`^recharge_result:${created.job.id}:2:1$`));
+    assert.match(calls[0].body.idempotencyKey, new RegExp(`^recharge_result:${created.job.id}:2:1:failed:worker\\.exception$`));
     assert.doesNotMatch(JSON.stringify(calls[0].body), /5257970000000001|cvv=456|token=secret/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
@@ -273,7 +335,6 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
 
     const worker = new JobWorker(db, {heartbeatMs: 1000});
     await worker.writeCurrentResult(created.job.id);
-    cleanupJobUpload(getJob(db, created.job.id));
 
     const details = jobDetails(db, created.job.id);
     assert.equal(details.job.status, 'blocked');
@@ -284,7 +345,7 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     assert.equal(details.events.some((event) => event.type === 'job.recovered_blocked'), true);
 
     const job = getJob(db, created.job.id);
-    assert.equal(existsSync(job.csv_path), false);
+    assert.equal(existsSync(job.csv_path), true);
     assert.equal(existsSync(job.result_csv_path), true);
     const resultCsv = readFileSync(job.result_csv_path, 'utf8');
     assert.match(resultCsv, /purchase_unverified/);

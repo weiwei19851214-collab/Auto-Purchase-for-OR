@@ -58,11 +58,20 @@ export function classifyError(message) {
       message: text,
     });
   }
+  if (/Stripe Link save-info checkbox or phone subform is still active/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'payment_method.link_opt_in',
+      terminal: true,
+      safeToContinueBatch: true,
+      stopProfile: true,
+      message: text,
+    });
+  }
   if (/manual_security_blocker|Security challenge|CAPTCHA|hCaptcha|3D Secure|bank verification|SMS|phone|passkey|recovery|suspicious/i.test(text)) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
       stage: 'security.blocker',
       terminal: true,
-      safeToContinueBatch: false,
+      safeToContinueBatch: true,
       stopProfile: false,
       message: text,
     });

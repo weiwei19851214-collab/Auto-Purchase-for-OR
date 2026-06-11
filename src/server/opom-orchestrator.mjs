@@ -129,14 +129,14 @@ function mapPush(map, key, account) {
   map.get(normalized).push(account);
 }
 
-async function fetchAllRechargeAccounts(args, {maxPages = 50} = {}) {
+async function fetchAllRechargeAccounts(args, {maxPages = 50, group = 'recharge', status = 'needs_recharge'} = {}) {
   const accounts = [];
   let cursor = '';
   let lastCursor = '';
   for (let page = 0; page < maxPages; page += 1) {
     const result = await opom.fetchRechargeAccounts(args, {
-      group: 'all',
-      status: 'all',
+      group,
+      status,
       limit: 200,
       cursor,
     });
@@ -184,6 +184,38 @@ function candidateAccountsForRow(row, index) {
   return [...byId.values()];
 }
 
+function countResolvableRows(rows, index) {
+  return rows.filter((row) => candidateAccountsForRow(row, index).length === 1).length;
+}
+
+async function loadBestResolveIndex(args, rows, {group, status, maxPages}) {
+  const attempts = [
+    {group, status},
+    ...(status === 'all' ? [] : [{group, status: 'all'}]),
+    ...(group === 'all' && status === 'all' ? [] : [{group: 'all', status: 'all'}]),
+  ];
+  let best = {accounts: [], index: buildOpomAccountIndex([]), resolveSource: `${group}/${status}`, matched: 0};
+  for (const attempt of attempts) {
+    const accounts = await fetchAllRechargeAccounts(args, {
+      maxPages,
+      group: attempt.group,
+      status: attempt.status,
+    });
+    const index = buildOpomAccountIndex(accounts);
+    const matched = countResolvableRows(rows, index);
+    if (matched > best.matched) {
+      best = {
+        accounts,
+        index,
+        resolveSource: `${attempt.group}/${attempt.status}`,
+        matched,
+      };
+    }
+    if (matched >= rows.length) break;
+  }
+  return best;
+}
+
 function mergeResolvedOpomRow(row, canonical) {
   return {
     ...row,
@@ -208,8 +240,16 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
     opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
   };
-  const accounts = await fetchAllRechargeAccounts(args, {maxPages: payload.maxPages || 50});
-  const index = buildOpomAccountIndex(accounts);
+  const group = payload.group || 'recharge';
+  const status = payload.status || 'needs_recharge';
+  const best = await loadBestResolveIndex(args, rows, {
+    maxPages: payload.maxPages || 50,
+    group,
+    status,
+  });
+  const accounts = best.accounts;
+  const index = best.index;
+  const resolveSource = best.resolveSource;
   const canonicalById = new Map(opom.canonicalRowsFromOpomAccounts(accounts, {}).map((row) => [String(row.opom_account_id), row]));
   let matched = 0;
   let failed = 0;
@@ -239,6 +279,7 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     total: rows.length,
     matched,
     failed,
+    resolveSource,
     rows: resolvedRows,
     csvText: canonicalCsvFromRows(resolvedRows),
   };

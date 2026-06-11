@@ -2,7 +2,7 @@ import {readFileSync} from 'node:fs';
 import {addEvent, getJob, listRows, updateJobCounts} from './db.mjs';
 import {nowIso} from './ids.mjs';
 import {redact} from './redact.mjs';
-import {cleanupJobUpload, executeRow, runnerArgs, writeResultCsv} from './automation-adapter.mjs';
+import {executeRow, runnerArgs, writeResultCsv} from './automation-adapter.mjs';
 import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
@@ -86,8 +86,6 @@ export class JobWorker {
         WHERE id = ?
       `).run(redact(error.message), now, now, jobId);
       addEvent(this.db, jobId, 'job.failed', redact(error.message));
-      const failedJob = getJob(this.db, jobId);
-      if (failedJob) cleanupJobUpload(failedJob);
     } finally {
       this.current = null;
       this.currentRows.clear();
@@ -100,6 +98,11 @@ export class JobWorker {
     const options = JSON.parse(getJob(this.db, jobId)?.options_json || '{}');
     const args = runnerArgs(options);
     const concurrency = Math.min(rows.length, args.concurrency || 1);
+    addEvent(this.db, jobId, 'job.concurrency', `worker concurrency ${concurrency}/${args.concurrency}`, {
+      requested: args.concurrency,
+      effective: concurrency,
+      queuedRows: rows.length,
+    });
     let nextIndex = 0;
     const takeNextRow = () => rows[nextIndex++];
     const workers = Array.from({length: concurrency}, async () => {
@@ -345,6 +348,7 @@ export class JobWorker {
       await writeRowResult(options, opomRow, result.details || {}, {
         rowNumber: row.row_number,
         status: result.status,
+        stage: 'worker.exception',
         message: result.message,
         errorCode: result.status,
       });
@@ -425,7 +429,6 @@ export class JobWorker {
     updateJobCounts(this.db, jobId);
     const job = getJob(this.db, jobId);
     if (job.status === 'blocked' || job.status === 'failed') {
-      cleanupJobUpload(job);
       return;
     }
     const queued = this.db.prepare(`
@@ -440,6 +443,5 @@ export class JobWorker {
       WHERE id = ?
     `).run(finalStatus, now, now, jobId);
     addEvent(this.db, jobId, `job.${finalStatus}`, `job ${finalStatus}`);
-    if (['completed', 'canceled'].includes(finalStatus)) cleanupJobUpload(getJob(this.db, jobId));
   }
 }

@@ -16,6 +16,10 @@ const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
 const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 15000;
 const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
+const DEFAULT_CREDITS_ENTRY_WAIT_MS = 45000;
+const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 45000;
+const PAGE_SETTLE_MS = 3000;
+const BALANCE_VERIFY_REFRESH_INTERVAL_MS = 15000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let diagnosticCounter = 0;
@@ -1040,24 +1044,36 @@ async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '
       return new RegExp(last4 + '[\\\\s\\\\S]*' + safeExpiry + '|' + safeExpiry + '[\\\\s\\\\S]*' + last4, 'i').test(text);
     })();
     const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
-      .filter((node) => {
+      .map((node) => {
         const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
+        return {
+          node,
+          visible: rect.width > 0 && rect.height > 0,
+          disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
+          text: (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' '),
+        };
       })
-      .map((node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' '))
-      .filter(Boolean);
-    const hasButton = (rx) => buttons.some((label) => rx.test(label));
+      .filter((item) => item.visible)
+      .map((item) => ({text: item.text, disabled: item.disabled}))
+      .filter((item) => item.text);
+    const clickableButtons = buttons.filter((item) => !item.disabled).map((item) => item.text);
+    const buttonLabels = buttons.map((item) => item.text);
+    const hasClickableButton = (rx) => clickableButtons.some((label) => rx.test(label));
+    const hasAnyButton = (rx) => buttonLabels.some((label) => rx.test(label));
     return {
-      hasAddCredits: hasButton(/^Add Credits$/i) || /\\bAdd Credits\\b/.test(text),
-      hasAddPaymentMethod: hasButton(/^Add a Payment Method$|^Add Payment Method$/i) || /\\bAdd a Payment Method\\b|\\bAdd Payment Method\\b/i.test(text),
-      hasAddBillingAddress: hasButton(/^Add a Billing Address$|^Add Billing Address$/i) || /\\bAdd a Billing Address\\b|\\bAdd Billing Address\\b/i.test(text),
+      hasAddCredits: hasAnyButton(/^Add Credits$/i) || /\\bAdd Credits\\b/.test(text),
+      canAddCredits: hasClickableButton(/^Add Credits$/i),
+      hasAddPaymentMethod: hasAnyButton(/^Add a Payment Method$|^Add Payment Method$/i) || /\\bAdd a Payment Method\\b|\\bAdd Payment Method\\b/i.test(text),
+      canAddPaymentMethod: hasClickableButton(/^Add a Payment Method$|^Add Payment Method$/i),
+      hasAddBillingAddress: hasClickableButton(/^Add a Billing Address$|^Add Billing Address$/i) || /\\bAdd a Billing Address\\b|\\bAdd Billing Address\\b/i.test(text),
       hasAddressForm: /Full name|Address line 1|City|State|Postal|Update Address/i.test(text),
       hasSavePaymentMethod: /Save payment method/i.test(text),
       hasCardFormText: /Card number|Expiration date|CVC|Postal code/i.test(text),
       purchase: /Purchase Credits/i.test(text),
       targetCardVisible,
       emailVerificationBlocked: /You must add a verified email to access this feature/i.test(text),
-      buttons,
+      buttons: clickableButtons,
+      disabledButtons: buttons.filter((item) => item.disabled).map((item) => item.text),
       tail: text.slice(-2200),
     };
   })()`);
@@ -1329,7 +1345,7 @@ async function ensureStripeLinkUnchecked(payment) {
         phoneInvalidText: /Please provide a mobile phone number/i.test(document.body.innerText || ''),
       };
     })()`);
-    if (lastState.checked === false && !lastState.phoneVisible && !lastState.phoneInvalidText) {
+    if ((lastState.found === false || lastState.checked === false) && !lastState.phoneVisible && !lastState.phoneInvalidText) {
       return lastState;
     }
     await sleep(500);
@@ -1457,7 +1473,7 @@ async function waitUntilSaveModalCloses(page) {
 }
 
 async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', 30000);
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
   return waitForPurchaseCard(page, expectedLast4, expectedExpiry);
 }
 
@@ -2109,10 +2125,14 @@ async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutM
   const deadline = Date.now() + timeoutMs;
   let lastBalance = null;
   let lastError = '';
+  let lastRefreshAt = 0;
   while (Date.now() < deadline) {
     try {
-      await navigatePage(page, OPENROUTER_CREDITS_URL);
-      await sleep(1500);
+      if (!lastRefreshAt || Date.now() - lastRefreshAt >= BALANCE_VERIFY_REFRESH_INTERVAL_MS) {
+        await navigatePage(page, OPENROUTER_CREDITS_URL);
+        lastRefreshAt = Date.now();
+        await sleep(PAGE_SETTLE_MS);
+      }
       const issue = await detectPaymentIssue(page).catch(() => null);
       if (issue?.found) {
         return {
@@ -2135,10 +2155,22 @@ async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutM
           balanceSource: balanceState.source,
         };
       }
+      const transaction = await findRecentTransactionAmount(page, expectedAmount).catch(() => null);
+      if (transaction?.found) {
+        return {
+          verified: true,
+          beforeBalance,
+          afterBalance: balanceState.balance,
+          expectedIncrease: expectedAmount,
+          verificationRule: 'recent_transaction_amount',
+          balanceSource: balanceState.source,
+          transaction,
+        };
+      }
     } catch (error) {
       lastError = error.message;
     }
-    await sleep(2500);
+    await sleep(3000);
   }
   return {
     verified: false,
@@ -2148,6 +2180,24 @@ async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutM
     lastError,
     verificationRule: 'after_balance_gt_before_balance',
   };
+}
+
+async function findRecentTransactionAmount(page, expectedAmount) {
+  const target = Number(expectedAmount);
+  if (!Number.isFinite(target) || target <= 0) return {found: false, reason: 'missing_expected_amount'};
+  return evaluate(page, `((expectedAmount) => {
+    const text = document.body.innerText || '';
+    const recentIndex = text.search(/Recent Transactions|History/i);
+    const scope = recentIndex >= 0 ? text.slice(recentIndex, recentIndex + 2500) : text.slice(0, 2500);
+    const escaped = String(expectedAmount).replace(/\\./g, '\\\\.');
+    const amountPattern = new RegExp('\\\\$\\\\s*' + escaped + '(?:\\\\.00)?\\\\b');
+    const found = amountPattern.test(scope);
+    return {
+      found,
+      expectedAmount,
+      source: found ? 'recent_transactions_text' : 'recent_transactions_text_missing',
+    };
+  })(${JSON.stringify(target)})`);
 }
 
 async function detectPaymentIssue(page) {
@@ -2395,12 +2445,25 @@ async function removeSavedPaymentMethodsFromPicker(page) {
 }
 
 async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits');
-  for (let i = 0; i < 10; i += 1) {
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+  for (let i = 0; i < 30; i += 1) {
     const state = await evaluate(page, `(() => {
       const text = document.body.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
       const expiry = ${JSON.stringify(expectedExpiry)};
+      const visible = (node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
+        .map((node) => ({
+          text: (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' '),
+          visible: visible(node),
+          disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
+        }))
+        .filter((item) => item.visible && item.text);
+      const clickable = buttons.filter((item) => !item.disabled).map((item) => item.text);
+      const hasClickable = (rx) => clickable.some((label) => rx.test(label));
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
       return {
         purchase: /Purchase Credits/.test(text),
@@ -2409,7 +2472,11 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
           || (!!expiry && new RegExp(last4 + '[\\\\s\\\\S]*' + expiry.replace('/', '\\\\/') + '|' + expiry.replace('/', '\\\\/') + '[\\\\s\\\\S]*' + last4, 'i').test(text))
         ),
         hasAddPaymentMethod: /Add a Payment Method|Add Payment Method/i.test(text),
+        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i),
         hasSave: /Save payment method/.test(text),
+        disabledEntryButtons: buttons
+          .filter((item) => item.disabled && /Add Credits|Add a Payment Method|Add Payment Method/i.test(item.text))
+          .map((item) => item.text),
         tail: text.slice(-2200),
       };
     })()`);
@@ -2423,26 +2490,26 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
     if (!state.purchase && state.hasSave) {
       return {alreadyBound: false, clicked: {clicked: false, label: 'Save payment method already visible'}};
     }
-    if (!state.purchase && state.hasAddPaymentMethod && !state.targetCardVisible) {
+    if (!state.purchase && state.canAddPaymentMethod && !state.targetCardVisible) {
       await clickAddPaymentMethod(page, {required: false});
-      await sleep(1500);
+      await sleep(PAGE_SETTLE_MS);
       break;
     }
-    await sleep(500);
+    await sleep(1000);
   }
 
   const clicked = await clickAddPaymentMethod(page, {required: false});
-  await sleep(1500);
+  await sleep(PAGE_SETTLE_MS);
   return {alreadyBound: false, clicked};
 }
 
-async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = 6000) {
+async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_PAYMENT_ENTRY_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
     if (
-      lastState.hasAddPaymentMethod
+      lastState.canAddPaymentMethod
       || lastState.hasAddBillingAddress
       || lastState.hasAddressForm
       || lastState.hasSavePaymentMethod
@@ -2457,7 +2524,7 @@ async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, tim
 }
 
 async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, options = {}) {
-  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || 6000);
+  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS);
   if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
     return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
   }
@@ -2465,9 +2532,9 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
     return {alreadyBound: false, entry: 'already_open', state: initial};
   }
 
-  if (initial.hasAddPaymentMethod) {
+  if (initial.canAddPaymentMethod) {
     const clicked = await clickAddPaymentMethod(page, {required: false});
-    await sleep(1500);
+    await sleep(PAGE_SETTLE_MS);
     return {
       alreadyBound: false,
       entry: 'add_payment_method',
@@ -2480,7 +2547,7 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
     throw new Error(`Add a Payment Method entry is required for this mode; refusing Add Credits fallback; tail=${initial.tail}`);
   }
 
-  if (initial.hasAddCredits) {
+  if (initial.canAddCredits || initial.hasAddCredits) {
     const result = await openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry);
     const state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
     return {...result, entry: 'add_credits', state};
@@ -3149,24 +3216,47 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, fields, saved, state};
 }
 
-async function waitForAccountState(page, timeoutMs = 20000) {
+async function waitForAccountState(page, options = {}) {
+  const timeoutMs = options.timeoutMs || DEFAULT_CREDITS_ENTRY_WAIT_MS;
+  const requirePaymentEntry = options.requirePaymentEntry !== false;
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await evaluate(page, `(() => {
       const text = document.body.innerText || '';
+      const visible = (node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
+        .map((node) => ({
+          text: (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' '),
+          visible: visible(node),
+          disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
+        }))
+        .filter((item) => item.visible && item.text);
+      const clickable = buttons.filter((item) => !item.disabled).map((item) => item.text);
+      const labels = buttons.map((item) => item.text);
+      const hasAny = (rx) => labels.some((label) => rx.test(label));
+      const hasClickable = (rx) => clickable.some((label) => rx.test(label));
       return {
         account: (text.match(/Personal Account:\\s*([^\\n]+)/) || [])[1] || '',
-        hasAddCredits: /Add Credits/.test(text),
-        hasAddPaymentMethod: /Add a Payment Method|Add Payment Method/i.test(text),
+        hasAddCredits: hasAny(/^Add Credits$/i) || /Add Credits/.test(text),
+        canAddCredits: hasClickable(/^Add Credits$/i),
+        hasAddPaymentMethod: hasAny(/^Add a Payment Method$|^Add Payment Method$/i) || /Add a Payment Method|Add Payment Method/i.test(text),
+        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i),
         signin: /Sign in|Continue with Google|Log in/i.test(text),
+        disabledEntryButtons: buttons
+          .filter((item) => item.disabled && /Add Credits|Add a Payment Method|Add Payment Method/i.test(item.text))
+          .map((item) => item.text),
         tail: text.slice(-1200),
       };
     })()`);
-    if (lastState.account || lastState.signin) return lastState;
+    if (lastState.signin) return lastState;
+    if (lastState.account && (!requirePaymentEntry || lastState.canAddCredits || lastState.canAddPaymentMethod)) return lastState;
     await sleep(500);
   }
-  return lastState || {account: '', hasAddPaymentMethod: false, hasAddCredits: false, tail: ''};
+  return lastState || {account: '', hasAddPaymentMethod: false, hasAddCredits: false, canAddCredits: false, canAddPaymentMethod: false, tail: ''};
 }
 
 async function run() {
@@ -3189,7 +3279,9 @@ async function run() {
     await page.send('Runtime.enable');
     await page.send('Page.enable').catch(() => {});
 	    await navigatePage(page, OPENROUTER_CREDITS_URL);
-	    const accountState = await waitForAccountState(page);
+	    const accountState = await waitForAccountState(page, {
+      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+    });
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
 	    }
@@ -3198,8 +3290,8 @@ async function run() {
 	    }
     accountForRecovery = accountState.account;
 
-    if (!accountState.hasAddCredits && !accountState.hasAddPaymentMethod) {
-      throw new Error(`Payment entry not found: neither Add Credits nor Add a Payment Method is visible; tail=${accountState.tail}`);
+    if (!input.creditsStatusOnly && !input.autoTopupOnly && !accountState.canAddCredits && !accountState.canAddPaymentMethod) {
+      throw new Error(`Payment entry not ready after waiting: neither Add Credits nor Add a Payment Method is clickable; disabled=${(accountState.disabledEntryButtons || []).join(',')}; tail=${accountState.tail}`);
     }
     if (input.creditsStatusOnly) {
       const balance = await getCurrentCreditBalance(page);
@@ -3237,8 +3329,8 @@ async function run() {
     }
     if (input.purchaseOnly) {
       const paymentMethod = await verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount);
-      await waitForExactText(page, 'Add Credits');
-      await sleep(1000);
+      await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+      await sleep(PAGE_SETTLE_MS);
       const purchaseResult = input.purchase.confirmed
         ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
         : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
@@ -3275,7 +3367,7 @@ async function run() {
     }
     const paymentPath = await openPaymentMethodEntryPath(page, last4, expectedExpiry, {
       requireAddPaymentMethod: input.billingAddressOnly,
-      timeoutMs: input.billingAddressOnly ? 30000 : 6000,
+      timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
     });
     if (paymentPath.alreadyBound) {
       const purchaseResult = input.purchase.confirmed

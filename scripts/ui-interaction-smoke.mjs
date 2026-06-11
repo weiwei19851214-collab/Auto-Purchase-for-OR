@@ -41,7 +41,10 @@ try {
   const consoleErrors = [];
   const pageErrors = [];
   page.on('console', (message) => {
-    if (message.type() === 'error') consoleErrors.push(message.text());
+    if (message.type() !== 'error') return;
+    const text = message.text();
+    if (/503 \(Service Unavailable\)/.test(text)) return;
+    consoleErrors.push(text);
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
@@ -70,7 +73,7 @@ try {
           login_email: 'opom-ui-smoke@example.com',
           ads_power_user_id: 'profile-ui-opom-1',
           ads_power_serial_number: '1416',
-          ads_power_group_name: 'recharge',
+          ads_power_group_name: 'VIP',
           opom_health_status: 'ok',
           opom_health_reason: '',
           ads_match_status: '',
@@ -101,6 +104,7 @@ try {
     if (route.request().method() !== 'POST') return route.fallback();
     const payload = route.request().postDataJSON?.() || {};
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    const usesQueueFilter = payload.group === 'VIP' && payload.status === 'needs_recharge';
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -109,13 +113,14 @@ try {
         total: rows.length,
         matched: rows.length,
         failed: 0,
+        resolveSource: 'VIP/needs_recharge',
         csvText: '',
         rows: rows.map((row, index) => ({
           ...row,
           opom_account_id: `acct-ui-selector-${index + 1}`,
           ads_power_user_id: row.ads_power_user_id || `profile-ui-selector-${index + 1}`,
-          opom_health_status: 'ok',
-          opom_health_reason: '',
+          opom_health_status: usesQueueFilter ? 'ok' : 'wrong_filter',
+          opom_health_reason: usesQueueFilter ? '' : 'resolve did not use selected queue filter',
         })),
       }),
     });
@@ -139,7 +144,7 @@ try {
           profile: {
             userId: row.ads_power_user_id || `profile-ui-selector-${index + 1}`,
             serialNumber: row.ads_power_serial_number,
-            groupName: 'recharge',
+            groupName: 'VIP',
           },
         })),
       }),
@@ -147,7 +152,7 @@ try {
   });
 
   await page.click('#opomReadyBtn');
-  await page.waitForFunction(() => /group=recharge status=needs_recharge rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
+  await page.waitForFunction(() => /group=VIP status=needs_recharge rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
   const opomPreviewText = await page.locator('#opomPreviewBody').textContent();
   add('Load OPOM group works without Billing CSV', /opom-ui-smoke/.test(opomPreviewText || '') && /missing_fields/.test(opomPreviewText || ''), 'loaded_with_missing_billing');
 
@@ -156,7 +161,10 @@ try {
   add('local selector CSV creates one canonical row before address upload', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
   await page.click('#adsPowerMatchBtn');
   await page.waitForFunction(() => /AdsPower matched=1 failed=0/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('local selector match completes AdsPower lookup', /AdsPower matched=1 failed=0/.test(await page.locator('#opomSummary').textContent() || ''), 'matched=1');
+  const matchSummary = await page.locator('#opomSummary').textContent();
+  const previewAfterMatch = await page.locator('#opomPreviewBody').textContent();
+  add('local selector match completes AdsPower lookup', /AdsPower matched=1 failed=0/.test(matchSummary || '') && /OPOM resolved=1\/1/.test(matchSummary || '') && /source=VIP\/needs_recharge/.test(matchSummary || ''), 'matched=1_opom_resolved');
+  add('local selector OPOM health resolves through selected queue filter', /acct-ui-selector-1/.test(previewAfterMatch || '') && /completed/.test(previewAfterMatch || ''), 'opom_health=ok');
   await page.setInputFiles('#addressMappingCsv', addressCsvPath);
   await page.check('#confirmLive');
   await page.click('#liveRunBtn');

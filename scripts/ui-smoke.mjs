@@ -61,6 +61,11 @@ try {
     'checked',
   );
   add(
+    'OPOM group default is VIP',
+    /id=["']opomGroup["'][^>]*value=["']VIP["']/.test(html),
+    'VIP',
+  );
+  add(
     'sticky summary cards reflect current workflow',
     />清单<\/span>/.test(html)
       && />AdsPower<\/span>/.test(html)
@@ -94,6 +99,9 @@ try {
     && html.indexOf('aria-label="预检和启动执行"') > html.indexOf('<h2>待充值清单</h2>')
     && html.indexOf('<h2>任务详情</h2>') > html.indexOf('aria-label="预检和启动执行"'), 'after_preview');
   add('manual Dry-run action hidden', !/id=["']dryRunBtn["']/.test(html), 'hidden');
+  add('resume row action wired in UI', /从本行继续/.test(appJs), 'present');
+  add('resume API wired in UI', /resume-preview/.test(appJs) && /resumeFromRow/.test(appJs), 'present');
+  add('OPOM resolve failure is row-visible', /opom_resolve_failed/.test(appJs), 'present');
   add('auto preflight copy present', /自动预检/.test(html), 'present');
   add('AdsPower status writeback UI hidden', !/adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'hidden');
   add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');

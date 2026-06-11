@@ -2,6 +2,10 @@ import {redact} from './redact.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 
 const DEFAULT_GROUP = 'recharge';
+const DEFAULT_OPOM_REQUEST_TIMEOUT_MS = 45000;
+const DEFAULT_OPOM_REQUEST_RETRIES = 3;
+const DEFAULT_OPOM_WRITEBACK_RETRIES = 3;
+const DEFAULT_OPOM_RETRY_DELAY_MS = 1500;
 
 export function opomDefaults(env = process.env) {
   return {
@@ -41,19 +45,63 @@ async function readJsonResponse(res) {
 
 async function requestJson(args, path, options = {}) {
   assertConfigured(args);
-  const res = await fetch(`${normalizeBaseUrl(args.opomBaseUrl)}${path}`, {
-    ...options,
-    headers: {
-      ...authHeaders(args),
-      ...(options.headers || {}),
-    },
-  });
-  const body = await readJsonResponse(res);
-  if (!res.ok) {
-    const message = body?.error?.message || body?.error || body?.message || `OPOM HTTP ${res.status}`;
-    throw new Error(redact(`OPOM request failed: ${message}`));
+  const baseUrl = normalizeBaseUrl(args.opomBaseUrl);
+  const timeoutMs = Number(args.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || DEFAULT_OPOM_REQUEST_TIMEOUT_MS);
+  const method = String(options.method || 'GET').toUpperCase();
+  const retryableWrite = options.idempotent === true && /^(POST|PUT|PATCH)$/.test(method);
+  const retries = method === 'GET'
+    ? Number(args.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || DEFAULT_OPOM_REQUEST_RETRIES)
+    : retryableWrite
+      ? Number(args.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || DEFAULT_OPOM_WRITEBACK_RETRIES)
+    : 1;
+  const retryDelayMs = Number(args.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || DEFAULT_OPOM_RETRY_DELAY_MS);
+  let lastError = null;
+  for (let attempt = 1; attempt <= Math.max(1, retries); attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          ...authHeaders(args),
+          ...(options.headers || {}),
+        },
+      });
+      clearTimeout(timeout);
+      const body = await readJsonResponse(res);
+      if (!res.ok) {
+        const message = body?.error?.message || body?.error || body?.message || `OPOM HTTP ${res.status}`;
+        if ((method === 'GET' || retryableWrite) && res.status >= 500 && attempt < retries) {
+          lastError = new Error(`OPOM request failed: ${message}`);
+          await sleep(retryDelayMs * attempt);
+          continue;
+        }
+        const httpError = new Error(redact(`OPOM request failed: ${message}`));
+        httpError.nonRetryable = true;
+        throw httpError;
+      }
+      return body;
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+      if (error?.nonRetryable) {
+        break;
+      }
+      if ((method === 'GET' || retryableWrite) && attempt < retries) {
+        await sleep(retryDelayMs * attempt);
+        continue;
+      }
+    }
   }
-  return body;
+  const cause = lastError?.name === 'AbortError'
+    ? `timeout after ${timeoutMs}ms`
+    : (lastError?.cause?.code || lastError?.cause?.message || lastError?.message || 'request failed');
+  throw new Error(redact(`OPOM network failed at ${baseUrl}: ${cause}`));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function fetchRechargeAccounts(args, input = {}) {
@@ -152,6 +200,7 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   try {
     await requestJson(args, `/api/v1/recharge/accounts/${encodeURIComponent(opomAccountId)}/card-binding`, {
       method: 'PUT',
+      idempotent: true,
       body: JSON.stringify(bindingBody),
     });
   } catch (error) {
@@ -173,11 +222,18 @@ export async function writeRowResult(args, row, details, context = {}) {
   const errorCode = context.errorCode || '';
   const errorMessage = redact(context.message || '');
   const stage = context.stage || '';
+  const status = context.status || details.status || '';
+  const stageKey = stage || (status === 'completed' ? 'completed' : 'result');
+  const attemptNo = context.attemptNo || 1;
+  const defaultIdempotencyKey = `recharge_result:${runId}:${context.rowNumber || ''}:${attemptNo}:${status || 'unknown'}:${stageKey}`;
+  const idempotencyKey = row.result_idempotency_key
+    ? `${row.result_idempotency_key}:${status || 'unknown'}:${stageKey}:${attemptNo}`
+    : defaultIdempotencyKey;
   const body = {
-    idempotencyKey: row.result_idempotency_key || `recharge_result:${runId}:${context.rowNumber || ''}:${context.attemptNo || 1}`,
+    idempotencyKey,
     opomAccountId: plan.opomAccountId(row),
     ...(loginEmail ? {loginEmail} : {}),
-    status: context.status || details.status || '',
+    status,
     amountUsd: numberOrUndefined(details.purchaseAmount),
     balanceBeforeUsd: numberOrUndefined(details.balanceBefore),
     balanceAfterUsd: numberOrUndefined(details.balanceAfter),
@@ -189,6 +245,7 @@ export async function writeRowResult(args, row, details, context = {}) {
   };
   await requestJson(args, `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`, {
     method: 'POST',
+    idempotent: true,
     body: JSON.stringify(body),
   });
   return {resultStatus: 'written'};

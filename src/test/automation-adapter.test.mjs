@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import {execFile, execFileSync} from 'node:child_process';
 import {createServer} from 'node:http';
 import {promisify} from 'node:util';
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, rmSync, unlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
 import {getJob, openDatabase} from '../server/db.mjs';
-import {cancelJob, createJob, defaultRechargeJobName, dryRunPayload, jobDetails} from '../server/jobs.mjs';
+import {cancelJob, createJob, defaultRechargeJobName, dryRunPayload, jobDetails, resumeJob, resumePreview} from '../server/jobs.mjs';
 import {executeRowWithAdapters, parsePlan, runnerArgs, writeResultCsv} from '../server/automation-adapter.mjs';
 import {readFileSync, existsSync} from 'node:fs';
 import * as rechargePlan from '../automation/lib/recharge-plan.mjs';
@@ -17,6 +17,12 @@ const execFileAsync = promisify(execFile);
 
 const VALID_CSV = `status,ID,username,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
 ,1415,user@example.com,10,5257970000000001,06,28,456,97001,2,25
+`;
+
+const THREE_ROW_CSV = `status,ID,username,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
+,1415,first@example.com,10,5257970000000001,06,28,456,97001,2,25
+,1416,second@example.com,10,5257970000000002,06,28,456,97001,2,25
+,1417,third@example.com,10,5257970000000003,06,28,456,97001,2,25
 `;
 
 const MISSING_CSV = `status,ID,username,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
@@ -245,7 +251,7 @@ test('createJob allows all-blocked dry-run result without live confirmation toke
     assert.equal(result.job.status, 'completed');
     assert.equal(result.job.readyRows, 0);
     assert.equal(result.rows[0].status, 'missing_fields');
-    assert.equal(existsSync(job.csv_path), false);
+    assert.equal(existsSync(job.csv_path), true);
     assert.equal(existsSync(job.result_csv_path), true);
     const text = readFileSync(job.result_csv_path, 'utf8');
     assert.match(text, /missing_fields/);
@@ -685,7 +691,7 @@ test('writeResultCsv escapes formula-like cells for spreadsheet handoff', async 
   }
 });
 
-test('cancelJob writes sanitized result and removes queued raw upload', async () => {
+test('cancelJob writes sanitized result and preserves queued raw upload for resume', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-cancel-'));
   try {
     const db = openDatabase(join(dir, 'test.sqlite'));
@@ -699,13 +705,152 @@ test('cancelJob writes sanitized result and removes queued raw upload', async ()
     assert.equal(existsSync(job.csv_path), true);
     const canceled = await cancelJob(db, created.job.id);
     assert.equal(canceled.job.status, 'canceled');
-    assert.equal(existsSync(job.csv_path), false);
+    assert.equal(existsSync(job.csv_path), true);
     assert.equal(existsSync(job.result_csv_path), true);
     const text = readFileSync(job.result_csv_path, 'utf8');
     assert.match(text, /failed/);
     assert.match(text, /job canceled before execution/);
     assert.match(text, new RegExp(created.job.id));
     assert.doesNotMatch(text, /,456,|card_number|cvv/);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('resumeJob queues failed rows from selected row and skips completed rows', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-mid-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: THREE_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const rows = jobDetails(db, created.job.id).rows;
+    db.prepare(`
+      UPDATE job_rows
+      SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?, balance_before = ?, balance_after = ?, finished_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run('completed', 'closed_loop.complete', 'completed', 'verified', '10', '20', '30', rows[0].id);
+    db.prepare(`
+      UPDATE job_rows
+      SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?, balance_before = ?, balance_after = ?, finished_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run('failed', 'automation', 'old failure', 'failed', '10', '20', '20', rows[1].id);
+    db.prepare(`
+      UPDATE job_rows
+      SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?, balance_before = ?, balance_after = ?, finished_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run('canceled', 'canceled', 'old canceled', 'canceled', '10', '20', '20', rows[2].id);
+    db.prepare("UPDATE jobs SET status = 'blocked', cancel_requested = 1, error = 'old error', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(created.job.id);
+
+    const preview = await resumePreview(db, created.job.id, {startRowNumber: 3});
+    assert.deepEqual(preview.queuedRows.map((row) => row.rowNumber), [3, 4]);
+    assert.deepEqual(preview.skippedCompletedRows.map((row) => row.rowNumber), []);
+
+    const resumed = await resumeJob(db, created.job.id, {startRowNumber: 2});
+    assert.equal(resumed.job.status, 'queued');
+    assert.equal(resumed.job.cancelRequested, false);
+    assert.equal(resumed.job.error, '');
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].status, 'completed');
+    assert.equal(details.rows[1].status, 'queued');
+    assert.equal(details.rows[1].message, 'queued for resume');
+    assert.equal(details.rows[1].purchaseStatus, '');
+    assert.equal(details.rows[1].balanceBefore, '');
+    assert.equal(details.rows[2].status, 'queued');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('resumeJob skips risky rows by default and includes them only with confirmation flag', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-risky-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: THREE_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const rows = jobDetails(db, created.job.id).rows;
+    db.prepare("UPDATE job_rows SET status = 'purchase_unverified', stage = 'worker.interrupted', message = 'needs review' WHERE id = ?").run(rows[0].id);
+    db.prepare("UPDATE job_rows SET status = 'manual_security_blocker', stage = 'security', message = 'manual check' WHERE id = ?").run(rows[1].id);
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'ordinary failure' WHERE id = ?").run(rows[2].id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+
+    const preview = await resumePreview(db, created.job.id, {startRowNumber: 2});
+    assert.deepEqual(preview.queuedRows.map((row) => row.rowNumber), [4]);
+    assert.deepEqual(preview.skippedRiskyRows.map((row) => row.rowNumber), [2, 3]);
+
+    await resumeJob(db, created.job.id, {startRowNumber: 2});
+    let details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].status, 'purchase_unverified');
+    assert.equal(details.rows[1].status, 'manual_security_blocker');
+    assert.equal(details.rows[2].status, 'queued');
+
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+    await resumeJob(db, created.job.id, {startRowNumber: 2, includeRiskyRows: true});
+    details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].status, 'queued');
+    assert.equal(details.rows[1].status, 'queued');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('resumeJob rejects old jobs when only an insufficient result CSV remains', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-missing-csv-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: VALID_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: VALID_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const job = getJob(db, created.job.id);
+    unlinkSync(job.csv_path);
+    writeFileSync(job.result_csv_path, 'run_id,row_number,status,message\nrun,2,failed,old failure\n');
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+    db.prepare("UPDATE job_rows SET status = 'failed', message = 'old failure' WHERE job_id = ?").run(created.job.id);
+
+    await assert.rejects(
+      () => resumeJob(db, created.job.id, {startRowNumber: 2}),
+      /CSV cannot be used for resume/,
+    );
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('resumeJob rewrites result CSV without old failure results for requeued rows', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-result-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: VALID_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: VALID_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const row = jobDetails(db, created.job.id).rows[0];
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'old failure', purchase_status = 'failed' WHERE id = ?").run(row.id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+    await writeResultCsv({
+      csvPath: getJob(db, created.job.id).csv_path,
+      resultCsvPath: getJob(db, created.job.id).result_csv_path,
+      runId: created.job.id,
+      rowsByRawIndex: [{rawIndex: 0, status: 'failed', message: 'old failure'}],
+    });
+    assert.match(readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8'), /old failure/);
+
+    await resumeJob(db, created.job.id, {startRowNumber: 2});
+    const text = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.doesNotMatch(text, /old failure/);
+    assert.doesNotMatch(text, /failed/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

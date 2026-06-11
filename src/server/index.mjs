@@ -5,14 +5,14 @@ import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
 import {DEFAULT_SERVER_PORT, PUBLIC_DIR} from './config.mjs';
 import {openDatabase, getJob, recoverInterruptedWork} from './db.mjs';
 import {httpError, readJsonBody, route, sendFile, sendJson, sendText} from './http-utils.mjs';
-import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList} from './jobs.mjs';
+import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList, resumeJob, resumePreview} from './jobs.mjs';
 import {matchAdsPowerPayload} from './adspower-match.mjs';
 import {configuredTargetsFromRunner, inspectAdsPowerStatusTargets} from './adspower-status-targets.mjs';
 import {allocateCardsPayload} from './card-allocation.mjs';
 import {environmentPreflight} from './preflight.mjs';
 import {readyToRechargePayload, resolveOpomAccountsPayload} from './opom-orchestrator.mjs';
 import {redact} from './redact.mjs';
-import {cleanupJobUpload, runnerArgs} from './automation-adapter.mjs';
+import {runnerArgs} from './automation-adapter.mjs';
 import {JobWorker} from './worker.mjs';
 
 const db = openDatabase();
@@ -22,7 +22,6 @@ const worker = new JobWorker(db);
 for (const jobId of recoveredJobIds) {
   try {
     await worker.writeCurrentResult(jobId);
-    cleanupJobUpload(getJob(db, jobId));
   } catch (error) {
     console.warn(`[recovery] could not rewrite result for ${jobId}: ${redact(error.message)}`);
   }
@@ -139,6 +138,19 @@ async function handle(req, res) {
     if (req.method === 'GET' && parts[3] === 'result.csv') {
       if (!existsSync(job.result_csv_path)) throw httpError(404, 'Result CSV is not ready yet');
       await sendFile(res, job.result_csv_path);
+      return;
+    }
+
+    if (req.method === 'POST' && parts[3] === 'resume-preview') {
+      const payload = await readJsonBody(req);
+      sendJson(res, 200, await resumePreview(db, jobId, payload));
+      return;
+    }
+
+    if (req.method === 'POST' && parts[3] === 'resume') {
+      if (worker.status().running) throw httpError(409, 'Worker is currently running; wait before resuming a job');
+      const payload = await readJsonBody(req);
+      sendJson(res, 200, await resumeJob(db, jobId, payload));
       return;
     }
 

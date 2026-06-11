@@ -666,7 +666,7 @@ function syncOpomPagination() {
 }
 
 async function loadOpomPage({append = false} = {}) {
-  const group = els.opomGroup.value.trim() || 'recharge';
+  const group = els.opomGroup.value.trim() || 'VIP';
   const status = els.opomStatus.value || 'needs_recharge';
   const rawLimit = Number(els.opomLimit.value || 100);
   const limit = Math.min(200, Math.max(1, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 100));
@@ -705,14 +705,34 @@ async function matchAdsPower() {
     row.login_email || row.ads_power_user_id || row.ads_power_serial_number
   ));
   let opomResolved = null;
+  let opomResolveWarning = '';
   if (needsOpomResolve && sessionConfig.opomWritebackConfigured) {
-    opomResolved = await api('/api/opom/resolve', {
-      method: 'POST',
-      body: JSON.stringify({rows: opomRows}),
-    });
-    opomRows = opomResolved.rows || opomRows;
-    selectedCsvText = opomResolved.csvText || canonicalCsvFromRows(opomRows);
-    renderOpomPreview('opom_resolve');
+    try {
+      opomResolved = await api('/api/opom/resolve', {
+        method: 'POST',
+        body: JSON.stringify({
+          rows: opomRows,
+          group: els.opomGroup.value.trim() || 'VIP',
+          status: els.opomStatus.value || 'needs_recharge',
+        }),
+      });
+      opomRows = opomResolved.rows || opomRows;
+      selectedCsvText = opomResolved.csvText || canonicalCsvFromRows(opomRows);
+      renderOpomPreview('opom_resolve');
+    } catch (error) {
+      const reason = sanitizeMessage(error.message || 'OPOM resolve failed');
+      opomResolveWarning = ` OPOM resolve failed: ${reason}`;
+      opomRows = opomRows.map((row) => {
+        if (row.opom_account_id) return row;
+        return {
+          ...row,
+          opom_health_status: 'opom_resolve_failed',
+          opom_health_reason: reason,
+        };
+      });
+      selectedCsvText = canonicalCsvFromRows(opomRows);
+      renderOpomPreview('opom_resolve_failed');
+    }
   }
   const data = await api('/api/adspower/match', {
     method: 'POST',
@@ -737,8 +757,8 @@ async function matchAdsPower() {
   renderOpomPreview('adspower_match');
   invalidateDryRun(`AdsPower 匹配完成：matched=${data.matched || 0}, failed=${data.failed || 0}。启动执行时会自动预检。`);
   const opomResolveText = opomResolved
-    ? ` OPOM resolved=${opomResolved.matched || 0}/${opomResolved.total || 0}`
-    : '';
+    ? ` OPOM resolved=${opomResolved.matched || 0}/${opomResolved.total || 0}${opomResolved.resolveSource ? ` source=${opomResolved.resolveSource}` : ''}`
+    : opomResolveWarning;
   els.opomSummary.textContent = `AdsPower matched=${data.matched || 0} failed=${data.failed || 0}${opomResolveText}`;
 }
 
@@ -1023,6 +1043,7 @@ async function loadJob(jobId) {
 function renderJobDetail(job, rows, events = []) {
   if (!job) return;
   const running = rows.find((row) => row.status === 'running');
+  const canResumeRows = !['queued', 'running'].includes(job.status);
   els.jobMeta.innerHTML = `
     ${statusBadge(job.status)}
     <span>总数 ${job.totalRows}</span>
@@ -1050,9 +1071,65 @@ function renderJobDetail(job, rows, events = []) {
       <td>${escapeHtml(cardNoLabel(row))}</td>
       <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
       <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
+      <td><button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" ${canResumeRows ? '' : 'disabled'}>从本行继续</button></td>
     </tr>
   `).join('');
+  els.rowsBody.querySelectorAll('.resume-row-btn').forEach((button) => {
+    button.addEventListener('click', () => resumeFromRow(Number(button.dataset.rowNumber)).catch(showError));
+  });
   renderEvents(events);
+}
+
+function resumePreviewSummary(preview, includeRiskyRows = false) {
+  const lines = [
+    `从第 ${preview.startRowNumber} 行继续。`,
+    `候选行 ${preview.totalCandidateRows} 行。`,
+    `将重排队 ${preview.queuedRows?.length || 0} 行，已在队列 ${preview.alreadyQueuedRows?.length || 0} 行。`,
+    `已完成/已跳过 ${preview.skippedCompletedRows?.length || 0} 行不会重跑。`,
+    `高风险行 ${preview.skippedRiskyRows?.length || 0} 行${includeRiskyRows ? '将包含重跑。' : '默认跳过。'}`,
+  ];
+  if (preview.unsupportedRows?.length) lines.push(`不可续跑 ${preview.unsupportedRows.length} 行。`);
+  if (preview.csvAvailability?.source === 'recovered_from_result_csv') lines.push('原始执行 CSV 缺失，已从 result CSV 恢复。');
+  if (preview.csvAvailability && !preview.csvAvailability.ok) lines.push(`CSV 不可用：${preview.csvAvailability.reason || '未知原因'}`);
+  return lines.join('\n');
+}
+
+async function resumeFromRow(startRowNumber) {
+  if (!selectedJobId) return;
+  const preview = await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume-preview`, {
+    method: 'POST',
+    body: JSON.stringify({startRowNumber}),
+  });
+  if (!preview.csvAvailability?.ok) {
+    window.alert(resumePreviewSummary(preview));
+    return;
+  }
+  if (!preview.queuedRows?.length && !preview.alreadyQueuedRows?.length && !preview.skippedRiskyRows?.length) {
+    window.alert(`${resumePreviewSummary(preview)}\n\n没有可续跑的行。`);
+    return;
+  }
+
+  let includeRiskyRows = false;
+  if (preview.skippedRiskyRows?.length) {
+    includeRiskyRows = window.confirm(`${resumePreviewSummary(preview)}\n\n检测到 running / purchase_unverified / manual_security_blocker 等高风险行。只有确认线下核对后才建议包含这些行。是否包含高风险行继续？`);
+  }
+  const finalPreview = includeRiskyRows
+    ? await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume-preview`, {
+      method: 'POST',
+      body: JSON.stringify({startRowNumber, includeRiskyRows: true}),
+    })
+    : preview;
+  if (!finalPreview.queuedRows?.length && !finalPreview.alreadyQueuedRows?.length) {
+    window.alert(`${resumePreviewSummary(finalPreview, includeRiskyRows)}\n\n没有可续跑的行。`);
+    return;
+  }
+  if (!window.confirm(`${resumePreviewSummary(finalPreview, includeRiskyRows)}\n\n确认在原任务内从本行继续？`)) return;
+  await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume`, {
+    method: 'POST',
+    body: JSON.stringify({startRowNumber, includeRiskyRows}),
+  });
+  await refreshAll();
+  await loadJob(selectedJobId);
 }
 
 function renderEvents(events) {

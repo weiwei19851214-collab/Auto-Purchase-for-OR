@@ -18,6 +18,9 @@ const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 15000;
 const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
 const DEFAULT_CREDITS_ENTRY_WAIT_MS = 45000;
 const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 45000;
+const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000;
+const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 45000;
+const DEFAULT_NAVIGATION_RETRIES = 3;
 const PAGE_SETTLE_MS = 3000;
 const BALANCE_VERIFY_REFRESH_INTERVAL_MS = 15000;
 
@@ -683,14 +686,71 @@ async function evaluate(client, expression, timeoutMs = 15000) {
   return result.result.value;
 }
 
-async function navigatePage(client, url) {
-  await client.send('Page.enable').catch(() => {});
-  await client.send('Page.navigate', {url});
-  for (let i = 0; i < 30; i += 1) {
-    await sleep(500);
-    const ready = await evaluate(client, 'document.readyState');
-    if (ready === 'interactive' || ready === 'complete') return;
+function navigationHrefMatchesTarget(targetUrl, href) {
+  try {
+    const target = new URL(targetUrl);
+    const current = new URL(href);
+    const targetWithoutHash = `${target.origin}${target.pathname}${target.search}`;
+    const currentWithoutHash = `${current.origin}${current.pathname}${current.search}`;
+    if (currentWithoutHash === targetWithoutHash) return true;
+    return current.origin === target.origin && /\/(?:login|sign-in|signin|auth)(?:\/|$)/i.test(current.pathname);
+  } catch {
+    return false;
   }
+}
+
+async function waitForNavigationReady(client, targetUrl, timeoutMs = DEFAULT_NAVIGATION_READY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await evaluate(client, `(() => ({
+      href: location.href,
+      readyState: document.readyState,
+      title: document.title || ''
+    }))()`, 5000).catch((error) => ({error: error.message}));
+    if (
+      !lastState?.error
+      && (lastState.readyState === 'interactive' || lastState.readyState === 'complete')
+      && navigationHrefMatchesTarget(targetUrl, lastState.href)
+    ) {
+      return lastState;
+    }
+    await sleep(500);
+  }
+  throw new Error(`navigation ready timeout after ${timeoutMs}ms: ${JSON.stringify(lastState || {})}`);
+}
+
+async function navigatePage(client, url, options = {}) {
+  const commandTimeoutMs = options.commandTimeoutMs || DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS;
+  const readyTimeoutMs = options.readyTimeoutMs || DEFAULT_NAVIGATION_READY_TIMEOUT_MS;
+  const retries = Math.max(1, Number(options.retries || DEFAULT_NAVIGATION_RETRIES));
+  let lastError = null;
+
+  await client.send('Page.enable', {}, 5000).catch(() => {});
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      await client.send('Page.navigate', {url}, commandTimeoutMs);
+      return await waitForNavigationReady(client, url, readyTimeoutMs);
+    } catch (error) {
+      lastError = error;
+      const alreadyReady = await waitForNavigationReady(client, url, 5000).catch(() => null);
+      if (alreadyReady) return alreadyReady;
+
+      await client.send('Page.stopLoading', {}, 5000).catch(() => {});
+
+      try {
+        await evaluate(client, `location.href = ${JSON.stringify(url)}; true`, 5000);
+        return await waitForNavigationReady(client, url, readyTimeoutMs);
+      } catch (fallbackError) {
+        lastError = fallbackError;
+      }
+
+      if (attempt < retries) await sleep(1000 * attempt);
+    }
+  }
+
+  throw new Error(`CDP navigation failed after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
 }
 
 async function ensureCreditsPage(page) {

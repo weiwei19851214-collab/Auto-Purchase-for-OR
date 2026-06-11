@@ -17,3 +17,11 @@ test('security challenge text is classified as ordinary row failure', () => {
   assert.equal(result.safeToContinueBatch, true);
   assert.equal(result.stopProfile, true);
 });
+
+test('CDP navigation timeouts are ordinary row failures and do not stop the batch', () => {
+  const result = classifyError('CDP command timeout: Page.navigate');
+  assert.equal(result.status, STATUSES.FAILED);
+  assert.equal(result.stage, 'automation');
+  assert.equal(result.safeToContinueBatch, true);
+  assert.equal(result.stopProfile, true);
+});

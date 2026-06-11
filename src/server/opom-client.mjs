@@ -86,7 +86,7 @@ async function requestJson(args, path, options = {}) {
       clearTimeout(timeout);
       lastError = error;
       if (error?.nonRetryable) {
-        break;
+        throw error;
       }
       if ((method === 'GET' || retryableWrite) && attempt < retries) {
         await sleep(retryDelayMs * attempt);

@@ -981,6 +981,7 @@ test('writeCompletedRow marks result writeback skipped when card binding fails f
         assert.equal(error.opomResultWritebackStatus, 'skipped');
         assert.match(error.message, /token=\[secret\]/);
         assert.doesNotMatch(error.message, /token=secret/);
+        assert.doesNotMatch(error.message, /OPOM network failed/);
         return true;
       },
     );

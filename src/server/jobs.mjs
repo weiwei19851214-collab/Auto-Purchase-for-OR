@@ -12,6 +12,9 @@ import {
 import {addEvent, getJob, listEvents, listJobs, listRows, updateJobCounts} from './db.mjs';
 import {createLiveConfirmation, verifyLiveConfirmation} from './safety.mjs';
 import {httpError} from './http-utils.mjs';
+import * as csv from '../automation/lib/csv.mjs';
+import * as plan from '../automation/lib/recharge-plan.mjs';
+import {writeCompletedRow} from './opom-client.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -393,6 +396,143 @@ async function ensureJobCsvAvailable(job) {
     return {ok: true, source: 'recovered_from_result_csv', csvPath: job.csv_path};
   }
   return {ok: false, source: 'missing', reason: '旧任务缺少原始执行 CSV，不能续跑'};
+}
+
+function originalRowFromJobCsv(job, rawIndex) {
+  const text = readFileSync(job.csv_path, 'utf8');
+  const parsed = csv.parseCsv(text);
+  if (parsed.length < 2) throw httpError(409, 'Original CSV has no data rows');
+  const header = [...parsed[0]];
+  csv.ensureColumns(header, plan.resultColumns());
+  const sourceRows = parsed.slice(1).map((row) => {
+    const next = [...row];
+    csv.padRows([next], header.length);
+    return next;
+  });
+  const source = sourceRows[rawIndex];
+  if (!source) throw httpError(404, `CSV row index ${rawIndex} not found`);
+  return csv.rowObject(header, source);
+}
+
+function assertRepairableOpomWritebackRow(row, originalRow) {
+  if (row.status !== 'failed' || row.stage !== 'opom.writeback') {
+    throw httpError(409, 'Only failed opom.writeback rows can be repaired without rerunning purchase');
+  }
+  if (row.purchase_status !== 'verified') {
+    throw httpError(409, 'OPOM writeback repair requires verified purchase evidence');
+  }
+  if (!row.purchase_amount || !row.balance_after) {
+    throw httpError(409, 'OPOM writeback repair requires purchase amount and balance evidence');
+  }
+  const required = [
+    ['opom_account_id', plan.opomAccountId(originalRow)],
+    ['order_no', plan.ejhOrderNo(originalRow)],
+    ['card_no', plan.cardNumber(originalRow)],
+    ['exp_month', originalRow.exp_month],
+    ['exp_year', originalRow.exp_year],
+  ];
+  const missing = required.filter(([, value]) => !String(value || '').trim()).map(([name]) => name);
+  if (missing.length) {
+    throw httpError(409, `OPOM writeback repair requires original CSV fields: ${missing.join(', ')}`);
+  }
+  const mismatches = [];
+  if (row.opom_account_id && row.opom_account_id !== plan.opomAccountId(originalRow)) mismatches.push('opom_account_id');
+  if (row.ejh_order_no && row.ejh_order_no !== plan.ejhOrderNo(originalRow)) mismatches.push('order_no');
+  if (row.card_no && row.card_no !== plan.cardNumber(originalRow)) mismatches.push('card_no');
+  if (mismatches.length) {
+    throw httpError(409, `OPOM writeback repair blocked because original CSV no longer matches row state: ${mismatches.join(', ')}`);
+  }
+}
+
+export async function repairOpomWriteback(db, jobId, payload = {}) {
+  const job = getJob(db, jobId);
+  if (!job) throw httpError(404, 'Job not found');
+  if (['queued', 'running'].includes(job.status)) {
+    throw httpError(409, 'Job is queued or running; wait before repairing OPOM writeback');
+  }
+  const rowNumber = Number(payload.rowNumber || 0);
+  if (!Number.isInteger(rowNumber) || rowNumber < 2) {
+    throw httpError(400, 'rowNumber must be an executable CSV row number');
+  }
+  const csvAvailability = await ensureJobCsvAvailable(job);
+  if (!csvAvailability.ok) throw httpError(409, csvAvailability.reason);
+  const row = listRows(db, jobId).find((item) => item.row_number === rowNumber);
+  if (!row) throw httpError(404, `row ${rowNumber} not found`);
+
+  const options = JSON.parse(job.options_json || '{}');
+  const args = runnerArgs(options);
+  if (!args.opomWriteback) throw httpError(409, 'OPOM writeback is not enabled for this job');
+
+  const originalRow = originalRowFromJobCsv(job, row.raw_index);
+  assertRepairableOpomWritebackRow(row, originalRow);
+
+  const details = {
+    ...plan.rowMetadata(originalRow),
+    purchaseStatus: row.purchase_status,
+    purchaseAmount: row.purchase_amount,
+    balanceBefore: row.balance_before,
+    balanceAfter: row.balance_after,
+    cardLast4: row.card_last4 || plan.cardLast4(plan.cardNumber(originalRow)),
+    autoTopupStatus: row.auto_topup_status || 'skipped',
+    autoTopupThreshold: row.auto_topup_threshold,
+    autoTopupAmount: row.auto_topup_amount,
+    adspowerTagStatus: row.adspower_tag_status || 'skipped_user_waived',
+    adspowerStatusMode: row.adspower_status_mode || 'disabled',
+    adspowerStatusTarget: row.adspower_status_target || 'waived_by_user',
+    adspowerStatusReason: row.adspower_status_reason || 'user_waived_status_writeback',
+  };
+
+  const now = nowIso();
+  try {
+    const writeback = await writeCompletedRow(args, originalRow, details, {rowNumber});
+    details.opomCardWritebackStatus = writeback.cardStatus;
+    details.opomResultWritebackStatus = writeback.resultStatus;
+    db.prepare(`
+      UPDATE job_rows
+      SET status = 'completed',
+        stage = 'closed_loop.complete',
+        message = 'OPOM writeback repaired without rerunning purchase',
+        opom_card_writeback_status = ?,
+        opom_result_writeback_status = ?,
+        finished_at = COALESCE(finished_at, ?),
+        updated_at = ?
+      WHERE id = ?
+    `).run(writeback.cardStatus, writeback.resultStatus, now, now, row.id);
+    addEvent(db, jobId, 'opom.writeback_repaired', `row ${rowNumber}: OPOM writeback repaired without rerunning purchase`, {
+      rowNumber,
+      opomCardWritebackStatus: writeback.cardStatus,
+      opomResultWritebackStatus: writeback.resultStatus,
+    }, row.id);
+  } catch (error) {
+    const cardStatus = error.opomCardWritebackStatus || row.opom_card_writeback_status || 'failed';
+    const resultStatus = error.opomResultWritebackStatus || row.opom_result_writeback_status || 'failed';
+    db.prepare(`
+      UPDATE job_rows
+      SET status = 'failed',
+        stage = 'opom.writeback',
+        message = ?,
+        opom_card_writeback_status = ?,
+        opom_result_writeback_status = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(error.message || 'OPOM writeback repair failed', cardStatus, resultStatus, nowIso(), row.id);
+    addEvent(db, jobId, 'opom.writeback_repair_failed', `row ${rowNumber}: ${error.message || 'OPOM writeback repair failed'}`, {
+      rowNumber,
+      opomCardWritebackStatus: cardStatus,
+      opomResultWritebackStatus: resultStatus,
+    }, row.id);
+    updateJobCounts(db, jobId);
+    await rewriteResumeResult(db, jobId);
+    throw error;
+  }
+
+  updateJobCounts(db, jobId);
+  await rewriteResumeResult(db, jobId);
+  return {
+    ok: true,
+    repairedRowNumber: rowNumber,
+    ...jobDetails(db, jobId),
+  };
 }
 
 export async function resumePreview(db, jobId, payload = {}) {

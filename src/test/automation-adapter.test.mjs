@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
 import {getJob, openDatabase} from '../server/db.mjs';
-import {cancelJob, createJob, defaultRechargeJobName, dryRunPayload, jobDetails, resumeJob, resumePreview} from '../server/jobs.mjs';
+import {cancelJob, createJob, defaultRechargeJobName, dryRunPayload, jobDetails, repairOpomWriteback, resumeJob, resumePreview} from '../server/jobs.mjs';
 import {executeRowWithAdapters, parsePlan, runnerArgs, writeResultCsv} from '../server/automation-adapter.mjs';
 import {readFileSync, existsSync} from 'node:fs';
 import * as rechargePlan from '../automation/lib/recharge-plan.mjs';
@@ -851,6 +851,96 @@ test('resumeJob rewrites result CSV without old failure results for requeued row
     const text = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
     assert.doesNotMatch(text, /old failure/);
     assert.doesNotMatch(text, /failed/);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('repairOpomWriteback completes verified opom writeback failures without rerunning purchase', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-opom-repair-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, options) => {
+      calls.push({url: String(url), body: JSON.parse(options.body)});
+      return Response.json({data: {ok: true}});
+    };
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+    };
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_CANONICAL_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_CANONICAL_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const row = jobDetails(db, created.job.id).rows[0];
+    db.prepare(`
+      UPDATE job_rows
+      SET status = 'failed',
+        stage = 'opom.writeback',
+        message = 'OPOM request failed',
+        purchase_status = 'verified',
+        purchase_amount = '10',
+        balance_before = '20',
+        balance_after = '30',
+        card_last4 = '0001',
+        opom_card_writeback_status = 'failed',
+        opom_result_writeback_status = 'written'
+      WHERE id = ?
+    `).run(row.id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+
+    const repaired = await repairOpomWriteback(db, created.job.id, {rowNumber: 2});
+
+    assert.equal(repaired.rows[0].status, 'completed');
+    assert.equal(repaired.rows[0].stage, 'closed_loop.complete');
+    assert.equal(repaired.rows[0].opomCardWritebackStatus, 'written');
+    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].url, /\/card-binding$/);
+    assert.match(calls[1].url, /\/results$/);
+    assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
+    assert.equal(calls[0].body.card.cardNo, '5257970000000001');
+    assert.equal(calls[0].body.card.cvv, undefined);
+    assert.doesNotMatch(JSON.stringify(calls), /"cvv"\s*:/i);
+    const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.match(resultCsv, /completed/);
+    assert.match(resultCsv, /OPOM writeback repaired without rerunning purchase/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('repairOpomWriteback rejects ordinary failures without verified purchase evidence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-opom-repair-reject-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+    };
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_CANONICAL_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_CANONICAL_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const row = jobDetails(db, created.job.id).rows[0];
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'ordinary failure' WHERE id = ?").run(row.id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+
+    await assert.rejects(
+      () => repairOpomWriteback(db, created.job.id, {rowNumber: 2}),
+      /Only failed opom\.writeback rows can be repaired/,
+    );
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

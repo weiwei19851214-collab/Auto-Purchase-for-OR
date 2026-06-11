@@ -1071,13 +1071,26 @@ function renderJobDetail(job, rows, events = []) {
       <td>${escapeHtml(cardNoLabel(row))}</td>
       <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
       <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
-      <td><button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" ${canResumeRows ? '' : 'disabled'}>从本行继续</button></td>
+      <td>
+        <button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" ${canResumeRows ? '' : 'disabled'}>从本行继续</button>
+        ${canRepairOpomWriteback(row, canResumeRows) ? `<button type="button" class="repair-opom-btn" data-row-number="${escapeHtml(row.rowNumber)}">补写 OPOM</button>` : ''}
+      </td>
     </tr>
   `).join('');
   els.rowsBody.querySelectorAll('.resume-row-btn').forEach((button) => {
     button.addEventListener('click', () => resumeFromRow(Number(button.dataset.rowNumber)).catch(showError));
   });
+  els.rowsBody.querySelectorAll('.repair-opom-btn').forEach((button) => {
+    button.addEventListener('click', () => repairOpomWriteback(Number(button.dataset.rowNumber)).catch(showError));
+  });
   renderEvents(events);
+}
+
+function canRepairOpomWriteback(row, canResumeRows) {
+  return canResumeRows
+    && row.status === 'failed'
+    && row.stage === 'opom.writeback'
+    && row.purchaseStatus === 'verified';
 }
 
 function resumePreviewSummary(preview, includeRiskyRows = false) {
@@ -1127,6 +1140,17 @@ async function resumeFromRow(startRowNumber) {
   await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume`, {
     method: 'POST',
     body: JSON.stringify({startRowNumber, includeRiskyRows}),
+  });
+  await refreshAll();
+  await loadJob(selectedJobId);
+}
+
+async function repairOpomWriteback(rowNumber) {
+  if (!selectedJobId) return;
+  if (!window.confirm(`只补写第 ${rowNumber} 行的 OPOM 记录，不会打开 AdsPower，也不会重新购买。确认继续？`)) return;
+  await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/rows/${encodeURIComponent(rowNumber)}/opom-writeback-repair`, {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
   await refreshAll();
   await loadJob(selectedJobId);

@@ -180,7 +180,8 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
       assert.match(cardBinding.body.idempotencyKey, /^card_binding:acct_1:order_1$/);
       assert.equal(cardBinding.body.card.orderNo, 'order_1');
       assert.equal(cardBinding.body.card.cvvPresent, true);
-      assert.equal(JSON.stringify(cardBinding.body).includes('456'), false);
+      assert.equal(cardBinding.body.card.cvv, undefined);
+      assert.doesNotMatch(JSON.stringify(cardBinding.body), /"cvv"\s*:/i);
 
       const runResult = opomCalls.find((call) => call.type === 'run-result');
       assert.ok(runResult);

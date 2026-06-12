@@ -41,7 +41,7 @@ function expiryParts(row) {
   const month = firstValue(row, ['expiry_month', 'exp_month']);
   const year = normalizeYear(firstValue(row, ['expiry_year', 'exp_year']));
   if (month || year) return {month, year};
-  const validityDate = firstValue(row, ['validityDate', 'validity_date', 'expiry', 'expires']);
+  const validityDate = firstValue(row, ['validityDate', 'validity_date', 'expiry', 'expires', 'expires_at']);
   const compact = validityDate.replace(/\D/g, '');
   if (/^\d{4}$/.test(compact)) {
     return {month: compact.slice(0, 2), year: compact.slice(2, 4)};

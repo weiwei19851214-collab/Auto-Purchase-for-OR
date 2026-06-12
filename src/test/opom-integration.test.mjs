@@ -1158,6 +1158,20 @@ test('parseSafeCardCsv accepts EJH generated CSV while dropping raw diagnostic c
   assert.doesNotMatch(result.csvText, /rawResponse|encryptedParam|requestPayload/);
 });
 
+test('parseSafeCardCsv accepts MASTER_B1_3 CSV with expires_at compact expiry', () => {
+  const rawCsv = `card_batch_id,row_number,card_provider,card_product,open_status,error_code,error_message,order_no,card_no,pan_bin6,pan_last4,expiry_month,expiry_year,cvv,card_amount,card_currency,bill_amount,bill_currency,active_date,expires_at,cardholder_ref,ejh_status,is_locked,raw_provider_code,created_at
+ejh-20260612-224636,1,EJH,MASTER_B1_3,completed,,,CI2026061222452090000112,5364890000008914,536489,8914,,,123,6000.00,USD,,USD,2026-06-12 22:45:20,0628,ZHOU TIRAN,,,000000,2026-06-12T22:46:36
+`;
+  const cards = parseSafeCardCsv(rawCsv);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].completed, true);
+  assert.equal(cards[0].orderNo, 'CI2026061222452090000112');
+  assert.equal(cards[0].cardNo, '5364890000008914');
+  assert.equal(cards[0].expMonth, '06');
+  assert.equal(cards[0].expYear, '28');
+  assert.equal(cards[0].cvv, '123');
+});
+
 test('allocateCardsPayload refuses real EJH creation without explicit confirmation', async () => {
   await assert.rejects(() => allocateCardsPayload({
     rows: [{opom_account_id: 'acct_1', login_email: 'user@example.com'}],

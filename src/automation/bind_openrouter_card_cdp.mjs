@@ -839,6 +839,17 @@ async function clearDefaultPaymentMethod(page) {
     };
   })()`, 20000);
   if (!updateResult.ok) {
+    if (/Server action not found/i.test(updateResult.text || '')) {
+      await navigatePage(page, OPENROUTER_CREDITS_URL).catch(() => null);
+      await sleep(1500);
+      return {
+        clearedDefault: false,
+        skipped: true,
+        reason: 'openrouter_update_current_user_action_not_found',
+        existingPaymentMethodCount: before.paymentMethods.length,
+        existingPaymentMethods: before.paymentMethods.map(maskPaymentMethod),
+      };
+    }
     throw new Error(`Could not clear default payment method: ${updateResult.status} ${updateResult.text}`);
   }
 

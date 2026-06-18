@@ -171,6 +171,13 @@ test('billing-address-only browser path refuses Add Credits fallback', () => {
   assert.match(script, /async function clickAddPaymentMethod/);
 });
 
+test('browser path falls back when OpenRouter server action id changes', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /Server action not found/i);
+  assert.match(script, /openrouter_update_current_user_action_not_found/);
+  assert.match(script, /removeSavedPaymentMethodsFromPicker/);
+});
+
 test('dryRunPayload reports row-level missing fields', async () => {
   const result = await dryRunPayload({fileName: 'missing.csv', csvText: MISSING_CSV});
   assert.equal(result.ok, true);

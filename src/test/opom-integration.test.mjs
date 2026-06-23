@@ -453,7 +453,12 @@ test('writeResultCsv carries OPOM health metadata for blocked handoff rows', asy
 
 test('matchAdsPowerPayload reports matched and identity mismatch rows from Local API responses', async () => {
   let call = 0;
-  await withFetch(async () => {
+  await withFetch(async (url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.searchParams.get('page'), null);
+    assert.equal(parsed.searchParams.get('page_size'), null);
+    assert.ok(['profile_ok', 'profile_bad'].includes(parsed.searchParams.get('user_id')));
+    assert.equal(parsed.searchParams.get('serial_number'), null);
     call += 1;
     return Response.json({
       code: 0,
@@ -480,7 +485,7 @@ test('matchAdsPowerPayload reports matched and identity mismatch rows from Local
   });
 });
 
-test('matchAdsPowerPayload detects inconsistent AdsPower user id and serial number', async () => {
+test('matchAdsPowerPayload trusts AdsPower user id and returns the current serial number for lazy update', async () => {
   await withFetch(async () => Response.json({
     code: 0,
     data: {
@@ -501,10 +506,11 @@ test('matchAdsPowerPayload detects inconsistent AdsPower user id and serial numb
       }],
     });
 
-    assert.equal(result.matched, 0);
-    assert.equal(result.failed, 1);
-    assert.equal(result.results[0].status, 'identifier_mismatch');
-    assert.equal(result.results[0].mismatchField, 'serial_number');
+    assert.equal(result.matched, 1);
+    assert.equal(result.failed, 0);
+    assert.equal(result.results[0].status, 'matched');
+    assert.equal(result.results[0].profile.userId, 'profile_ok');
+    assert.equal(result.results[0].profile.serialNumber, '9999');
   });
 });
 
@@ -593,6 +599,47 @@ test('matchAdsPowerPayload builds one email index for historical OPOM rows witho
     assert.equal(result.results[0].matchSource, 'email_index');
     assert.equal(result.results[0].profile.serialNumber, '1424');
     assert.equal(result.results[1].profile.serialNumber, '1425');
+  });
+});
+
+test('matchAdsPowerPayload falls back from duplicate serial numbers to email and returns user id', async () => {
+  await withFetch(async (url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.searchParams.get('serial_number'), '1415');
+    assert.equal(parsed.searchParams.get('user_id'), null);
+    assert.equal(parsed.searchParams.get('page'), null);
+    assert.equal(parsed.searchParams.get('page_size'), null);
+    return Response.json({
+      code: 0,
+      data: {
+        list: [
+          {
+            user_id: 'profile_wrong',
+            serial_number: '1415',
+            username: 'other@example.com',
+            group_name: 'recharge',
+          },
+          {
+            user_id: 'profile_right',
+            serial_number: '1415',
+            username: 'user@example.com',
+            group_name: 'recharge',
+          },
+        ],
+      },
+      msg: 'Success',
+    });
+  }, async () => {
+    const result = await matchAdsPowerPayload({
+      rows: [{loginEmail: 'user@example.com', ads_power_serial_number: '1415'}],
+    });
+
+    assert.equal(result.matched, 1);
+    assert.equal(result.failed, 0);
+    assert.equal(result.results[0].status, 'matched');
+    assert.equal(result.results[0].matchSource, 'serial_number');
+    assert.equal(result.results[0].profile.userId, 'profile_right');
+    assert.equal(result.results[0].profile.serialNumber, '1415');
   });
 });
 
@@ -710,9 +757,11 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
     assert.match(calls[0].url, /card-binding$/);
     assert.equal(calls[0].body.card.cvvPresent, true);
     assert.equal(calls[0].body.card.provider, undefined);
+    assert.deepEqual(calls[0].body.adsPower, {userId: 'profile_ok', serialNumber: '1415'});
     assert.equal(JSON.stringify(calls).includes('456'), false);
     assert.match(calls[1].url, /\/api\/v1\/recharge\/runs\/run_1\/results$/);
     assert.equal(calls[1].body.loginEmail, 'user@example.com');
+    assert.deepEqual(calls[1].body.adsPower, {userId: 'profile_ok', serialNumber: '1415'});
     assert.equal(calls[1].body.errorCode, undefined);
     assert.equal(calls[1].body.errorMessage, undefined);
     assert.equal(calls[1].body.stage, undefined);
@@ -847,6 +896,92 @@ test('writeCompletedRow preserves partial OPOM writeback status when result writ
     assert.equal(calls.length, 2);
     assert.match(calls[0].url, /card-binding$/);
     assert.match(calls[1].url, /\/results$/);
+  });
+});
+
+test('writeCompletedRow retries OPOM result without negative balances for older OPOM validation', async () => {
+  const calls = [];
+  await withFetch(async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({url: String(url), body});
+    if (String(url).endsWith('/results') && body.balanceBeforeUsd < 0) {
+      return Response.json({error: 'Invalid request'}, {status: 400});
+    }
+    return Response.json({data: {ok: true}});
+  }, async () => {
+    const row = {
+      opom_account_id: 'acct_1',
+      login_email: 'user@example.com',
+      ads_power_user_id: 'profile_ok',
+      ads_power_serial_number: '1415',
+      order_no: 'ejh_order_1',
+      card_no: '5257970000000001',
+      exp_month: '06',
+      exp_year: '28',
+      cvv: '456',
+    };
+    const result = await writeCompletedRow({
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      runId: 'run_1',
+      opomWritebackRetries: 1,
+    }, row, {
+      purchaseStatus: 'verified',
+      purchaseAmount: '150',
+      balanceBefore: '-5.174',
+      balanceAfter: '144.826',
+      cardLast4: '0001',
+    }, {rowNumber: 2});
+
+    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
+    assert.equal(calls.length, 3);
+    assert.match(calls[0].url, /card-binding$/);
+    assert.match(calls[1].url, /\/results$/);
+    assert.equal(calls[1].body.balanceBeforeUsd, -5.174);
+    assert.equal(calls[1].body.balanceAfterUsd, 144.826);
+    assert.match(calls[2].url, /\/results$/);
+    assert.equal(calls[2].body.balanceBeforeUsd, undefined);
+    assert.equal(calls[2].body.balanceAfterUsd, 144.826);
+  });
+});
+
+test('writeCompletedRow includes OPOM method path and status in request errors', async () => {
+  await withFetch(async (url, options) => {
+    if (String(url).endsWith('/results')) {
+      return Response.json({error: 'Invalid request'}, {status: 400});
+    }
+    return Response.json({data: {ok: true}});
+  }, async () => {
+    const row = {
+      opom_account_id: 'acct_1',
+      login_email: 'user@example.com',
+      order_no: 'ejh_order_1',
+      card_no: '5257970000000001',
+      exp_month: '06',
+      exp_year: '28',
+    };
+    await assert.rejects(
+      () => writeCompletedRow({
+        opomWriteback: true,
+        opomBaseUrl: 'http://opom.local',
+        opomRechargeToken: 'test-token',
+        runId: 'run_1',
+        opomWritebackRetries: 1,
+      }, row, {
+        purchaseStatus: 'verified',
+        purchaseAmount: '10',
+        balanceBefore: '20',
+        balanceAfter: '30',
+        cardLast4: '0001',
+      }, {rowNumber: 2}),
+      (error) => {
+        assert.match(error.message, /POST \/api\/v1\/recharge\/runs\/run_1\/results HTTP 400: Invalid request/);
+        assert.equal(error.opomCardWritebackStatus, 'written');
+        assert.equal(error.opomResultWritebackStatus, 'failed');
+        return true;
+      },
+    );
   });
 });
 

@@ -1,5 +1,5 @@
 import {cardLast4, normalizeExpiry, normalizeMoneyValue, redact} from './common.mjs';
-import {setCell} from './csv.mjs';
+import {rowObject, setCell} from './csv.mjs';
 
 export function loginEmail(row) {
   return String(row.login_email || row.username || '').trim();
@@ -10,11 +10,22 @@ export function adsPowerSerialNumber(row) {
 }
 
 export function adsPowerUserId(row) {
-  return String(row.ads_power_user_id || row.profile_id || '').trim();
+  return String(row.ads_power_user_id || row.adsPowerUserId || row.adsPowerId || row.ads_power_id || row.adspower_id || row.user_id || row.userId || row.profile_id || '').trim();
 }
 
 export function profileDisplayId(row) {
-  return adsPowerSerialNumber(row) || adsPowerUserId(row);
+  return adsPowerUserId(row) || adsPowerSerialNumber(row);
+}
+
+export function adsPowerProfileIdentifier(row) {
+  const userId = adsPowerUserId(row);
+  const serialNumber = adsPowerSerialNumber(row);
+  return {
+    userId,
+    serialNumber,
+    value: userId || serialNumber,
+    source: userId ? 'user_id' : (serialNumber ? 'serial_number' : ''),
+  };
 }
 
 export function cardNumber(row) {
@@ -307,7 +318,7 @@ export function rowMetadata(row, extra = {}) {
     adsPowerSerialNumber: adsPowerSerialNumber(row),
     opomHealthStatus: extra.opomHealthStatus || opomHealthStatus(row) || '',
     opomHealthReason: extra.opomHealthReason || row.opom_health_reason || '',
-    adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerSerialNumber(row) || adsPowerUserId(row) ? 'not_verified' : ''),
+    adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerUserId(row) || adsPowerSerialNumber(row) ? 'not_verified' : ''),
     ejhOrderNo: ejhOrderNo(row),
     cardNo: extra.cardNo || cardNumber(row),
     opomCardWritebackStatus: extra.opomCardWritebackStatus || '',
@@ -413,8 +424,9 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'opom_account_id', details.opomAccountId || '');
   setCell(header, row, 'username', details.username || details.loginEmail || details.loginEmailMasked || '');
   setCell(header, row, 'login_email', details.loginEmail || details.username || details.loginEmailMasked || '');
-  setCell(header, row, 'ads_power_user_id', details.adsPowerUserId || '');
-  setCell(header, row, 'ads_power_serial_number', details.adsPowerSerialNumber || '');
+  const existing = rowObject(header, row);
+  setCell(header, row, 'ads_power_user_id', details.adsPowerUserId || adsPowerUserId(existing) || '');
+  setCell(header, row, 'ads_power_serial_number', details.adsPowerSerialNumber || adsPowerSerialNumber(existing) || '');
   setCell(header, row, 'opom_health_status', details.opomHealthStatus || '');
   setCell(header, row, 'opom_health_reason', details.opomHealthReason || '');
   setCell(header, row, 'ads_match_status', details.adsMatchStatus || '');

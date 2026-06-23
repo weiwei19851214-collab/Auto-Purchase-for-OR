@@ -15,6 +15,7 @@ export const BATCH_SCRIPT = join(AUTOMATION_DIR, 'batch_recharge_openrouter_card
 
 export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4100);
 export const DEFAULT_ROW_TIMEOUT_MS = Number(process.env.ROW_TIMEOUT_MS || 600000);
+export const AUTOMATION_LOG_RETENTION_HOURS = Number(process.env.AUTOMATION_LOG_RETENTION_HOURS || 48);
 
 export const LIVE_STATUSES = new Set([
   'queued',

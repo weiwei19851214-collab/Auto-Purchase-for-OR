@@ -335,11 +335,12 @@ function resumeRowDecision(row, includeRiskyRows = false) {
   return {action: 'skip_unsupported', reason: `unsupported status: ${row.status}`};
 }
 
-function previewRows(rows, startRowNumber, includeRiskyRows = false) {
-  const candidates = rows.filter((row) => row.row_number >= startRowNumber);
+function previewRows(rows, startRowNumber, includeRiskyRows = false, onlyRow = false) {
+  const candidates = rows.filter((row) => onlyRow ? row.row_number === startRowNumber : row.row_number >= startRowNumber);
   const output = {
     startRowNumber,
     includeRiskyRows: !!includeRiskyRows,
+    onlyRow: !!onlyRow,
     totalCandidateRows: candidates.length,
     queuedRows: [],
     alreadyQueuedRows: [],
@@ -550,7 +551,7 @@ export async function resumePreview(db, jobId, payload = {}) {
     ok: true,
     job: publicJob(getJob(db, jobId)),
     csvAvailability,
-    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows),
+    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow),
   };
 }
 
@@ -567,7 +568,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   const csvAvailability = await ensureJobCsvAvailable(job);
   if (!csvAvailability.ok) throw httpError(409, csvAvailability.reason);
   const rows = listRows(db, jobId);
-  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows);
+  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow);
   if (!rows.some((row) => row.row_number === startRowNumber)) {
     throw httpError(400, `row ${startRowNumber} does not exist in this job`);
   }
@@ -611,9 +612,10 @@ export async function resumeJob(db, jobId, payload = {}) {
       updated_at = ?
     WHERE id = ?
   `).run(now, jobId);
-  addEvent(db, jobId, 'job.resume_requested', `resume from row ${startRowNumber}`, {
+  addEvent(db, jobId, 'job.resume_requested', payload.onlyRow ? `retry row ${startRowNumber}` : `resume from row ${startRowNumber}`, {
     startRowNumber,
     includeRiskyRows: !!payload.includeRiskyRows,
+    onlyRow: !!payload.onlyRow,
     queuedRows: preview.queuedRows.map((row) => row.rowNumber),
     alreadyQueuedRows: preview.alreadyQueuedRows.map((row) => row.rowNumber),
     skippedCompletedRows: preview.skippedCompletedRows.map((row) => row.rowNumber),
@@ -631,7 +633,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   return {
     ok: true,
     csvAvailability,
-    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows}),
+    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows, onlyRow: !!payload.onlyRow}),
     ...jobDetails(db, jobId),
   };
 }

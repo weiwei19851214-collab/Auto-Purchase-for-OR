@@ -55,7 +55,8 @@ async function handle(req, res) {
 
   if (pathname === '/api/preflight') {
     requireSession(req);
-    sendJson(res, 200, await environmentPreflight());
+    const payload = req.method === 'POST' ? await readJsonBody(req) : {};
+    sendJson(res, 200, await environmentPreflight(payload.options || payload || {}));
     return;
   }
 

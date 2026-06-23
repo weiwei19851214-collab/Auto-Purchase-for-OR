@@ -28,6 +28,13 @@ test('Stripe Link opt-in cleanup accepts absent checkbox as inactive', () => {
   assert.match(source, /lastState\.found === false \|\| lastState\.checked === false/);
 });
 
+test('Stripe card entry skips Link checkbox cleanup after switching a non-US country to United States', () => {
+  const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
+  assert.match(source, /changedFromNonUs/);
+  assert.match(source, /country_changed_to_united_states_before_save/);
+  assert.match(source, /: await ensureStripeLinkUnchecked\(payment\)/);
+});
+
 test('CDP navigation has retry and location fallback for slow AdsPower pages', () => {
   const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
   assert.match(source, /DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000/);

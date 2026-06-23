@@ -186,6 +186,9 @@ export async function allocateCardsPayload(payload = {}) {
       activeDate: payload.activeDate,
       cardholder: payload.cardholder,
       cardBatchId: payload.cardBatchId,
+      appKey: payload.ejhAppKey,
+      appSecret: payload.ejhAppSecret,
+      python: payload.python,
       output: cardCsvPath,
     });
     if (!ejhResult.ok) throw new Error(`EJH card creation failed: ${ejhResult.stderr || ejhResult.stdout || ejhResult.error || 'unknown error'}`);

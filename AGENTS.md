@@ -1,4 +1,4 @@
-# agents.md - Auto-Purchase-for-OR 工作规则
+# AGENTS.md - Auto-Purchase-for-OR 工作规则
 
 本项目是一个传统 coding 项目：本地 Web 控制台 + Node.js 执行器，用于
 OpenRouter 充值批量 dry-run、no-purchase 测试、live run、OPOM 对接、

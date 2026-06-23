@@ -19,6 +19,7 @@ export async function createCardsWithEjh(input = {}, env = process.env) {
   const defaults = ejhDefaults(env);
   const appKey = input.appKey || defaults.appKey;
   const appSecret = input.appSecret || defaults.appSecret;
+  const python = input.python || defaults.python;
   const required = {
     appKey,
     appSecret,
@@ -48,7 +49,7 @@ export async function createCardsWithEjh(input = {}, env = process.env) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
-    const child = spawn(defaults.python, args, {stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(python, args, {stdio: ['ignore', 'pipe', 'pipe']});
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString('utf8');
     });

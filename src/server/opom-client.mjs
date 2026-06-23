@@ -71,13 +71,18 @@ async function requestJson(args, path, options = {}) {
       clearTimeout(timeout);
       const body = await readJsonResponse(res);
       if (!res.ok) {
-        const message = body?.error?.message || body?.error || body?.message || `OPOM HTTP ${res.status}`;
+        const message = responseErrorMessage(body) || `OPOM HTTP ${res.status}`;
+        const detail = `${method} ${path} HTTP ${res.status}: ${message}`;
         if ((method === 'GET' || retryableWrite) && res.status >= 500 && attempt < retries) {
-          lastError = new Error(`OPOM request failed: ${message}`);
+          lastError = new Error(`OPOM request failed: ${detail}`);
           await sleep(retryDelayMs * attempt);
           continue;
         }
-        const httpError = new Error(redact(`OPOM request failed: ${message}`));
+        const httpError = new Error(redact(`OPOM request failed: ${detail}`));
+        httpError.httpStatus = res.status;
+        httpError.method = method;
+        httpError.path = path;
+        httpError.responseBody = body;
         httpError.nonRetryable = true;
         throw httpError;
       }
@@ -102,6 +107,15 @@ async function requestJson(args, path, options = {}) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function responseErrorMessage(body) {
+  if (!body || typeof body !== 'object') return '';
+  if (typeof body.error === 'string') return body.error;
+  if (body.error && typeof body.error.message === 'string') return body.error.message;
+  if (typeof body.message === 'string') return body.message;
+  if (typeof body.raw === 'string') return body.raw.slice(0, 500);
+  return '';
 }
 
 export async function fetchRechargeAccounts(args, input = {}) {
@@ -191,6 +205,7 @@ export async function writeCompletedRow(args, row, details, context = {}) {
       expiresAt,
       cvvPresent: !!row.cvv,
     },
+    ...adsPowerPayload(row, details),
     binding: {
       boundAt: new Date().toISOString(),
       source: 'recharge-runner',
@@ -238,17 +253,41 @@ export async function writeRowResult(args, row, details, context = {}) {
     balanceBeforeUsd: numberOrUndefined(details.balanceBefore),
     balanceAfterUsd: numberOrUndefined(details.balanceAfter),
     ...(card ? {card} : {}),
+    ...adsPowerPayload(row, details),
     ...(errorCode ? {errorCode} : {}),
     ...(errorMessage ? {errorMessage} : {}),
     ...(stage ? {stage} : {}),
     occurredAt: new Date().toISOString(),
   };
-  await requestJson(args, `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`, {
-    method: 'POST',
-    idempotent: true,
-    body: JSON.stringify(body),
-  });
+  const path = `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`;
+  try {
+    await requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (!shouldRetryWithoutNegativeBalances(error, body)) throw error;
+    await requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(omitNegativeBalances(body)),
+    });
+  }
   return {resultStatus: 'written'};
+}
+
+function shouldRetryWithoutNegativeBalances(error, body) {
+  if (![400, 422].includes(Number(error?.httpStatus))) return false;
+  return ['balanceBeforeUsd', 'balanceAfterUsd'].some((field) => typeof body[field] === 'number' && body[field] < 0);
+}
+
+function omitNegativeBalances(body) {
+  const next = {...body};
+  for (const field of ['balanceBeforeUsd', 'balanceAfterUsd']) {
+    if (typeof next[field] === 'number' && next[field] < 0) delete next[field];
+  }
+  return next;
 }
 
 function resultCard(row, details = {}) {
@@ -258,6 +297,18 @@ function resultCard(row, details = {}) {
   if (orderNo) card.orderNo = orderNo;
   if (/^\d{4}$/.test(panLast4)) card.panLast4 = panLast4;
   return Object.keys(card).length ? card : null;
+}
+
+function adsPowerPayload(row, details = {}) {
+  const userId = String(details.adsPowerUserId || plan.adsPowerUserId(row) || '').trim();
+  const serialNumber = String(details.adsPowerSerialNumber || plan.adsPowerSerialNumber(row) || '').trim();
+  if (!userId && !serialNumber) return {};
+  return {
+    adsPower: {
+      ...(userId ? {userId} : {}),
+      ...(serialNumber ? {serialNumber} : {}),
+    },
+  };
 }
 
 function cardLast4FromRow(row) {

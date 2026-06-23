@@ -7,33 +7,68 @@ export function adsPowerDefaults(env = process.env) {
   };
 }
 
-export async function stopProfile(args, profileNo) {
-  if (!profileNo) return {attempted: false};
+function profileUserId(profile = {}) {
+  return String(profile.user_id || profile.userId || profile.profile_id || profile.profileId || profile.id || '').trim();
+}
+
+function profileSerialNumber(profile = {}) {
+  return String(profile.serial_number || profile.serialNumber || profile.profile_no || profile.profileNo || '').trim();
+}
+
+function normalizeProfileIdentifier(input) {
+  if (input && typeof input === 'object') {
+    const userId = String(input.userId || input.user_id || input.profileId || input.profile_id || '').trim();
+    const explicitSerialNumber = String(input.serialNumber || input.serial_number || input.profileNo || input.profile_no || '').trim();
+    const value = String(input.value || '').trim();
+    const serialNumber = explicitSerialNumber || (userId ? '' : value);
+    return {
+      userId,
+      serialNumber,
+      value: userId || serialNumber,
+      source: userId ? 'user_id' : (serialNumber ? 'serial_number' : ''),
+    };
+  }
+  const value = String(input || '').trim();
+  return {
+    userId: /^\d+$/.test(value) ? '' : value,
+    serialNumber: /^\d+$/.test(value) ? value : '',
+    value,
+    source: value ? (/^\d+$/.test(value) ? 'serial_number' : 'user_id') : '',
+  };
+}
+
+export async function stopProfile(args, profileIdentifier) {
+  const identifier = normalizeProfileIdentifier(profileIdentifier);
+  if (!identifier.value) return {attempted: false};
   const base = args.adspowerApiBase || DEFAULT_ADSPOWER_BASE;
   const headers = {'Content-Type': 'application/json'};
   if (args.adspowerApiKey) headers.Authorization = `Bearer ${args.adspowerApiKey}`;
   const failures = [];
   try {
+    const body = identifier.userId
+      ? {profile_id: identifier.userId}
+      : {profile_no: identifier.serialNumber};
     const res = await fetch(`${base}/api/v2/browser-profile/stop`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({profile_no: String(profileNo)}),
+      body: JSON.stringify(body),
     });
-    if (res.ok) return {attempted: true, ok: true, endpoint: 'v2'};
+    if (res.ok) return {attempted: true, ok: true, endpoint: 'v2', identifier};
     failures.push(`v2:${res.status}`);
   } catch (error) {
     failures.push(`v2:${error.message}`);
   }
   try {
     const url = new URL(`${base}/api/v1/browser/stop`);
-    url.searchParams.set('serial_number', String(profileNo));
+    if (identifier.userId) url.searchParams.set('user_id', identifier.userId);
+    else url.searchParams.set('serial_number', identifier.serialNumber);
     const res = await fetch(url, {headers});
-    if (res.ok) return {attempted: true, ok: true, endpoint: 'v1'};
+    if (res.ok) return {attempted: true, ok: true, endpoint: 'v1', identifier};
     failures.push(`v1:${res.status}`);
   } catch (error) {
     failures.push(`v1:${error.message}`);
   }
-  return {attempted: true, ok: false, failures};
+  return {attempted: true, ok: false, failures, identifier};
 }
 
 function headers(args) {
@@ -126,10 +161,10 @@ function profileMatchesEmail(profile, expectedEmail) {
 function profileIdentifierMismatch(profile, expected) {
   const expectedUserId = String(expected.userId || '').trim();
   const expectedSerialNumber = String(expected.serialNumber || '').trim();
-  const actualUserId = String(profile.user_id || '').trim();
-  const actualSerialNumber = String(profile.serial_number || '').trim();
+  const actualUserId = profileUserId(profile);
+  const actualSerialNumber = profileSerialNumber(profile);
   if (expectedUserId && actualUserId && expectedUserId !== actualUserId) return 'user_id';
-  if (expectedSerialNumber && actualSerialNumber && expectedSerialNumber !== actualSerialNumber) return 'serial_number';
+  if (!expectedUserId && expectedSerialNumber && actualSerialNumber && expectedSerialNumber !== actualSerialNumber) return 'serial_number';
   return '';
 }
 
@@ -140,10 +175,10 @@ export async function findProfileForAccount(args, account, options = {}) {
   let matches = [];
   let matchSource = '';
   if (userId) {
-    matches = await fetchUserList(args, {user_id: userId, page: 1, page_size: 100});
+    matches = await fetchUserList(args, {user_id: userId});
     matchSource = 'user_id';
   } else if (serialNumber) {
-    matches = await fetchUserList(args, {serial_number: serialNumber, page: 1, page_size: 100});
+    matches = await fetchUserList(args, {serial_number: serialNumber});
     matchSource = 'serial_number';
   } else {
     const maxPages = Number(options.maxPages || 10);
@@ -157,6 +192,9 @@ export async function findProfileForAccount(args, account, options = {}) {
 
   if (matches.length === 0) {
     return {status: 'profile_not_found', matchSource, expectedEmail};
+  }
+  if (matches.length > 1 && matchSource === 'serial_number' && expectedEmail) {
+    matches = matches.filter((profile) => profileMatchesEmail(profile, expectedEmail));
   }
   if (matches.length > 1) {
     return {
@@ -275,8 +313,8 @@ export async function matchProfilesForAccounts(args, accounts, options = {}) {
 
 export function publicProfile(profile) {
   return {
-    userId: profile.user_id || '',
-    serialNumber: profile.serial_number || '',
+    userId: profileUserId(profile),
+    serialNumber: profileSerialNumber(profile),
     username: profile.username || '',
     name: profile.name || '',
     groupId: profile.group_id || '',

@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
-import {chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, join} from 'node:path';
-import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, DEFAULT_ROW_TIMEOUT_MS} from './config.mjs';
+import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
 import {newId, nowIso} from './ids.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import * as childRunner from '../automation/lib/child-runner.mjs';
@@ -12,6 +12,7 @@ import * as status from '../automation/lib/status-contract.mjs';
 import * as opom from './opom-client.mjs';
 
 const CHILD_OUTPUT_LIMIT = 10 * 1024 * 1024;
+let lastAutomationLogCleanupAt = 0;
 
 const BASE_INPUT_COLUMNS = [
   'status',
@@ -66,9 +67,14 @@ export function runnerArgs(options = {}) {
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',
     adspowerApiKey: options.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',
+    adspowerStartTimeoutMs: options.adspowerStartTimeoutMs || process.env.ADSPOWER_START_TIMEOUT_MS || '',
     opomWriteback: !!options.opomWriteback,
     opomBaseUrl: options.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
     opomRechargeToken: options.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRequestTimeoutMs: options.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: options.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: options.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: options.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
     runId: options.runId || '',
     adspowerStatusMode: options.adspowerStatusMode || process.env.ADSPOWER_STATUS_MODE || 'disabled',
     adspowerSuccessGroupId: options.adspowerSuccessGroupId || process.env.ADSPOWER_SUCCESS_GROUP_ID || '',
@@ -193,6 +199,7 @@ export function publicJob(row) {
       confirmPurchase: args.confirmPurchase,
       preparePurchaseOnly: args.preparePurchaseOnly,
       rowTimeoutMs: args.rowTimeoutMs,
+      adspowerStartTimeoutMs: args.adspowerStartTimeoutMs,
       hasAdspowerApiKey: !!args.adspowerApiKey,
       executionScope: plan.scopeSummary(args),
       scopeBillingAddress: args.scopeBillingAddress,
@@ -202,6 +209,10 @@ export function publicJob(row) {
       opomWriteback: args.opomWriteback,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       opomBaseUrl: args.opomBaseUrl,
+      opomRequestTimeoutMs: args.opomRequestTimeoutMs,
+      opomRequestRetries: args.opomRequestRetries,
+      opomWritebackRetries: args.opomWritebackRetries,
+      opomRetryDelayMs: args.opomRetryDelayMs,
       runId: args.runId,
       adspowerStatusMode: args.adspowerStatusMode,
       hasAdspowerSuccessGroupTarget: !!(args.adspowerSuccessGroupId || args.adspowerSuccessGroupName),
@@ -417,9 +428,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   });
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
+  const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
   const missing = plan.validateRow(row, args);
   if (missing.length) {
-    const details = {...plan.rowMetadata(row), cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+    const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
     await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
       rowNumber: rawIndex + 2,
       status: status.STATUSES.MISSING_FIELDS,
@@ -437,6 +449,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
 
   const task = plan.buildClosedLoopTask(row, args);
+  task.adspowerApiBase = args.adspowerApiBase;
+  task.adspowerApiKey = args.adspowerApiKey;
+  task.adspowerStartTimeoutMs = args.adspowerStartTimeoutMs;
+  task.confirmationDebugDir ||= automationLogDir;
   if (!args.scopePurchase || !args.confirmPurchase) {
     task.purchase.confirmed = false;
     task.preparePurchaseOnly = args.scopePurchase && args.preparePurchaseOnly;
@@ -449,6 +465,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const details = args.confirmPurchase
       ? plan.successDetails(row, outcome.result, args)
       : testModeSuccessDetails(row, outcome.result, args, plan, commonAdapter);
+    details.automationLogDir = automationLogDir;
     const purchaseOk = !args.scopePurchase
       || (args.confirmPurchase ? details.purchaseStatus === 'verified' : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
@@ -469,7 +486,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           message: commonAdapter.redact(error.message || 'OPOM writeback failed after verified purchase'),
           errorCode: 'opom_writeback_failed',
         });
-        if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+        if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
         return {
           status: status.STATUSES.FAILED,
           stage: 'opom.writeback',
@@ -481,7 +498,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         };
       }
     }
-    if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+    if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
     return {
       status: completed ? status.STATUSES.COMPLETED : status.STATUSES.PURCHASE_UNVERIFIED,
       stage: completed ? 'closed_loop.complete' : 'scope.verify',
@@ -496,7 +513,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
 
   const contract = status.classifyError(outcome.error);
-  const failureDetails = {...plan.rowMetadata(row), cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+  const failureDetails = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
   await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
     rowNumber: rawIndex + 2,
     status: contract.status,
@@ -504,7 +521,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     errorCode: contract.status,
   });
   if (args.stopProfiles && contract.stopProfile) {
-    profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+    profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }
   return {
     status: contract.status,
@@ -524,6 +541,36 @@ async function writeNonCompletedOpomResult(opomAdapter, args, row, details, cont
     details.opomResultWritebackStatus = 'written';
   } catch {
     details.opomResultWritebackStatus = 'failed';
+  }
+}
+
+function ensureAutomationLogDir(runtimeLog = {}, rawIndex = 0) {
+  cleanupOldAutomationLogs();
+  const jobId = String(runtimeLog.jobId || 'manual').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const rowNumber = String(runtimeLog.rowNumber || rawIndex + 2).replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const rowId = String(runtimeLog.rowId || '').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const dir = join(LOG_DIR, jobId, `row-${rowNumber}${rowId ? `-${rowId}` : ''}`);
+  mkdirSync(dir, {recursive: true});
+  return dir;
+}
+
+function cleanupOldAutomationLogs() {
+  const retentionHours = Number.isFinite(AUTOMATION_LOG_RETENTION_HOURS) ? AUTOMATION_LOG_RETENTION_HOURS : 48;
+  if (retentionHours <= 0) return;
+  const now = Date.now();
+  if (now - lastAutomationLogCleanupAt < 60 * 60 * 1000) return;
+  lastAutomationLogCleanupAt = now;
+  if (!existsSync(LOG_DIR)) return;
+  const cutoff = now - retentionHours * 60 * 60 * 1000;
+  for (const entry of readdirSync(LOG_DIR, {withFileTypes: true})) {
+    if (!entry.isDirectory()) continue;
+    const path = join(LOG_DIR, entry.name);
+    try {
+      const stat = statSync(path);
+      if (stat.mtimeMs < cutoff) rmSync(path, {recursive: true, force: true});
+    } catch {
+      // Log cleanup is best effort; never block a recharge row.
+    }
   }
 }
 
@@ -591,6 +638,12 @@ async function runClosedLoopChildAsync(bindScript, task, args, childRunner, comm
     let killTimer = null;
     const child = spawn(process.execPath, childArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ADSPOWER_API_BASE: args.adspowerApiBase || process.env.ADSPOWER_API_BASE || '',
+        ADSPOWER_API_KEY: args.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',
+        ADSPOWER_START_TIMEOUT_MS: args.adspowerStartTimeoutMs || process.env.ADSPOWER_START_TIMEOUT_MS || '',
+      },
     });
     const timeout = setTimeout(() => {
       timedOut = true;

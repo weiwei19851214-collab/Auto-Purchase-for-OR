@@ -772,6 +772,37 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
   }
 });
 
+test('resumeJob can retry only the selected failed row after a job finishes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-one-row-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: THREE_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const rows = jobDetails(db, created.job.id).rows;
+    db.prepare("UPDATE job_rows SET status = 'completed', stage = 'closed_loop.complete', message = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[0].id);
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'first failure', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[1].id);
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'second failure', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[2].id);
+    db.prepare("UPDATE jobs SET status = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(created.job.id);
+
+    const preview = await resumePreview(db, created.job.id, {startRowNumber: 3, onlyRow: true});
+    assert.equal(preview.onlyRow, true);
+    assert.deepEqual(preview.queuedRows.map((row) => row.rowNumber), [3]);
+
+    await resumeJob(db, created.job.id, {startRowNumber: 3, onlyRow: true});
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.job.status, 'queued');
+    assert.equal(details.rows[0].status, 'completed');
+    assert.equal(details.rows[1].status, 'queued');
+    assert.equal(details.rows[2].status, 'failed');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('resumeJob skips risky rows by default and includes them only with confirmation flag', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-risky-'));
   try {

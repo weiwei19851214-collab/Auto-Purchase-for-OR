@@ -23,6 +23,7 @@ import {
   baseRowResult,
   buildClosedLoopTask,
   dryRunResult,
+  adsPowerProfileIdentifier,
   isEligible,
   requiredColumns,
   resultColumns,
@@ -174,16 +175,16 @@ function makeSummary(args, plan, dataRows, outputCsv) {
   };
 }
 
-async function closeOtherProfiles(args, currentProfileNo, plannedProfileNos, processedProfileNos) {
+async function closeOtherProfiles(args, currentProfileIdentifier, plannedProfileIdentifiers, processedProfileIdentifiers) {
   if (!args.stopProfiles) return;
-  for (const profileNo of plannedProfileNos) {
-    if (profileNo !== String(currentProfileNo || '')) {
-      await stopProfile(args, profileNo);
+  for (const profileIdentifier of plannedProfileIdentifiers) {
+    if (profileIdentifier.value !== String(currentProfileIdentifier.value || '')) {
+      await stopProfile(args, profileIdentifier);
     }
   }
-  for (const profileNo of [...processedProfileNos]) {
-    if (String(profileNo) !== String(currentProfileNo || '')) {
-      await stopProfile(args, profileNo);
+  for (const profileIdentifier of processedProfileIdentifiers.values()) {
+    if (String(profileIdentifier.value) !== String(currentProfileIdentifier.value || '')) {
+      await stopProfile(args, profileIdentifier);
     }
   }
 }
@@ -194,7 +195,8 @@ function isCompleted(details) {
 
 async function processLiveRow({args, header, dataRows, item, summary, plannedProfileNos, processedProfileNos}) {
   const {index, rowNumber, row} = item;
-  await closeOtherProfiles(args, row.ID, plannedProfileNos, processedProfileNos);
+  const profileIdentifier = adsPowerProfileIdentifier(row);
+  await closeOtherProfiles(args, profileIdentifier, plannedProfileNos, processedProfileNos);
 
   const csvRow = dataRows[index];
   const missing = validateRow(row, args);
@@ -216,8 +218,8 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
     const completed = isCompleted(details);
     if (completed) summary.completed += 1;
     else summary.failed += 1;
-    if (args.stopProfiles) profileStop = await stopProfile(args, row.ID);
-    processedProfileNos.add(row.ID);
+    if (args.stopProfiles) profileStop = await stopProfile(args, profileIdentifier);
+    if (profileIdentifier.value) processedProfileNos.set(profileIdentifier.value, profileIdentifier);
 
     const status = completed ? STATUSES.COMPLETED : STATUSES.PURCHASE_UNVERIFIED;
     const statusContract = completed ? completedRecord(details) : {
@@ -242,8 +244,8 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
   const statusContract = classifyError(outcome.error);
   if (statusContract.status === STATUSES.FAILED) summary.failed += 1;
   else summary.blocked += 1;
-  if (args.stopProfiles && statusContract.stopProfile) profileStop = await stopProfile(args, row.ID);
-  if (statusContract.stopProfile) processedProfileNos.add(row.ID);
+  if (args.stopProfiles && statusContract.stopProfile) profileStop = await stopProfile(args, profileIdentifier);
+  if (statusContract.stopProfile && profileIdentifier.value) processedProfileNos.set(profileIdentifier.value, profileIdentifier);
 
   const redactedError = redact(outcome.error);
   summary.results.push({
@@ -272,8 +274,11 @@ async function main() {
     return;
   }
 
-  const plannedProfileNos = new Set(plan.map(({row}) => row.ID).filter(Boolean).map(String));
-  const processedProfileNos = new Set();
+  const plannedProfileNos = [...new Map(plan
+    .map(({row}) => adsPowerProfileIdentifier(row))
+    .filter((identifier) => identifier.value)
+    .map((identifier) => [identifier.value, identifier])).values()];
+  const processedProfileNos = new Map();
   for (const item of plan) {
     await processLiveRow({args, header, dataRows, item, summary, plannedProfileNos, processedProfileNos});
     if (summary.halted) break;

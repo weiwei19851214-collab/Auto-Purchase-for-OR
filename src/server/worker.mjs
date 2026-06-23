@@ -146,7 +146,14 @@ export class JobWorker {
     const heartbeat = this.startRowHeartbeat(job, row);
     let result;
     try {
-      result = await this.executeRowFn(csvText, row.raw_index, options);
+      result = await this.executeRowFn(csvText, row.raw_index, {
+        ...options,
+        runtimeLog: {
+          jobId: job.id,
+          rowId: row.id,
+          rowNumber: row.row_number,
+        },
+      });
     } catch (error) {
       result = this.resultFromUnexpectedRowError(error, row);
       await this.writeUnexpectedRowOpomResult(row, result, options);
@@ -172,6 +179,8 @@ export class JobWorker {
         UPDATE job_rows
         SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
           balance_before = ?, balance_after = ?,
+          ads_power_user_id = COALESCE(NULLIF(?, ''), ads_power_user_id),
+          ads_power_serial_number = COALESCE(NULLIF(?, ''), ads_power_serial_number),
           card_no = COALESCE(NULLIF(?, ''), card_no),
           card_last4 = COALESCE(NULLIF(?, ''), card_last4),
           auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
@@ -191,6 +200,8 @@ export class JobWorker {
         result.details?.purchaseAmount || '',
         String(result.details?.balanceBefore ?? ''),
         String(result.details?.balanceAfter ?? ''),
+        result.details?.adsPowerUserId || row.ads_power_user_id || '',
+        result.details?.adsPowerSerialNumber || row.ads_power_serial_number || '',
         result.details?.cardNo || '',
         result.details?.cardLast4 || '',
         result.details?.autoTopupStatus || '',
@@ -209,6 +220,7 @@ export class JobWorker {
       addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
         status: result.status,
         stage: result.stage,
+        logDir: result.details?.automationLogDir || '',
         profileStop: result.profileStop,
         adsPowerStatus,
       }, row.id);

@@ -76,6 +76,103 @@ async function captureDiagnosticScreenshot(client, dir, label, data = {}) {
   return {jsonFile, pngFile: screenshot?.data ? pngFile : null};
 }
 
+function writeStepDiagnostic(dir, label, status, data = {}) {
+  return writeDiagnostic(dir, `step-${label}-${status}`, {
+    kind: 'automation_step',
+    label,
+    status,
+    at: new Date().toISOString(),
+    ...data,
+  });
+}
+
+async function pageStepState(page) {
+  if (!page) return null;
+  return evaluate(page, `(() => {
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title || '',
+      hasPaymentIssue: /Error:\\s*Payment\\s+Issue|Your card was declined/i.test(text),
+      hasServerError: /\\b500\\b|Internal Server Error|Something went wrong|Application error/i.test(text),
+      hasAutoTopup: /Auto\\s*Top[- ]?Up/i.test(text),
+      hasPurchaseCredits: /Purchase Credits/i.test(text),
+      hasAddCredits: /Add Credits/i.test(text),
+      tail: text.slice(-1800),
+    };
+  })()`).catch((error) => ({error: error.message}));
+}
+
+async function dismissOpenRouterServerErrorToast(page) {
+  if (!page) return {attempted: false};
+  return evaluate(page, `(() => {
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim();
+    const visible = (node) => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const errorNodes = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && /\\bError\\s*500\\b|Internal Server Error|Something went wrong|Application error/i.test(textOf(node)));
+    if (!errorNodes.length) return {attempted: false, found: false};
+    const containers = [];
+    for (const node of errorNodes) {
+      let current = node;
+      for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        if (/\\bError\\s*500\\b|Internal Server Error|Something went wrong|Application error/i.test(text)) {
+          containers.push(current);
+        }
+      }
+    }
+    const unique = [...new Set(containers)];
+    const closeCandidates = [];
+    for (const container of unique) {
+      closeCandidates.push(...[...container.querySelectorAll('button,[role="button"],[aria-label],svg')]
+        .filter((node) => visible(node))
+        .filter((node) => {
+          const label = [
+            node.getAttribute('aria-label') || '',
+            node.getAttribute('title') || '',
+            textOf(node),
+          ].join(' ').trim();
+          const rect = node.getBoundingClientRect();
+          const containerRect = container.getBoundingClientRect();
+          const nearTopRight = rect.left > containerRect.left + containerRect.width * 0.6 && rect.top < containerRect.top + containerRect.height * 0.35;
+          return /close|dismiss|关闭|×|x/i.test(label) || nearTopRight;
+        }));
+    }
+    const target = closeCandidates[0];
+    if (!target) return {attempted: true, found: true, clicked: false, reason: 'close_button_not_found'};
+    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+    return {attempted: true, found: true, clicked: true};
+  })()`).catch((error) => ({attempted: true, error: error.message}));
+}
+
+async function runLoggedStep(label, debugDir, task, page = null) {
+  const dismissedServerError = page ? await dismissOpenRouterServerErrorToast(page) : {attempted: false};
+  if (dismissedServerError?.clicked) await sleep(250);
+  writeStepDiagnostic(debugDir, label, 'start', {dismissedServerError, page: await pageStepState(page)});
+  try {
+    const result = await task();
+    writeStepDiagnostic(debugDir, label, 'success', {result, page: await pageStepState(page)});
+    return result;
+  } catch (error) {
+    const pageState = await pageStepState(page);
+    writeStepDiagnostic(debugDir, label, 'error', {error: error.message, page: pageState});
+    if (page) {
+      await captureDiagnosticScreenshot(page, debugDir, `step-${label}-error`, {
+        kind: 'automation_step_error',
+        label,
+        error: error.message,
+        page: pageState,
+      }).catch(() => null);
+    }
+    throw error;
+  }
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i += 1) {
@@ -1433,14 +1530,43 @@ async function fillStripeCard(payment, card) {
   await focusAndInsertText(payment, '#payment-numberInput', card.number);
   await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry));
   await focusAndInsertText(payment, '#payment-cvcInput', card.cvc);
-  await evaluate(payment, `(() => {
+  const countryState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-countryInput');
-    if (!el) return false;
+    if (!el) return {exists:false, changedFromNonUs:false, selected:false};
+    const countryText = (node) => {
+      if (!node) return '';
+      if (node.tagName === 'SELECT') {
+        return node.selectedOptions?.[0]?.textContent || '';
+      }
+      return node.value || node.textContent || '';
+    };
+    const isUnitedStates = (value, text = '') => /^(us|usa|united states|u\\.s\\.|u\\.s\\.a\\.)$/i.test(String(value || '').trim())
+      || /^(us|usa|united states|u\\.s\\.|u\\.s\\.a\\.)$/i.test(String(text || '').trim());
+    const beforeValue = el.value || '';
+    const beforeText = countryText(el);
+    const beforeMeaningful = String(beforeValue || '').trim()
+      && !/^(country|select|select country|选择|请选择)$/i.test(String(beforeValue || '').trim());
     el.focus();
-    el.value = ${JSON.stringify(normalizeCountry(card.country || 'US'))};
+    const desired = ${JSON.stringify(normalizeCountry(card.country || 'US'))};
+    if (el.tagName === 'SELECT') {
+      const option = [...el.options].find((item) => isUnitedStates(item.value, item.textContent))
+        || [...el.options].find((item) => String(item.value || '').trim().toLowerCase() === desired.toLowerCase());
+      if (option) el.value = option.value;
+      else el.value = desired;
+    } else {
+      el.value = desired;
+    }
     el.dispatchEvent(new Event('input', {bubbles:true}));
     el.dispatchEvent(new Event('change', {bubbles:true}));
-    return true;
+    return {
+      exists: true,
+      changedFromNonUs: !!beforeMeaningful && !isUnitedStates(beforeValue, beforeText),
+      selected: isUnitedStates(el.value, countryText(el)),
+      beforeValue,
+      beforeText,
+      afterValue: el.value || '',
+      afterText: countryText(el),
+    };
   })()`);
   const postalState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-postalCodeInput');
@@ -1462,8 +1588,16 @@ async function fillStripeCard(payment, card) {
     label: (el.labels?.[0]?.innerText || '').slice(0, 80),
   })))()`);
 
-  const linkState = await ensureStripeLinkUnchecked(payment);
-  return {values, linkChecked: linkState.checked, linkState};
+  const linkState = countryState.changedFromNonUs && countryState.selected
+    ? {
+        found: null,
+        checked: null,
+        skipped: true,
+        reason: 'country_changed_to_united_states_before_save',
+        country: countryState,
+      }
+    : await ensureStripeLinkUnchecked(payment);
+  return {values, linkChecked: linkState.checked, linkState, countryState};
 }
 
 async function declineStripeLinkPrompts(debugPort) {
@@ -2305,51 +2439,80 @@ async function executeConfirmedPurchase(page, purchase, debugPort = '', debugDir
     ? purchase.beforeBalance
     : await getCurrentCreditBalance(page);
 
-  const prepared = await preparePurchase(page, purchaseWithDebugPort);
-  await captureDiagnosticScreenshot(page, debugDir, 'purchase-prepared-before-click', {
-    kind: 'purchase_prepared',
-    amount: prepared.amount,
-    beforeBalance,
-  }).catch(() => null);
-  const clicked = await clickPurchaseButton(page);
-  await captureDiagnosticScreenshot(page, debugDir, 'after-purchase-button-click', {
-    kind: 'purchase_clicked',
-    clicked,
-  }).catch(() => null);
-  const confirmation = await clickPurchaseConfirmationIfPresent(page, debugPort, debugDir);
-  writeDiagnostic(debugDir, 'purchase-confirmation-result', {
-    kind: 'purchase_confirmation_result',
-    confirmation,
-  });
-  const result = await waitForPurchaseResult(page, debugPort, 30000, debugDir);
-  if (result.declined) {
-    throw new Error(`payment_issue_card_declined: ${result.state?.paymentIssueText || 'Payment Issue'}`);
+  let autoTopupPendingRecovery = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+      await clickExactText(page, 'Add Credits', {required: false});
+      await sleep(PAGE_SETTLE_MS);
+    }
+    const prepared = await preparePurchase(page, purchaseWithDebugPort);
+    await captureDiagnosticScreenshot(page, debugDir, `purchase-prepared-before-click-attempt-${attempt + 1}`, {
+      kind: 'purchase_prepared',
+      attempt: attempt + 1,
+      amount: prepared.amount,
+      beforeBalance,
+    }).catch(() => null);
+    const clicked = await clickPurchaseButton(page);
+    await captureDiagnosticScreenshot(page, debugDir, `after-purchase-button-click-attempt-${attempt + 1}`, {
+      kind: 'purchase_clicked',
+      attempt: attempt + 1,
+      clicked,
+    }).catch(() => null);
+    const confirmation = await clickPurchaseConfirmationIfPresent(page, debugPort, debugDir);
+    writeDiagnostic(debugDir, `purchase-confirmation-result-attempt-${attempt + 1}`, {
+      kind: 'purchase_confirmation_result',
+      attempt: attempt + 1,
+      confirmation,
+    });
+    const result = await waitForPurchaseResult(page, debugPort, 30000, debugDir);
+    if (result.declined) {
+      const message = result.state?.paymentIssueText || 'Payment Issue';
+      if (attempt === 0 && /automatic top[- ]up might be pending/i.test(message)) {
+        await closePurchaseModal(page).catch(() => {});
+        autoTopupPendingRecovery = await disableExistingAutoTopupBeforeAddCredits(page, debugPort).catch((error) => ({
+          disabled: false,
+          error: error.message,
+        }));
+        writeDiagnostic(debugDir, 'purchase-auto-topup-pending-recovery', {
+          kind: 'purchase_auto_topup_pending_recovery',
+          message,
+          recovery: autoTopupPendingRecovery,
+        });
+        await sleep(2500);
+        continue;
+      }
+      throw new Error(`payment_issue_card_declined: ${message}`);
+    }
+    const balanceVerification = await verifyPurchaseBalanceChange(page, beforeBalance.balance, prepared.amount);
+    writeDiagnostic(debugDir, `purchase-balance-verification-attempt-${attempt + 1}`, {
+      kind: 'purchase_balance_verification',
+      attempt: attempt + 1,
+      balanceVerification,
+    });
+    if (balanceVerification.declined) {
+      throw new Error(`payment_issue_card_declined: ${balanceVerification.issue?.message || 'Payment Issue'}`);
+    }
+    if (!balanceVerification.verified) {
+      throw new Error(`purchase_unverified: balance did not increase; ${JSON.stringify(balanceVerification)}`);
+    }
+    return {
+      executed: true,
+      amount: prepared.amount,
+      totalDue: prepared.totalDue,
+      serviceFee: prepared.serviceFee,
+      sendInvoices: prepared.state.sendInvoicesText ? prepared.state.sendInvoicesChecked : null,
+      oneTimePaymentMethods: prepared.oneTimePaymentMethods.verified.found ? 'off' : 'not_visible',
+      ruleDecision: purchase.ruleDecision || null,
+      beforeBalance,
+      clicked,
+      confirmation,
+      result,
+      autoTopupPendingRecovery,
+      balanceVerification,
+    };
   }
-  const balanceVerification = await verifyPurchaseBalanceChange(page, beforeBalance.balance, prepared.amount);
-  writeDiagnostic(debugDir, 'purchase-balance-verification', {
-    kind: 'purchase_balance_verification',
-    balanceVerification,
-  });
-  if (balanceVerification.declined) {
-    throw new Error(`payment_issue_card_declined: ${balanceVerification.issue?.message || 'Payment Issue'}`);
-  }
-  if (!balanceVerification.verified) {
-    throw new Error(`purchase_unverified: balance did not increase; ${JSON.stringify(balanceVerification)}`);
-  }
-  return {
-    executed: true,
-    amount: prepared.amount,
-    totalDue: prepared.totalDue,
-    serviceFee: prepared.serviceFee,
-    sendInvoices: prepared.state.sendInvoicesText ? prepared.state.sendInvoicesChecked : null,
-    oneTimePaymentMethods: prepared.oneTimePaymentMethods.verified.found ? 'off' : 'not_visible',
-    ruleDecision: purchase.ruleDecision || null,
-    beforeBalance,
-    clicked,
-    confirmation,
-    result,
-    balanceVerification,
-  };
+  throw new Error('payment_issue_card_declined: automatic top-up might be pending after retry');
 }
 
 async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
@@ -3287,6 +3450,48 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, fields, saved, state};
 }
 
+async function waitForAutoTopupDisabled(page, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getAutoTopupState(page);
+    if (!state.enabled) return {...state, disabled: true};
+    await sleep(600);
+  }
+  throw new Error(`Auto top-up did not disable before Add Credits: ${JSON.stringify(state)}`);
+}
+
+async function disableExistingAutoTopupBeforeAddCredits(page, debugPort = '') {
+  const navigation = await ensureCreditsPage(page);
+  const dismissedOverlays = await dismissSaveCardOverlays(page, debugPort);
+  const state = await waitForAutoTopupOverview(page).catch((error) => ({
+    enabled: false,
+    hasManage: false,
+    hasEnable: false,
+    error: error.message,
+  }));
+  if (!state.enabled && !state.hasManage) {
+    return {disabled: false, skipped: true, reason: state.error || 'no_existing_auto_topup_rule', navigation, dismissedOverlays, state};
+  }
+  await openAutoTopupEditor(page, state);
+  const switchResult = await toggleAutoTopupTo(page, false);
+  const saved = switchResult.wasEnabled === false
+    ? {clicked: false, skipped: true, reason: 'already_disabled'}
+    : await saveAutoTopup(page);
+  const disabledState = await waitForAutoTopupDisabled(page);
+  await closePurchaseModal(page).catch(() => {});
+  return {
+    disabled: true,
+    changed: switchResult.wasEnabled !== false,
+    navigation,
+    dismissedOverlays,
+    initialState: state,
+    switch: switchResult,
+    saved,
+    state: disabledState,
+  };
+}
+
 async function waitForAccountState(page, options = {}) {
   const timeoutMs = options.timeoutMs || DEFAULT_CREDITS_ENTRY_WAIT_MS;
   const requirePaymentEntry = options.requirePaymentEntry !== false;
@@ -3332,7 +3537,24 @@ async function waitForAccountState(page, options = {}) {
 
 async function run() {
   const startedAt = Date.now();
-  const input = await startProfileIfNeeded(normalizeInput(parseArgs(process.argv)));
+  const rawInput = normalizeInput(parseArgs(process.argv));
+  const debugDir = rawInput.confirmationDebugDir || '';
+  writeStepDiagnostic(debugDir, 'input-normalized', 'success', {
+    profileNo: rawInput.profileNo,
+    profileId: rawInput.profileId,
+    expectedAccount: rawInput.expectedAccount,
+    startupUrl: rawInput.startupUrl,
+    scopes: {
+      billingAddressOnly: rawInput.billingAddressOnly,
+      autoTopupOnly: rawInput.autoTopupOnly,
+      creditsStatusOnly: rawInput.creditsStatusOnly,
+      purchaseOnly: rawInput.purchaseOnly,
+      preparePurchaseOnly: rawInput.preparePurchaseOnly,
+      purchaseConfirmed: rawInput.purchase?.confirmed,
+      autoTopupEnabled: rawInput.autoTopup?.enabled,
+    },
+  });
+  const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
   input.debugPort ||= debugPortFromWs(input.browserWs);
   const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly;
   const {last4, masked} = bindsCard ? maskCard(input.card.number) : {last4: '', masked: ''};
@@ -3345,14 +3567,15 @@ async function run() {
   let payment;
   let accountForRecovery = '';
   let purchasePlanForRecovery = null;
+  let preAddCreditsAutoTopup = {skipped: true, reason: 'not_checked'};
 
   try {
     await page.send('Runtime.enable');
     await page.send('Page.enable').catch(() => {});
-	    await navigatePage(page, OPENROUTER_CREDITS_URL);
-	    const accountState = await waitForAccountState(page, {
+	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+	    const accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
       requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
-    });
+    }), page);
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
 	    }
@@ -3365,8 +3588,8 @@ async function run() {
       throw new Error(`Payment entry not ready after waiting: neither Add Credits nor Add a Payment Method is clickable; disabled=${(accountState.disabledEntryButtons || []).join(',')}; tail=${accountState.tail}`);
     }
     if (input.creditsStatusOnly) {
-      const balance = await getCurrentCreditBalance(page);
-      const autoTopup = await waitForAutoTopupOverview(page).catch((error) => ({
+      const balance = await runLoggedStep('read-credit-balance', debugDir, () => getCurrentCreditBalance(page), page);
+      const autoTopup = await runLoggedStep('read-auto-topup-overview', debugDir, () => waitForAutoTopupOverview(page), page).catch((error) => ({
         configured: false,
         error: error.message,
       }));
@@ -3381,13 +3604,13 @@ async function run() {
       };
     }
     const purchasePlan = (input.purchase.confirmed || input.preparePurchaseOnly)
-      ? await resolvePurchasePlan(page, input.preparePurchaseOnly ? {...input.purchase, confirmed: true} : input.purchase)
+      ? await runLoggedStep('resolve-purchase-plan', debugDir, () => resolvePurchasePlan(page, input.preparePurchaseOnly ? {...input.purchase, confirmed: true} : input.purchase), page)
       : input.purchase;
     purchasePlan.confirmed = input.purchase.confirmed;
     purchasePlanForRecovery = purchasePlan;
     if (input.autoTopupOnly) {
-      const paymentMethod = await verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      const paymentMethod = await runLoggedStep('verify-saved-payment-method-auto-topup', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged',
@@ -3399,16 +3622,17 @@ async function run() {
       };
     }
     if (input.purchaseOnly) {
-      const paymentMethod = await verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount);
-      await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+      const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
+      preAddCreditsAutoTopup = await runLoggedStep('disable-existing-auto-topup-before-add-credits', debugDir, () => disableExistingAutoTopupBeforeAddCredits(page, input.debugPort), page);
+      await runLoggedStep('wait-add-credits-purchase-only', debugDir, () => waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS), page);
       await sleep(PAGE_SETTLE_MS);
       const purchaseResult = input.purchase.confirmed
-        ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-        : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+        ? await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
+        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup-after-purchase-only', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: input.purchase.confirmed
@@ -3417,6 +3641,7 @@ async function run() {
         account: accountState.account,
         launch: input.launch,
         paymentMethod,
+        preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
         verified: true,
@@ -3436,18 +3661,19 @@ async function run() {
         reason: removal.reason || 'no_existing_payment_methods',
       };
     }
-    const paymentPath = await openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+    preAddCreditsAutoTopup = await runLoggedStep('disable-existing-auto-topup-before-add-credits', debugDir, () => disableExistingAutoTopupBeforeAddCredits(page, input.debugPort), page);
+    const paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
       requireAddPaymentMethod: input.billingAddressOnly,
       timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
-    });
+    }), page);
     if (paymentPath.alreadyBound) {
       const purchaseResult = input.purchase.confirmed
-        ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-        : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+        ? await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
+        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup-existing-card', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: input.purchase.confirmed
@@ -3459,6 +3685,7 @@ async function run() {
         card: {last4, masked, expiry: expectedExpiry},
         launch: input.launch,
         removal,
+        preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
         verified: true,
@@ -3466,10 +3693,10 @@ async function run() {
         elapsedMs: Date.now() - startedAt,
       };
     }
-    const billingEntry = await openBillingAddressFormIfNeeded(page);
-    const billingAddress = await maybeFillBillingAddress(page, input.billing, input.debugPort);
+    const billingEntry = await runLoggedStep('open-billing-address-form', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+    const billingAddress = await runLoggedStep('fill-billing-address', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
     if (input.billingAddressOnly) {
-      const cardForm = await waitForCardFormReady(page, input.debugPort);
+      const cardForm = await runLoggedStep('wait-card-form-ready', debugDir, () => waitForCardFormReady(page, input.debugPort), page);
       if (!cardForm.ready) {
         throw new Error(`Billing address was submitted but card form is not ready; tail=${cardForm.state?.tail || ''}; targetError=${cardForm.targetError || ''}`);
       }
@@ -3500,28 +3727,28 @@ async function run() {
     await payment.send('Runtime.enable');
     let stripeState;
     try {
-      stripeState = await fillStripeCard(payment, input.card);
+      stripeState = await runLoggedStep('fill-stripe-card', debugDir, () => fillStripeCard(payment, input.card), payment);
     } catch (error) {
       throw error;
     }
 
-    const saveClick = await clickByText(page, 'Save payment method', {required: false});
+    const saveClick = await runLoggedStep('click-save-payment-method', debugDir, () => clickByText(page, 'Save payment method', {required: false}), page);
     if (!saveClick.clicked) {
       throw new Error('Add Credits payment path did not expose Save payment method; refusing to click Purchase');
     }
     await sleep(2000);
     await declineStripeLinkPrompts(input.debugPort);
-    const postSave = await waitUntilSaveModalCloses(page);
+    const postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page), page);
     const verified = input.openPurchaseForVerification
-      ? await verifyByPurchaseModal(page, last4, expectedExpiry)
+      ? await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page)
       : {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
     const purchaseResult = input.purchase.confirmed
-      ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-      : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+      ? await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
+      : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
     if (input.preparePurchaseOnly) purchaseResult.submitted = false;
     if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
     if (input.openPurchaseForVerification && !input.purchase.confirmed) await closePurchaseModal(page);
-    const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+    const autoTopupResult = await runLoggedStep('configure-auto-topup-final', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
 
     return {
       ok: true,
@@ -3534,6 +3761,7 @@ async function run() {
       purchase: purchaseResult,
       linkCheckedAfterUncheck: stripeState.linkChecked,
       postSave: {hasAddCredits: postSave.hasAddCredits},
+      preAddCreditsAutoTopup,
       verified: verified.verified,
       purchaseModalOpened: input.openPurchaseForVerification,
       elapsedMs: Date.now() - startedAt,
@@ -3552,6 +3780,7 @@ async function run() {
           account: accountForRecovery || input.expectedAccount,
           card: {last4, masked, expiry: expectedExpiry},
           launch: input.launch,
+          preAddCreditsAutoTopup,
           autoTopup: autoTopupResult,
           purchase: {
             executed: true,

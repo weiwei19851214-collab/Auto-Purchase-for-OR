@@ -11,3 +11,4 @@ data/logs/*
 !data/logs/.gitkeep
 .DS_Store
 .recharge.local.env
+.idea

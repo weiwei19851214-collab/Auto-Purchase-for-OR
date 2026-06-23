@@ -95,6 +95,10 @@ export async function readyToRechargePayload(payload = {}) {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
     opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: payload.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
   };
   const {accounts, nextCursor} = await opom.fetchRechargeAccounts(args, {
     group: payload.group || 'recharge',
@@ -172,9 +176,9 @@ function candidateAccountsForRow(row, index) {
   };
   const accountId = String(row.opom_account_id || '').trim();
   if (accountId && index.byAccountId.has(accountId)) add([index.byAccountId.get(accountId)]);
+  add(index.byUserId.get(String(row.ads_power_user_id || '').trim().toLowerCase()));
   add(index.byEmail.get(String(row.login_email || '').trim().toLowerCase()));
   add(index.bySerial.get(String(row.ads_power_serial_number || '').trim().toLowerCase()));
-  add(index.byUserId.get(String(row.ads_power_user_id || '').trim().toLowerCase()));
 
   const byId = new Map();
   for (const candidate of candidates) {
@@ -239,6 +243,10 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
     opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: payload.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
   };
   const group = payload.group || 'recharge';
   const status = payload.status || 'needs_recharge';

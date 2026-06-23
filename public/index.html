@@ -22,6 +22,113 @@
       <main class="layout">
         <section id="alert" class="alert" role="alert" hidden></section>
 
+        <details class="panel optional-panel runtime-config-panel" open>
+          <summary>
+            <span class="step-index optional">⚙</span>
+            <div>
+              <h2>本地配置</h2>
+              <small id="runtimeConfigSummary">填写一次后会保存在当前浏览器，仅本机生效。</small>
+            </div>
+          </summary>
+
+          <div class="config-grid">
+            <label class="field">
+              <span>ADSPOWER_API_BASE</span>
+              <input id="configAdspowerApiBase" type="url" placeholder="http://127.0.0.1:50325" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_API_KEY</span>
+              <input id="configAdspowerApiKey" type="password" autocomplete="off" placeholder="AdsPower Local API key" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_START_TIMEOUT_MS</span>
+              <input id="configAdspowerStartTimeoutMs" type="number" min="1000" step="1000" placeholder="45000" />
+            </label>
+            <label class="field">
+              <span>OPOM_BASE_URL</span>
+              <input id="configOpomBaseUrl" type="url" placeholder="http://20.2.209.2:3000" />
+            </label>
+            <label class="field">
+              <span>OPOM_RECHARGE_TOKEN</span>
+              <input id="configOpomRechargeToken" type="password" autocomplete="off" placeholder="OPOM machine token" />
+            </label>
+            <label class="field">
+              <span>OPOM_REQUEST_TIMEOUT_MS</span>
+              <input id="configOpomRequestTimeoutMs" type="number" min="1000" step="1000" placeholder="45000" />
+            </label>
+            <label class="field">
+              <span>OPOM_REQUEST_RETRIES</span>
+              <input id="configOpomRequestRetries" type="number" min="1" step="1" placeholder="3" />
+            </label>
+            <label class="field">
+              <span>OPOM_WRITEBACK_RETRIES</span>
+              <input id="configOpomWritebackRetries" type="number" min="1" step="1" placeholder="3" />
+            </label>
+            <label class="field">
+              <span>OPOM_RETRY_DELAY_MS</span>
+              <input id="configOpomRetryDelayMs" type="number" min="100" step="100" placeholder="1500" />
+            </label>
+            <label class="field">
+              <span>ROW_TIMEOUT_MS</span>
+              <input id="configRowTimeoutMs" type="number" min="30000" step="1000" placeholder="600000" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_STATUS_MODE</span>
+              <select id="adspowerStatusMode">
+                <option value="disabled">disabled</option>
+                <option value="group_move">group_move</option>
+                <option value="remark_append">remark_append</option>
+                <option value="remark_append_v2">remark_append_v2</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>ADSPOWER_SUCCESS_GROUP_ID</span>
+              <input id="adspowerSuccessGroupId" type="text" placeholder="id:g-success 或 name:Recharge Success" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_SUCCESS_GROUP_NAME</span>
+              <input id="adspowerSuccessGroupName" type="text" placeholder="Recharge Success" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_FAILURE_GROUP_ID</span>
+              <input id="adspowerFailureGroupId" type="text" placeholder="id:g-failure 或 name:Recharge Failed" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_FAILURE_GROUP_NAME</span>
+              <input id="adspowerFailureGroupName" type="text" placeholder="Recharge Failed" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_BLOCKER_GROUP_ID</span>
+              <input id="adspowerBlockerGroupId" type="text" placeholder="id:g-blocker 或 name:Recharge Blocked" />
+            </label>
+            <label class="field">
+              <span>ADSPOWER_BLOCKER_GROUP_NAME</span>
+              <input id="adspowerBlockerGroupName" type="text" placeholder="Recharge Blocked" />
+            </label>
+            <label class="field">
+              <span>EJH_APP_KEY</span>
+              <input id="configEjhAppKey" type="password" autocomplete="off" placeholder="真实开卡时使用" />
+            </label>
+            <label class="field">
+              <span>EJH_APP_SECRET</span>
+              <input id="configEjhAppSecret" type="password" autocomplete="off" placeholder="真实开卡时使用" />
+            </label>
+            <label class="field">
+              <span>PYTHON</span>
+              <input id="configPython" type="text" placeholder="python3" />
+            </label>
+          </div>
+
+          <div class="action-row config-actions">
+            <button id="saveRuntimeConfigBtn" type="button" class="primary">确认保存配置</button>
+            <button id="clearRuntimeConfigBtn" type="button">清空页面配置</button>
+            <button id="adspowerDiscoverTargetsBtn" type="button" disabled>Discover groups</button>
+            <button id="adspowerUseDiscoveredTargetsBtn" type="button" disabled>Use discovered targets</button>
+          </div>
+          <div id="runtimeConfigSavedState" class="save-state muted" role="status" aria-live="polite">正在读取本地配置...</div>
+          <div id="adspowerTargetsSummary" class="summary muted" role="status" aria-live="polite">AdsPower group discovery 未执行。</div>
+        </details>
+
         <section class="status-strip" aria-label="执行状态总览">
           <div class="metric-card">
             <span>清单</span>
@@ -79,11 +186,11 @@
 
               <div class="source-actions">
                 <div class="action-row">
-                  <button id="opomReadyBtn" type="button">Load OPOM group</button>
+                  <button id="opomReadyBtn" type="button" disabled>Load OPOM group</button>
                   <button id="opomLoadMoreBtn" type="button" disabled>Load next page</button>
                 </div>
                 <div class="action-row">
-                  <button id="adsPowerMatchBtn" type="button" class="primary">Match AdsPower</button>
+                  <button id="adsPowerMatchBtn" type="button" class="primary" disabled>Match AdsPower</button>
                 </div>
               </div>
 
@@ -100,41 +207,92 @@
                 <span class="step-index">2</span>
                 <div>
                   <h2>规则与地址</h2>
-                  <p class="muted">金额、Auto top-up 和账单地址会写入本次 canonical CSV。</p>
+                  <p class="muted">先选择本次充值方式，再填写自动充值规则和账单地址。</p>
                 </div>
               </div>
 
-              <div class="form-grid two">
-                <label class="field">
-                  <span>Fixed amount</span>
-                  <input id="defaultAmount" type="number" min="0" step="0.01" value="0" />
+              <div class="rule-mode" role="radiogroup" aria-label="本次充值方式">
+                <label>
+                  <input id="rechargeRuleFixed" name="rechargeRuleMode" type="radio" value="fixed" />
+                  <strong>固定充值</strong>
+                  <span>每个账号本次都充值同一个金额。</span>
                 </label>
-                <label class="field">
-                  <span>Balance threshold</span>
-                  <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="40" />
-                </label>
-                <label class="field">
-                  <span>Below amount</span>
-                  <input id="defaultAmountBelow" type="number" min="0" step="0.01" value="150" />
-                </label>
-                <label class="field">
-                  <span>At/above amount</span>
-                  <input id="defaultAmountAtOrAbove" type="number" min="0" step="0.01" value="100" />
-                </label>
-                <label class="field">
-                  <span>Auto threshold</span>
-                  <input id="defaultAutoTopupThreshold" type="number" min="0" step="0.01" value="100" />
-                </label>
-                <label class="field">
-                  <span>Auto amount</span>
-                  <input id="defaultAutoTopupAmount" type="number" min="0" step="0.01" value="100" />
+                <label>
+                  <input id="rechargeRuleBalance" name="rechargeRuleMode" type="radio" value="balance" checked />
+                  <strong>按余额判断</strong>
+                  <span>先读取当前余额，再按高低自动选择本次充值金额。</span>
                 </label>
               </div>
 
-              <label class="field file-field">
-                <span>Billing address CSV 必填</span>
-                <input id="addressMappingCsv" type="file" accept=".csv,text/csv" />
-              </label>
+              <div id="fixedRuleFields" class="form-grid one rule-fields" hidden>
+                <label class="field">
+                  <span>本次固定充值金额</span>
+                  <input id="defaultAmount" type="number" min="0" step="0.01" value="5" />
+                </label>
+              </div>
+
+              <div id="balanceRuleFields" class="rule-fields">
+                <div class="rule-explain">
+                  例如：余额低于 40 时充值 150；余额大于等于 40 时充值 5。
+                </div>
+                <div class="form-grid three">
+                  <label class="field">
+                    <span>余额判断线</span>
+                    <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="40" />
+                  </label>
+                  <label class="field">
+                    <span>余额低于判断线时充值</span>
+                    <input id="defaultAmountBelow" type="number" min="0" step="0.01" value="150" />
+                  </label>
+                  <label class="field">
+                    <span>余额达到判断线时充值</span>
+                    <input id="defaultAmountAtOrAbove" type="number" min="0" step="0.01" value="5" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="rule-subsection">
+                <div>
+                  <h3>自动充值规则</h3>
+                  <p class="muted">这是 OpenRouter 以后余额不足时自动充值的规则，不等于本次手动充值金额。</p>
+                </div>
+                <div class="form-grid two">
+                  <label class="field">
+                    <span>余额低于多少时自动充值</span>
+                    <input id="defaultAutoTopupThreshold" type="number" min="0" step="0.01" value="100" />
+                  </label>
+                  <label class="field">
+                    <span>自动充值金额</span>
+                    <input id="defaultAutoTopupAmount" type="number" min="0" step="0.01" value="100" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="rule-subsection address-tool">
+                <div>
+                  <h3>账单地址</h3>
+                  <p class="muted">上传账号清单后，可以按清单行数自动生成美国地址；也可以上传自己的地址 CSV 覆盖。</p>
+                </div>
+                <div class="form-grid two">
+                  <label class="field">
+                    <span>地址池</span>
+                    <select id="addressPreset">
+                      <option value="oregon">美国地址池（俄勒冈 OR）</option>
+                    </select>
+                  </label>
+                  <label class="field file-field">
+                    <span>地址 CSV（可选）</span>
+                    <input id="addressMappingCsv" type="file" accept=".csv,text/csv" />
+                  </label>
+                </div>
+                <div class="action-row">
+                  <button id="generateAddressesBtn" type="button" disabled>按当前清单生成地址</button>
+                  <span id="addressGeneratorSummary" class="muted">还未生成地址。</span>
+                </div>
+                <div id="generatedAddressList" class="address-list" aria-live="polite">
+                  <div class="muted">上传账号 CSV 或拉取 OPOM 后，点击生成地址即可预览。</div>
+                </div>
+              </div>
             </section>
 
             <section class="panel step-panel">
@@ -167,8 +325,8 @@
               </label>
 
               <div class="action-row">
-                <button id="allocateCardsBtn" type="button" class="primary">Allocate cards</button>
-                <button id="createCardsBtn" type="button">Create EJH cards</button>
+                <button id="allocateCardsBtn" type="button" class="primary" disabled>Allocate cards</button>
+                <button id="createCardsBtn" type="button" disabled>Create EJH cards</button>
               </div>
 
               <fieldset class="check-group">
@@ -212,6 +370,7 @@
                       <th scope="col">账号</th>
                       <th scope="col">OPOM health</th>
                       <th scope="col">AdsPower</th>
+                      <th scope="col">AdsPowerId</th>
                       <th scope="col">匹配</th>
                       <th scope="col">充值规则</th>
                       <th scope="col">Auto top-up</th>

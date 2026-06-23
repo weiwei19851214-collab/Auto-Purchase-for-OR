@@ -76,6 +76,15 @@ export function classifyError(message) {
       message: text,
     });
   }
+  if (/AdsPower.*(is being used by|not allowed to open)|is being used by .* not allowed to open/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'adspower.profile_in_use',
+      terminal: true,
+      safeToContinueBatch: true,
+      stopProfile: false,
+      message: text,
+    });
+  }
   return statusRecord(STATUSES.FAILED, {
     stage: 'automation',
     terminal: true,

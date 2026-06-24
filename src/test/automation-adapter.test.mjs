@@ -217,6 +217,23 @@ test('browser diagnostics include non-fatal network failures', () => {
   assert.match(script, /safeDiagnosticUrl/);
 });
 
+test('browser diagnostics ignore OpenRouter internal Stripe helper failures', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /isIgnoredOpenRouterNetworkFailure/);
+  assert.match(script, /https:\/\/openrouter\.ai\/api\/internal\/v1\/stripe/);
+  assert.match(script, /ignoredServerError/);
+  assert.match(script, /ignoredNetworkFailures/);
+  assert.match(script, /ignored_openrouter_server_error_dismissed/);
+});
+
+test('browser path records and dismisses non-fatal OpenRouter server errors after successful steps', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /dismissServerErrorAfterStepIfPresent/);
+  assert.match(script, /non_fatal_server_error_dismissed/);
+  assert.match(script, /dismissedPostStepServerError/);
+  assert.match(script, /clickedCount/);
+});
+
 test('dryRunPayload reports row-level missing fields', async () => {
   const result = await dryRunPayload({fileName: 'missing.csv', csvText: MISSING_CSV});
   assert.equal(result.ok, true);

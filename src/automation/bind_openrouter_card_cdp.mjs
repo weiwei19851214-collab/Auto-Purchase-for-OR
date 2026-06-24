@@ -95,16 +95,23 @@ function safeDiagnosticUrl(value) {
   }
 }
 
+function isIgnoredOpenRouterNetworkFailure(entry) {
+  const url = safeDiagnosticUrl(entry?.url || '');
+  return url === 'https://openrouter.ai/api/internal/v1/stripe';
+}
+
 async function installNetworkDiagnostics(client) {
   if (!client || client.__networkDiagnosticsInstalled) return {installed: false, reason: 'already_installed'};
   client.__networkDiagnosticsInstalled = true;
   const requests = new Map();
   const failures = [];
   const rememberFailure = (entry) => {
+    const url = safeDiagnosticUrl(entry.url);
     failures.push({
       at: new Date().toISOString(),
       ...entry,
-      url: safeDiagnosticUrl(entry.url),
+      url,
+      ignored: isIgnoredOpenRouterNetworkFailure({...entry, url}),
     });
     while (failures.length > 30) failures.shift();
   };
@@ -161,9 +168,22 @@ async function pageStepState(page) {
       tail: text.slice(-1800),
     };
   })()`).catch((error) => ({error: error.message}));
+  const networkFailures = page.getRecentNetworkFailures?.() || [];
+  const recentNetworkFailures = networkFailures.filter((entry) => !entry.ignored);
+  const ignoredNetworkFailures = networkFailures.filter((entry) => entry.ignored);
+  const ignoredServerError = Boolean(
+    state.hasServerError
+      && ignoredNetworkFailures.length
+      && !recentNetworkFailures.length
+      && !state.hasPaymentIssue,
+  );
   return {
     ...state,
-    recentNetworkFailures: page.getRecentNetworkFailures?.() || [],
+    hasServerErrorRaw: Boolean(state.hasServerError),
+    hasServerError: Boolean(state.hasServerError && !ignoredServerError),
+    ignoredServerError,
+    recentNetworkFailures,
+    ignoredNetworkFailures: ignoredNetworkFailures.slice(-5),
   };
 }
 
@@ -195,7 +215,7 @@ async function dismissOpenRouterServerErrorToast(page) {
     for (const container of unique) {
       closeCandidates.push(...[...container.querySelectorAll('button,[role="button"],[aria-label],svg')]
         .filter((node) => visible(node))
-        .filter((node) => {
+        .map((node) => {
           const label = [
             node.getAttribute('aria-label') || '',
             node.getAttribute('title') || '',
@@ -204,14 +224,44 @@ async function dismissOpenRouterServerErrorToast(page) {
           const rect = node.getBoundingClientRect();
           const containerRect = container.getBoundingClientRect();
           const nearTopRight = rect.left > containerRect.left + containerRect.width * 0.6 && rect.top < containerRect.top + containerRect.height * 0.35;
-          return /close|dismiss|关闭|×|x/i.test(label) || nearTopRight;
-        }));
+          return {
+            node,
+            label,
+            score: /close|dismiss|关闭|×|x/i.test(label) ? 2 : nearTopRight ? 1 : 0,
+          };
+        })
+        .filter((candidate) => candidate.score > 0));
     }
-    const target = closeCandidates[0];
-    if (!target) return {attempted: true, found: true, clicked: false, reason: 'close_button_not_found'};
-    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
-    return {attempted: true, found: true, clicked: true};
+    const ordered = [...closeCandidates].sort((a, b) => b.score - a.score);
+    const clicked = [];
+    for (const candidate of ordered.slice(0, 6)) {
+      const target = candidate.node.closest?.('button,[role="button"],[aria-label]') || candidate.node;
+      if (!target || clicked.includes(target)) continue;
+      const PointerLikeEvent = window.PointerEvent || MouseEvent;
+      target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+      target.click?.();
+      target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+      clicked.push(target);
+    }
+    if (!clicked.length) return {attempted: true, found: true, clicked: false, reason: 'close_button_not_found'};
+    return {attempted: true, found: true, clicked: true, clickedCount: clicked.length};
   })()`).catch((error) => ({attempted: true, error: error.message}));
+}
+
+async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState) {
+  if (!page || (!pageState?.hasServerError && !pageState?.ignoredServerError)) return {attempted: false};
+  const dismissedPostStepServerError = await dismissOpenRouterServerErrorToast(page);
+  if (dismissedPostStepServerError?.clicked) await sleep(250);
+  const after = await pageStepState(page);
+  writeStepDiagnostic(debugDir, `${label}-server-error-dismissed`, 'success', {
+    kind: pageState?.ignoredServerError ? 'ignored_openrouter_server_error_dismissed' : 'non_fatal_server_error_dismissed',
+    dismissedPostStepServerError,
+    before: pageState,
+    after,
+  });
+  return dismissedPostStepServerError;
 }
 
 async function runLoggedStep(label, debugDir, task, page = null) {
@@ -220,7 +270,9 @@ async function runLoggedStep(label, debugDir, task, page = null) {
   writeStepDiagnostic(debugDir, label, 'start', {dismissedServerError, page: await pageStepState(page)});
   try {
     const result = await task();
-    writeStepDiagnostic(debugDir, label, 'success', {result, page: await pageStepState(page)});
+    const pageState = await pageStepState(page);
+    writeStepDiagnostic(debugDir, label, 'success', {result, page: pageState});
+    await dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState);
     return result;
   } catch (error) {
     const pageState = await pageStepState(page);

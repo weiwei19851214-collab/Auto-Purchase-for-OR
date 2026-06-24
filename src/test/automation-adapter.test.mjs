@@ -41,6 +41,10 @@ const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_b
 ,1415,user@example.com,145,150
 `;
 
+const BALANCE_RULE_WITH_AT_OR_ABOVE_CSV = `status,ID,username,balance_threshold,amount_below_threshold,amount_at_or_above_threshold
+,1415,user@example.com,145,150,10
+`;
+
 const CARD_ONLY_CSV = `status,ID,username,card_number,exp_month,exp_year,cvv,postal_code
 ,1415,user@example.com,5257970000000001,06,28,456,97001
 `;
@@ -114,6 +118,15 @@ test('parsePlan validates execution scopes independently', async () => {
   assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_top_up_to_target');
   assert.equal(balanceRulePurchase.rows[0].executionScope, 'purchase');
 
+  const balanceRuleWithAtOrAbove = await parsePlan(BALANCE_RULE_WITH_AT_OR_ABOVE_CSV, {
+    scopeBillingAddress: false,
+    scopePaymentMethod: false,
+    scopePurchase: true,
+    scopeAutoTopup: false,
+  });
+  assert.equal(balanceRuleWithAtOrAbove.rows[0].status, 'ready');
+  assert.equal(balanceRuleWithAtOrAbove.rows[0].purchasePlan, 'balance_top_up_to_target');
+
   const card = await parsePlan(CARD_ONLY_CSV, {
     scopeBillingAddress: false,
     scopePaymentMethod: true,
@@ -131,6 +144,19 @@ test('parsePlan validates execution scopes independently', async () => {
   });
   assert.equal(billing.rows[0].status, 'ready');
   assert.equal(billing.rows[0].executionScope, 'billing_address');
+});
+
+test('purchasePlan supports target balance with at-or-above recharge amount', () => {
+  const plan = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '10',
+  });
+  assert.equal(plan.mode, 'balance_top_up_to_target');
+  assert.equal(plan.purchase.rule.threshold, '145');
+  assert.equal(plan.purchase.rule.targetBalance, '150');
+  assert.equal(plan.purchase.rule.belowAmount, '150');
+  assert.equal(plan.purchase.rule.atOrAboveAmount, '10');
 });
 
 test('parsePlan rejects empty execution scope', async () => {

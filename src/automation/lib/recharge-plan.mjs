@@ -144,17 +144,20 @@ export function purchasePlan(row) {
     };
   }
   if (allRule) {
+    const targetBalance = normalizeMoneyValue(belowRaw);
+    const atOrAboveAmount = normalizeMoneyValue(atOrAboveRaw);
     return {
       purchase: {
         confirmed: true,
         rule: {
           threshold: normalizeMoneyValue(thresholdRaw),
-          belowAmount: normalizeMoneyValue(belowRaw),
-          atOrAboveAmount: normalizeMoneyValue(atOrAboveRaw),
+          targetBalance,
+          belowAmount: targetBalance,
+          atOrAboveAmount,
         },
       },
       missing: [],
-      mode: 'balance_rule',
+      mode: 'balance_top_up_to_target',
     };
   }
   if (anyRule) {

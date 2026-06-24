@@ -2098,9 +2098,10 @@ async function resolvePurchasePlan(page, purchase) {
       }
       const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
       const rawAmount = Math.ceil(targetBalance - balanceState.balance);
-      const amount = branch === 'below_threshold' && rawAmount > 0
-        ? (Number.isInteger(rawAmount) ? String(rawAmount) : String(rawAmount))
-        : '';
+      const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
+      const amount = branch === 'below_threshold'
+        ? (rawAmount > 0 ? String(rawAmount) : '')
+        : atOrAboveAmount;
       return {
         ...purchase,
         amount,
@@ -2109,6 +2110,7 @@ async function resolvePurchasePlan(page, purchase) {
           mode: 'top_up_to_target',
           threshold: purchase.rule.threshold,
           targetBalance: purchase.rule.targetBalance,
+          atOrAboveAmount,
           balance: balanceState.balance,
           balanceRaw: balanceState.raw,
           balanceSource: balanceState.source,

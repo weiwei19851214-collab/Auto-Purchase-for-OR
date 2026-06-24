@@ -168,8 +168,8 @@ h3 {
 }
 
 .control-rail {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: start;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr) minmax(0, .98fr);
+  align-items: stretch;
 }
 
 .control-rail > .optional-panel {
@@ -192,6 +192,7 @@ h3 {
 .step-panel {
   display: grid;
   gap: 12px;
+  align-content: start;
 }
 
 .step-head {
@@ -299,11 +300,12 @@ h3 {
 
 .rule-mode label {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 8px;
-  align-items: start;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
   min-width: 0;
-  padding: 10px;
+  min-height: 42px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-soft);
@@ -316,24 +318,17 @@ h3 {
 }
 
 .rule-mode input {
-  margin-top: 3px;
+  margin: 0;
 }
 
 .rule-mode strong {
   font-size: 13px;
 }
 
-.rule-mode span {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 400;
-}
-
 .rule-fields,
 .rule-subsection {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .address-tool {
@@ -345,11 +340,10 @@ h3 {
 }
 
 .address-list {
-  display: grid;
-  gap: 6px;
-  height: 172px;
+  display: block;
+  height: 112px;
   overflow: auto;
-  padding: 8px;
+  padding: 4px 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
@@ -357,28 +351,45 @@ h3 {
 
 .address-item {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 8px;
-  padding: 7px 8px;
-  border: 1px solid #eaecf0;
-  border-radius: 6px;
-  background: #fcfcfd;
+  grid-template-columns: 28px minmax(72px, .65fr) minmax(0, 1.35fr) 96px;
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #eef1f5;
 }
 
-.address-item strong {
+.address-item:last-child {
+  border-bottom: 0;
+}
+
+.address-item strong,
+.address-item b {
   color: #344054;
   font-size: 12px;
 }
 
-.address-item span {
+.address-item span,
+.address-item small {
   min-width: 0;
   color: #475467;
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.25;
+}
+
+.address-item b,
+.address-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.address-item small {
+  text-align: right;
 }
 
 .rule-explain {
-  padding: 8px 10px;
+  padding: 7px 9px;
   border: 1px solid #b2ddff;
   border-radius: 6px;
   background: #eff8ff;

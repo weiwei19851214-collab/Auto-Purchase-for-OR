@@ -234,12 +234,8 @@ function mergeResolvedOpomRow(row, canonical) {
   };
 }
 
-export async function resolveOpomAccountsPayload(payload = {}) {
-  const rows = Array.isArray(payload.rows) ? payload.rows : [];
-  if (!rows.length) {
-    return {ok: true, total: 0, matched: 0, failed: 0, rows: [], csvText: canonicalCsvFromRows([])};
-  }
-  const args = {
+function opomArgsFromPayload(payload = {}) {
+  return {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
     opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
@@ -248,6 +244,64 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
     opomRetryDelayMs: payload.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
   };
+}
+
+function normalizeResolveStatus(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (value === 'matched') return 'matched';
+  if (value === 'not_found') return 'opom_not_found';
+  if (value === 'ambiguous') return 'opom_ambiguous';
+  if (value === 'identity_mismatch') return 'opom_identity_mismatch';
+  return value ? `opom_${value}` : 'opom_not_found';
+}
+
+function mergeBatchResolvedRow(row, result = {}) {
+  if (String(result.status || '').toLowerCase() === 'matched' && result.account) {
+    const canonical = opom.canonicalRowsFromOpomAccounts([result.account], {})[0] || {};
+    return mergeResolvedOpomRow(row, canonical);
+  }
+  const status = normalizeResolveStatus(result.status);
+  return {
+    ...row,
+    opom_health_status: status,
+    opom_health_reason: result.reason || result.message || 'OPOM batch resolve did not match this row',
+  };
+}
+
+async function resolveOpomAccountsBatch(args, rows, {group, status} = {}) {
+  const body = await opom.resolveRechargeAccounts(args, {rows, group, status});
+  const resultByIndex = new Map();
+  for (const [fallbackIndex, item] of body.results.entries()) {
+    const index = Number.isInteger(item.index) ? item.index : fallbackIndex;
+    resultByIndex.set(index, item);
+  }
+  let matched = 0;
+  let failed = 0;
+  const resolvedRows = rows.map((row, index) => {
+    const result = resultByIndex.get(index);
+    if (!result) {
+      failed += 1;
+      return mergeBatchResolvedRow(row, {
+        status: 'not_found',
+        reason: 'OPOM batch resolve returned no result for this row',
+      });
+    }
+    if (String(result.status || '').toLowerCase() === 'matched' && result.account) matched += 1;
+    else failed += 1;
+    return mergeBatchResolvedRow(row, result);
+  });
+  return {
+    ok: true,
+    total: rows.length,
+    matched,
+    failed,
+    resolveSource: 'batch_resolve',
+    rows: resolvedRows,
+    csvText: canonicalCsvFromRows(resolvedRows),
+  };
+}
+
+async function resolveOpomAccountsLegacy(args, rows, payload = {}) {
   const group = payload.group || 'recharge';
   const status = payload.status || 'needs_recharge';
   const best = await loadBestResolveIndex(args, rows, {
@@ -291,4 +345,25 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     rows: resolvedRows,
     csvText: canonicalCsvFromRows(resolvedRows),
   };
+}
+
+export async function resolveOpomAccountsPayload(payload = {}) {
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  if (!rows.length) {
+    return {ok: true, total: 0, matched: 0, failed: 0, rows: [], csvText: canonicalCsvFromRows([])};
+  }
+  const args = opomArgsFromPayload(payload);
+  try {
+    return await resolveOpomAccountsBatch(args, rows, {
+      group: payload.group || 'recharge',
+      status: payload.status || 'needs_recharge',
+    });
+  } catch (error) {
+    if (![404, 405].includes(Number(error?.httpStatus))) throw error;
+    const result = await resolveOpomAccountsLegacy(args, rows, payload);
+    return {
+      ...result,
+      resolveSource: `legacy:${result.resolveSource}`,
+    };
+  }
 }

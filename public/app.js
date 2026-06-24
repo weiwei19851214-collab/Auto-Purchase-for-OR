@@ -32,6 +32,8 @@ const els = {
   rechargeRuleBalance: document.querySelector('#rechargeRuleBalance'),
   fixedRuleFields: document.querySelector('#fixedRuleFields'),
   balanceRuleFields: document.querySelector('#balanceRuleFields'),
+  autoTopupRuleSection: document.querySelector('#autoTopupRuleSection'),
+  addressRuleSection: document.querySelector('#addressRuleSection'),
   defaultAmount: document.querySelector('#defaultAmount'),
   defaultBalanceThreshold: document.querySelector('#defaultBalanceThreshold'),
   defaultAmountBelow: document.querySelector('#defaultAmountBelow'),
@@ -406,11 +408,11 @@ function updateRunStats() {
 }
 
 function canAttemptExecution() {
-  return Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0;
+  return Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0 && matchedRowCount() > 0;
 }
 
 function matchedRowCount() {
-  return opomRows.filter((row) => row.ads_match_status === 'matched').length;
+  return opomRows.filter((row) => effectiveMatchStatus(row) === 'matched').length;
 }
 
 function readyAddressCount() {
@@ -608,7 +610,8 @@ function canonicalCsvFromRows(rows) {
 
 function sanitizeMessage(value) {
   return String(value || '')
-    .replace(/\b\d{3,4}\b/g, (digits) => (digits.length <= 4 ? '***' : digits))
+    .replace(/\b((?:cvv|cvc|security\s*code)\s*[:=]?\s*)\d{3,4}\b/gi, '$1***')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+\b/gi, '$1***')
     .replace(/([A-Z0-9._%+-]{2})[A-Z0-9._%+-]*(@[A-Z0-9.-]+\.[A-Z]{2,})/gi, '$1***$2');
 }
 
@@ -652,9 +655,9 @@ function cardNoLabel(row = {}) {
 
 function purchaseRuleLabel(row) {
   if (row.balance_threshold || row.amount_below_threshold || row.amount_at_or_above_threshold) {
-    const complete = row.balance_threshold && row.amount_below_threshold && row.amount_at_or_above_threshold;
+    const complete = row.balance_threshold && row.amount_below_threshold;
     return complete
-      ? `余额低于 ${row.balance_threshold} 充 ${row.amount_below_threshold}，否则充 ${row.amount_at_or_above_threshold}`
+      ? `余额低于 ${row.balance_threshold} 时补到 ${row.amount_below_threshold}，否则不处理`
       : '余额规则不完整';
   }
   return row.amount ? `固定充值 ${row.amount}` : '缺少充值规则';
@@ -667,10 +670,20 @@ function rowBadgeState(value, okValue = 'ready') {
   return String(value);
 }
 
+function opomHealthOk(row) {
+  const status = String(row.opom_health_status || 'ok').trim().toLowerCase();
+  return !status || status === 'ok' || status === 'local_selector';
+}
+
+function effectiveMatchStatus(row) {
+  if (!opomHealthOk(row)) return row.opom_health_status || 'opom_blocked';
+  return row.ads_match_status || ((row.ads_power_user_id || row.ads_power_serial_number) ? 'not_verified' : 'missing');
+}
+
 function opomHealthBadge(row) {
   const status = String(row.opom_health_status || 'ok').trim() || 'ok';
   const reason = String(row.opom_health_reason || '').trim();
-  const badgeState = status === 'ok' ? 'completed' : status;
+  const badgeState = status === 'ok' ? 'completed' : rowBadgeState(status, 'ok');
   return `${statusBadge(badgeState)}${reason ? ` <span class="muted">${escapeHtml(reason)}</span>` : ''}`;
 }
 
@@ -685,14 +698,14 @@ function renderOpomPreview(stage = '') {
     updateRunStats();
     return;
   }
-  const matched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
+  const matched = matchedRowCount();
+  const adsMatched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
   const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
-  els.opomPreviewMeta.textContent = `${stage || 'snapshot'} rows=${opomRows.length} matched=${matched} cards=${cards}`;
+  els.opomPreviewMeta.textContent = `${stage || 'snapshot'} rows=${opomRows.length} matched=${matched}${adsMatched !== matched ? ` ads=${adsMatched}` : ''} cards=${cards}`;
   els.opomPreviewBody.innerHTML = opomRows.map((row) => {
     const adsPowerId = row.ads_power_user_id || '';
     const adspower = row.ads_power_serial_number || '';
-    const adsPowerIdentifier = adsPowerId || adspower;
-    const matchStatus = row.ads_match_status || (adsPowerIdentifier ? 'not_verified' : 'missing');
+    const matchStatus = effectiveMatchStatus(row);
     const addressReady = isAddressReady(row);
     const cardReady = row.order_no && row.card_no && row.exp_month && row.exp_year && row.cvv;
     return `
@@ -719,7 +732,7 @@ function opomDefaultsPayload() {
     amount: mode === 'fixed' ? els.defaultAmount.value.trim() : '',
     balanceThreshold: mode === 'balance' ? els.defaultBalanceThreshold.value.trim() : '',
     amountBelowThreshold: mode === 'balance' ? els.defaultAmountBelow.value.trim() : '',
-    amountAtOrAboveThreshold: mode === 'balance' ? els.defaultAmountAtOrAbove.value.trim() : '',
+    amountAtOrAboveThreshold: '',
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
     autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
   };
@@ -733,6 +746,8 @@ function syncRechargeRuleMode() {
   const fixed = rechargeRuleMode() === 'fixed';
   if (els.fixedRuleFields) els.fixedRuleFields.hidden = !fixed;
   if (els.balanceRuleFields) els.balanceRuleFields.hidden = fixed;
+  if (els.autoTopupRuleSection) els.autoTopupRuleSection.hidden = fixed;
+  if (els.addressRuleSection) els.addressRuleSection.hidden = !fixed;
 }
 
 async function optionalAddressCsvText() {
@@ -800,11 +815,12 @@ function renderGeneratedAddressList() {
   }
   els.addressGeneratorSummary.textContent = `已生成并应用 ${generatedAddressMappings.length} 个美国地址。`;
   els.generatedAddressList.innerHTML = generatedAddressMappings.map((mapping, index) => {
-    const address = `${mapping.holder_name} · ${mapping.address_line1}, ${mapping.city}, ${mapping.state} ${mapping.postal_code}, ${mapping.country}`;
     return `
       <div class="address-item">
         <strong>${index + 1}</strong>
-        <span>${escapeHtml(address)}</span>
+        <b title="${escapeHtml(mapping.holder_name)}">${escapeHtml(mapping.holder_name)}</b>
+        <span title="${escapeHtml(mapping.address_line1)}">${escapeHtml(mapping.address_line1)}</span>
+        <small>${escapeHtml(mapping.city)}, ${escapeHtml(mapping.state)} ${escapeHtml(mapping.postal_code)}</small>
       </div>
     `;
   }).join('');
@@ -986,7 +1002,7 @@ function applyCurrentDefaultsToRows(rows) {
       next.amount = '';
       fill('balance_threshold', defaults.balanceThreshold);
       fill('amount_below_threshold', defaults.amountBelowThreshold);
-      fill('amount_at_or_above_threshold', defaults.amountAtOrAboveThreshold);
+      next.amount_at_or_above_threshold = '';
     }
     fill('auto_topup_threshold', defaults.autoTopupThreshold);
     fill('auto_topup_amount', defaults.autoTopupAmount);
@@ -1123,11 +1139,13 @@ async function matchAdsPower() {
   selectedCsvText = canonicalCsvFromRows(opomRows);
   renderOpomPreview('adspower_match');
   syncActionButtons();
-  invalidateDryRun(`AdsPower 匹配完成：matched=${data.matched || 0}, failed=${data.failed || 0}。启动执行时会自动预检。`);
+  const executableMatched = matchedRowCount();
+  const adsMatched = data.matched || 0;
+  invalidateDryRun(`匹配完成：可执行 matched=${executableMatched}, AdsPower matched=${adsMatched}, failed=${data.failed || 0}。启动执行时会自动预检。`);
   const opomResolveText = opomResolved
     ? ` OPOM resolved=${opomResolved.matched || 0}/${opomResolved.total || 0}${opomResolved.resolveSource ? ` source=${opomResolved.resolveSource}` : ''}`
     : opomResolveWarning;
-  els.opomSummary.textContent = `AdsPower matched=${data.matched || 0} failed=${data.failed || 0}${opomResolveText}`;
+  els.opomSummary.textContent = `executable matched=${executableMatched} AdsPower matched=${adsMatched} failed=${data.failed || 0}${opomResolveText}`;
 }
 
 async function discoverAdsPowerStatusTargets() {

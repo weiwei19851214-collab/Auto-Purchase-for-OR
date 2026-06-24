@@ -294,6 +294,13 @@ function normalizeInput(args) {
     || purchase.aboveAmount
     || process.env.PURCHASE_AMOUNT_AT_OR_ABOVE_THRESHOLD
     || '';
+  const purchaseTargetBalance = args['target-balance']
+    || purchaseRule.targetBalance
+    || purchaseRule.target
+    || purchaseRule.topUpToBalance
+    || purchase.targetBalance
+    || process.env.PURCHASE_TARGET_BALANCE
+    || '';
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -325,10 +332,12 @@ function normalizeInput(args) {
       confirmed: !!(args['confirm-purchase'] || json.confirmPurchase || purchase.confirmed),
       amount: normalizeMoneyValue(purchaseAmount),
       rule: {
-        enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold),
+        enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold || purchaseTargetBalance),
         threshold: normalizeMoneyValue(purchaseBalanceThreshold),
         belowAmount: normalizeMoneyValue(purchaseAmountBelowThreshold),
         atOrAboveAmount: normalizeMoneyValue(purchaseAmountAtOrAboveThreshold),
+        targetBalance: normalizeMoneyValue(purchaseTargetBalance),
+        skipAtOrAbove: !!(purchaseRule.skipAtOrAbove || purchaseRule.skip_at_or_above || purchaseRule.targetBalance || purchaseTargetBalance),
       },
     },
     removeExistingPaymentMethod: !!(args['remove-existing'] || json.removeExistingPaymentMethod),
@@ -367,7 +376,10 @@ function normalizeInput(args) {
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
   }
-  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount || !input.purchase.rule.atOrAboveAmount)) {
+  if (input.purchase.rule.enabled && input.purchase.rule.targetBalance && !input.purchase.rule.threshold) {
+    throw new Error('purchase.rule.threshold is required when targetBalance is supplied');
+  }
+  if (input.purchase.rule.enabled && !input.purchase.rule.targetBalance && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount || !input.purchase.rule.atOrAboveAmount)) {
     throw new Error('purchase.rule.threshold, belowAmount, and atOrAboveAmount are required when any purchase rule value is supplied');
   }
   if ((input.purchase.confirmed || input.preparePurchaseOnly) && !input.purchase.amount && !input.purchase.rule.enabled) {
@@ -1912,6 +1924,38 @@ async function resolvePurchasePlan(page, purchase) {
   const balanceState = await getCurrentCreditBalance(page);
   if (purchase.rule?.enabled) {
     const threshold = normalizeMoneyForCompare(purchase.rule.threshold);
+    const targetBalance = normalizeMoneyForCompare(purchase.rule.targetBalance);
+    if (Number.isFinite(targetBalance)) {
+      if (!Number.isFinite(threshold)) {
+        throw new Error(`Invalid purchase target rule: ${JSON.stringify(purchase.rule)}`);
+      }
+      const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
+      const rawAmount = Math.round((targetBalance - balanceState.balance) * 100) / 100;
+      const amount = branch === 'below_threshold' && rawAmount > 0
+        ? (Number.isInteger(rawAmount) ? String(rawAmount) : String(rawAmount))
+        : '';
+      return {
+        ...purchase,
+        amount,
+        skippedByRule: !amount,
+        ruleDecision: {
+          mode: 'top_up_to_target',
+          threshold: purchase.rule.threshold,
+          targetBalance: purchase.rule.targetBalance,
+          balance: balanceState.balance,
+          balanceRaw: balanceState.raw,
+          balanceSource: balanceState.source,
+          branch,
+          selectedAmount: amount,
+          skipped: !amount,
+        },
+        beforeBalance: {
+          balance: balanceState.balance,
+          raw: balanceState.raw,
+          source: balanceState.source,
+        },
+      };
+    }
     const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
     const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
     if (!Number.isFinite(threshold) || !belowAmount || !atOrAboveAmount) {
@@ -3606,8 +3650,27 @@ async function run() {
     const purchasePlan = (input.purchase.confirmed || input.preparePurchaseOnly)
       ? await runLoggedStep('resolve-purchase-plan', debugDir, () => resolvePurchasePlan(page, input.preparePurchaseOnly ? {...input.purchase, confirmed: true} : input.purchase), page)
       : input.purchase;
+    const purchaseSkippedByRule = !!purchasePlan.skippedByRule;
+    const skippedPurchaseResult = purchaseSkippedByRule
+      ? {
+        skippedByRule: true,
+        amount: '',
+        ruleDecision: purchasePlan.ruleDecision || null,
+        beforeBalance: purchasePlan.beforeBalance || null,
+        balanceVerification: {
+          verified: true,
+          skipped: true,
+          beforeBalance: purchasePlan.beforeBalance?.balance ?? null,
+          afterBalance: purchasePlan.beforeBalance?.balance ?? null,
+        },
+      }
+      : null;
     purchasePlan.confirmed = input.purchase.confirmed;
     purchasePlanForRecovery = purchasePlan;
+    if (purchaseSkippedByRule) {
+      input.purchase.confirmed = false;
+      input.preparePurchaseOnly = false;
+    }
     if (input.autoTopupOnly) {
       const paymentMethod = await runLoggedStep('verify-saved-payment-method-auto-topup', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
       const autoTopupResult = await runLoggedStep('configure-auto-topup', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
@@ -3628,7 +3691,7 @@ async function run() {
       await sleep(PAGE_SETTLE_MS);
       const purchaseResult = input.purchase.confirmed
         ? await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
+        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
@@ -3669,7 +3732,7 @@ async function run() {
     if (paymentPath.alreadyBound) {
       const purchaseResult = input.purchase.confirmed
         ? await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
+        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
@@ -3744,7 +3807,7 @@ async function run() {
       : {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
     const purchaseResult = input.purchase.confirmed
       ? await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-      : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page) : null);
+      : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
     if (input.preparePurchaseOnly) purchaseResult.submitted = false;
     if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
     if (input.openPurchaseForVerification && !input.purchase.confirmed) await closePurchaseModal(page);

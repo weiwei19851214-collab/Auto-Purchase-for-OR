@@ -202,12 +202,12 @@
               <div id="opomSummary" class="summary muted" role="status" aria-live="polite">未从 OPOM 拉取。</div>
             </section>
 
-            <section class="panel step-panel">
+            <section class="panel step-panel rule-panel">
               <div class="step-head">
                 <span class="step-index">2</span>
                 <div>
                   <h2>规则与地址</h2>
-                  <p class="muted">先选择本次充值方式，再填写自动充值规则和账单地址。</p>
+                  <p class="muted">选择本次充值方式，填写后续自动充值规则和地址。</p>
                 </div>
               </div>
 
@@ -215,12 +215,10 @@
                 <label>
                   <input id="rechargeRuleFixed" name="rechargeRuleMode" type="radio" value="fixed" />
                   <strong>固定充值</strong>
-                  <span>每个账号本次都充值同一个金额。</span>
                 </label>
                 <label>
                   <input id="rechargeRuleBalance" name="rechargeRuleMode" type="radio" value="balance" checked />
                   <strong>按余额判断</strong>
-                  <span>先读取当前余额，再按高低自动选择本次充值金额。</span>
                 </label>
               </div>
 
@@ -233,28 +231,25 @@
 
               <div id="balanceRuleFields" class="rule-fields">
                 <div class="rule-explain">
-                  例如：余额低于 40 时充值 150；余额大于等于 40 时充值 5。
+                  例如：余额低于 145 时补到 150；余额 -200 充值 350，余额 140 充值 10，余额大于等于 145 不处理。
                 </div>
-                <div class="form-grid three">
+                <div class="form-grid two">
                   <label class="field">
-                    <span>余额判断线</span>
-                    <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="40" />
+                    <span>余额低于多少时充值</span>
+                    <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="145" />
                   </label>
                   <label class="field">
-                    <span>余额低于判断线时充值</span>
+                    <span>充值后目标余额</span>
                     <input id="defaultAmountBelow" type="number" min="0" step="0.01" value="150" />
                   </label>
-                  <label class="field">
-                    <span>余额达到判断线时充值</span>
-                    <input id="defaultAmountAtOrAbove" type="number" min="0" step="0.01" value="5" />
-                  </label>
+                  <input id="defaultAmountAtOrAbove" type="hidden" value="" />
                 </div>
               </div>
 
-              <div class="rule-subsection">
+              <div id="autoTopupRuleSection" class="rule-subsection">
                 <div>
                   <h3>自动充值规则</h3>
-                  <p class="muted">这是 OpenRouter 以后余额不足时自动充值的规则，不等于本次手动充值金额。</p>
+                  <p class="muted">OpenRouter 后续余额不足时自动充值。</p>
                 </div>
                 <div class="form-grid two">
                   <label class="field">
@@ -263,15 +258,15 @@
                   </label>
                   <label class="field">
                     <span>自动充值金额</span>
-                    <input id="defaultAutoTopupAmount" type="number" min="0" step="0.01" value="100" />
+                    <input id="defaultAutoTopupAmount" type="number" min="0" step="0.01" value="150" />
                   </label>
                 </div>
               </div>
 
-              <div class="rule-subsection address-tool">
+              <div id="addressRuleSection" class="rule-subsection address-tool" hidden>
                 <div>
                   <h3>账单地址</h3>
-                  <p class="muted">上传账号清单后，可以按清单行数自动生成美国地址；也可以上传自己的地址 CSV 覆盖。</p>
+                  <p class="muted">按清单行数生成美国地址，或上传地址 CSV 覆盖。</p>
                 </div>
                 <div class="form-grid two">
                   <label class="field">

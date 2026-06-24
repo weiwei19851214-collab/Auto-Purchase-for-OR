@@ -37,8 +37,8 @@ const PURCHASE_ONLY_CSV = `status,ID,username,amount
 ,1415,user@example.com,10
 `;
 
-const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_below_threshold,amount_at_or_above_threshold
-,1415,user@example.com,200,200,10
+const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_below_threshold
+,1415,user@example.com,145,150
 `;
 
 const CARD_ONLY_CSV = `status,ID,username,card_number,exp_month,exp_year,cvv,postal_code
@@ -111,7 +111,7 @@ test('parsePlan validates execution scopes independently', async () => {
     scopeAutoTopup: false,
   });
   assert.equal(balanceRulePurchase.rows[0].status, 'ready');
-  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_rule');
+  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_top_up_to_target');
   assert.equal(balanceRulePurchase.rows[0].executionScope, 'purchase');
 
   const card = await parsePlan(CARD_ONLY_CSV, {

@@ -124,7 +124,25 @@ export function purchasePlan(row) {
   const belowRaw = row.amount_below_threshold || '';
   const atOrAboveRaw = row.amount_at_or_above_threshold || '';
   const anyRule = !!(thresholdRaw || belowRaw || atOrAboveRaw);
+  const topUpToTargetRule = !!(thresholdRaw && belowRaw && !atOrAboveRaw);
   const allRule = !!(thresholdRaw && belowRaw && atOrAboveRaw);
+  if (topUpToTargetRule) {
+    const threshold = normalizeMoneyValue(thresholdRaw);
+    const targetBalance = normalizeMoneyValue(belowRaw);
+    return {
+      purchase: {
+        confirmed: true,
+        rule: {
+          threshold,
+          targetBalance,
+          belowAmount: targetBalance,
+          skipAtOrAbove: true,
+        },
+      },
+      missing: [],
+      mode: 'balance_top_up_to_target',
+    };
+  }
   if (allRule) {
     return {
       purchase: {
@@ -142,7 +160,7 @@ export function purchasePlan(row) {
   if (anyRule) {
     return {
       purchase: {confirmed: true},
-      missing: ['balance_threshold', 'amount_below_threshold', 'amount_at_or_above_threshold'].filter((key) => !row[key]),
+      missing: ['balance_threshold', 'amount_below_threshold'].filter((key) => !row[key]),
       mode: 'incomplete_balance_rule',
     };
   }
@@ -351,6 +369,9 @@ export function completionEvidence(status, details = {}) {
   if (purchaseStatus === 'skipped') {
     return {status: 'scope_complete_without_purchase', missing: ['purchase_not_in_scope']};
   }
+  if (purchaseStatus === 'skipped_by_balance_rule') {
+    return {status: 'purchase_skipped_by_balance_rule', missing: []};
+  }
 
   const missing = [];
   if (purchaseStatus !== 'verified') missing.push('purchase_status');
@@ -394,7 +415,9 @@ export function successDetails(row, result, args) {
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
     ...rowMetadata(row),
-    purchaseStatus: scope.purchase ? (verification.verified ? 'verified' : 'purchase_unverified') : 'skipped',
+    purchaseStatus: scope.purchase
+      ? (purchase.skippedByRule ? 'skipped_by_balance_rule' : (verification.verified ? 'verified' : 'purchase_unverified'))
+      : 'skipped',
     purchaseAmount: purchase.amount || purchase.ruleDecision?.selectedAmount || '',
     balanceBefore: verification.beforeBalance ?? purchase.beforeBalance?.balance ?? '',
     balanceAfter: verification.afterBalance ?? '',

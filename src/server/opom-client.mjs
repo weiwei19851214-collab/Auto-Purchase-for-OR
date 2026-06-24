@@ -132,6 +132,31 @@ export async function fetchRechargeAccounts(args, input = {}) {
   };
 }
 
+export async function resolveRechargeAccounts(args, input = {}) {
+  const rows = Array.isArray(input.rows) ? input.rows : [];
+  const body = await requestJson(args, '/api/v1/recharge/accounts/resolve', {
+    method: 'POST',
+    idempotent: true,
+    body: JSON.stringify({
+      rows: rows.map((row, index) => ({
+        index: Number.isInteger(row.index) ? row.index : index,
+        ...(row.opomAccountId || row.opom_account_id ? {opomAccountId: row.opomAccountId || row.opom_account_id} : {}),
+        ...(row.loginEmail || row.login_email ? {loginEmail: row.loginEmail || row.login_email} : {}),
+        ...(row.adsPowerUserId || row.ads_power_user_id ? {adsPowerUserId: row.adsPowerUserId || row.ads_power_user_id} : {}),
+        ...(row.adsPowerSerialNumber || row.ads_power_serial_number ? {adsPowerSerialNumber: row.adsPowerSerialNumber || row.ads_power_serial_number} : {}),
+      })),
+      ...(input.group ? {group: input.group} : {}),
+      ...(input.status ? {status: input.status} : {}),
+    }),
+  });
+  return {
+    results: Array.isArray(body.results) ? body.results : Array.isArray(body.data) ? body.data : [],
+    total: Number(body.total || rows.length),
+    matched: Number(body.matched || 0),
+    failed: Number(body.failed || 0),
+  };
+}
+
 export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
   return accounts.map((account) => {
     const policy = account.rechargePolicy || {};

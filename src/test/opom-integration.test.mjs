@@ -242,28 +242,39 @@ test('parsePlan blocks selector rows until AdsPower match is confirmed', async (
   assert.ok(blocked.rows[0].missing.includes('ads_match_status:not_verified'));
 });
 
-test('resolveOpomAccountsPayload matches local selector rows to OPOM account ids without overriding UI rules', async () => {
-  const seenUrls = [];
-  await withFetch(async (url) => {
-    seenUrls.push(String(url));
-    assert.match(String(url), /group=recharge/);
-    assert.match(String(url), /status=needs_recharge/);
+test('resolveOpomAccountsPayload uses OPOM batch resolve without overriding UI rules', async () => {
+  const calls = [];
+  await withFetch(async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({url: String(url), body});
+    assert.match(String(url), /\/api\/v1\/recharge\/accounts\/resolve$/);
+    assert.equal(body.group, 'recharge');
+    assert.equal(body.status, 'needs_recharge');
+    assert.equal(body.rows.length, 1);
+    assert.equal(body.rows[0].loginEmail, 'selector@example.com');
     return Response.json({
-      data: [{
-        opomAccountId: 'acct_resolved',
-        loginEmail: 'selector@example.com',
-        health: {status: 'ok', eligible: true, reason: ''},
-        adsPower: {userId: 'profile_from_opom', serialNumber: '1415'},
-        rechargePolicy: {
-          balanceThreshold: '999',
-          amountBelowThreshold: '888',
-          amountAtOrAboveThreshold: '777',
-          autoTopupThreshold: '666',
-          autoTopupAmount: '555',
+      results: [{
+        index: 0,
+        status: 'matched',
+        matchSource: 'loginEmail',
+        account: {
+          opomAccountId: 'acct_resolved',
+          loginEmail: 'selector@example.com',
+          health: {status: 'ok', eligible: true, reason: ''},
+          adsPower: {userId: 'profile_from_opom', serialNumber: '1415'},
+          rechargePolicy: {
+            balanceThreshold: '999',
+            amountBelowThreshold: '888',
+            amountAtOrAboveThreshold: '777',
+            autoTopupThreshold: '666',
+            autoTopupAmount: '555',
+          },
+          version: 'v-resolved',
         },
-        version: 'v-resolved',
       }],
-      nextCursor: null,
+      total: 1,
+      matched: 1,
+      failed: 0,
     });
   }, async () => {
     const result = await resolveOpomAccountsPayload({
@@ -295,9 +306,49 @@ test('resolveOpomAccountsPayload matches local selector rows to OPOM account ids
     assert.equal(result.rows[0].amount_below_threshold, '10');
     assert.equal(result.rows[0].auto_topup_amount, '100');
     assert.equal(result.rows[0].holder_name, 'UI Address');
+    assert.equal(result.resolveSource, 'batch_resolve');
     assert.match(result.csvText, /acct_resolved,selector@example.com,profile_from_opom,1415/);
   });
-  assert.equal(seenUrls.length, 1);
+  assert.equal(calls.length, 1);
+});
+
+test('resolveOpomAccountsPayload marks OPOM batch resolve misses per row', async () => {
+  await withFetch(async () => Response.json({
+    results: [
+      {
+        index: 0,
+        status: 'matched',
+        account: {
+          opomAccountId: 'acct_resolved',
+          loginEmail: 'selector@example.com',
+          health: {status: 'ok', eligible: true, reason: ''},
+          adsPower: {userId: 'profile_from_opom', serialNumber: '1415'},
+        },
+      },
+      {
+        index: 1,
+        status: 'not_found',
+        reason: 'no OPOM account matched selected login email or AdsPower id',
+      },
+    ],
+    total: 2,
+    matched: 1,
+    failed: 1,
+  }), async () => {
+    const result = await resolveOpomAccountsPayload({
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      rows: [
+        {login_email: 'selector@example.com'},
+        {login_email: 'missing@example.com'},
+      ],
+    });
+    assert.equal(result.matched, 1);
+    assert.equal(result.failed, 1);
+    assert.equal(result.rows[0].opom_account_id, 'acct_resolved');
+    assert.equal(result.rows[1].opom_health_status, 'opom_not_found');
+    assert.match(result.rows[1].opom_health_reason, /no OPOM account matched/);
+  });
 });
 
 test('resolveOpomAccountsPayload reports OPOM network failures clearly', async () => {
@@ -327,15 +378,21 @@ test('resolveOpomAccountsPayload retries transient OPOM network failures', async
       throw error;
     }
     return Response.json({
-      data: [{
-        opomAccountId: 'acct_retry',
-        loginEmail: 'selector@example.com',
-        health: {status: 'ok', eligible: true, reason: ''},
-        adsPower: {userId: 'profile_retry', serialNumber: '1415'},
-        rechargePolicy: {},
-        version: 'v-retry',
+      results: [{
+        index: 0,
+        status: 'matched',
+        account: {
+          opomAccountId: 'acct_retry',
+          loginEmail: 'selector@example.com',
+          health: {status: 'ok', eligible: true, reason: ''},
+          adsPower: {userId: 'profile_retry', serialNumber: '1415'},
+          rechargePolicy: {},
+          version: 'v-retry',
+        },
       }],
-      nextCursor: null,
+      total: 1,
+      matched: 1,
+      failed: 0,
     });
   }, async () => {
     const result = await resolveOpomAccountsPayload({
@@ -349,10 +406,13 @@ test('resolveOpomAccountsPayload retries transient OPOM network failures', async
   });
 });
 
-test('resolveOpomAccountsPayload falls back to all status when selected queue has no match', async () => {
+test('resolveOpomAccountsPayload falls back to legacy all status when batch resolve is unavailable', async () => {
   const seenUrls = [];
   await withFetch(async (url) => {
     seenUrls.push(String(url));
+    if (String(url).endsWith('/api/v1/recharge/accounts/resolve')) {
+      return Response.json({error: 'Not found'}, {status: 404});
+    }
     if (String(url).includes('status=needs_recharge')) {
       return Response.json({data: [], nextCursor: null});
     }
@@ -379,15 +439,18 @@ test('resolveOpomAccountsPayload falls back to all status when selected queue ha
     });
     assert.equal(result.matched, 1);
     assert.equal(result.rows[0].opom_account_id, 'acct_all');
-    assert.equal(result.resolveSource, 'recharge/all');
+    assert.equal(result.resolveSource, 'legacy:recharge/all');
   });
-  assert.equal(seenUrls.length, 2);
+  assert.equal(seenUrls.length, 3);
 });
 
-test('resolveOpomAccountsPayload falls back to all group for non-recharge local selector rows', async () => {
+test('resolveOpomAccountsPayload falls back to legacy all group for non-recharge local selector rows', async () => {
   const seenUrls = [];
   await withFetch(async (url) => {
     seenUrls.push(String(url));
+    if (String(url).endsWith('/api/v1/recharge/accounts/resolve')) {
+      return Response.json({error: 'Not found'}, {status: 404});
+    }
     if (!String(url).includes('group=all')) {
       return Response.json({data: [], nextCursor: null});
     }
@@ -415,9 +478,9 @@ test('resolveOpomAccountsPayload falls back to all group for non-recharge local 
     });
     assert.equal(result.matched, 1);
     assert.equal(result.rows[0].opom_account_id, 'acct_vip');
-    assert.equal(result.resolveSource, 'all/all');
+    assert.equal(result.resolveSource, 'legacy:all/all');
   });
-  assert.equal(seenUrls.length, 3);
+  assert.equal(seenUrls.length, 4);
 });
 
 test('writeResultCsv carries OPOM health metadata for blocked handoff rows', async () => {

@@ -467,7 +467,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       : testModeSuccessDetails(row, outcome.result, args, plan, commonAdapter);
     details.automationLogDir = automationLogDir;
     const purchaseOk = !args.scopePurchase
-      || (args.confirmPurchase ? details.purchaseStatus === 'verified' : details.purchaseStatus === 'prepared_without_submission');
+      || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
     let completed = purchaseOk && autoTopupOk;
     if (completed && args.opomWriteback && args.confirmPurchase) {

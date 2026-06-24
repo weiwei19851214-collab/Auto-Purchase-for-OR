@@ -178,6 +178,45 @@ test('browser path falls back when OpenRouter server action id changes', () => {
   assert.match(script, /removeSavedPaymentMethodsFromPicker/);
 });
 
+test('browser path skips default payment clearing when Stripe data endpoint is not found', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /before\.status === 404/);
+  assert.match(script, /stripe_data_not_found/);
+  assert.match(script, /shouldTryPickerRemoval/);
+  assert.ok(script.includes('stripe_(?:customer|data)_not_found'));
+  assert.match(script, /stripeTargets=/);
+});
+
+test('browser path can click icon-only add payment method button in Purchase Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /icon:add-payment-method/);
+  assert.match(script, /hasIconAddPaymentMethod/);
+  assert.match(script, /isPlusIconButton/);
+  assert.ok(script.includes('M12\\\\s*4\\\\.5v15m7\\\\.5-7\\\\.5h-15'));
+  assert.match(script, /Purchase Credits/);
+  assert.match(script, /Total due/);
+});
+
+test('browser path no longer disables Auto top-up before opening Add Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.doesNotMatch(script, /disableExistingAutoTopupBeforeAddCredits/);
+  assert.doesNotMatch(script, /disable-existing-auto-topup-before-add-credits/);
+  assert.match(script, /auto_topup_pre_disable_removed/);
+});
+
+test('balance target purchase amount rounds up to the next whole dollar', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);
+});
+
+test('browser diagnostics include non-fatal network failures', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /installNetworkDiagnostics/);
+  assert.match(script, /Network\.responseReceived/);
+  assert.match(script, /recentNetworkFailures/);
+  assert.match(script, /safeDiagnosticUrl/);
+});
+
 test('dryRunPayload reports row-level missing fields', async () => {
   const result = await dryRunPayload({fileName: 'missing.csv', csvText: MISSING_CSV});
   assert.equal(result.ok, true);

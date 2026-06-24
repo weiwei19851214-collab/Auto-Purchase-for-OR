@@ -86,9 +86,69 @@ function writeStepDiagnostic(dir, label, status, data = {}) {
   });
 }
 
+function safeDiagnosticUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return String(value || '').split('?')[0].split('#')[0].slice(0, 220);
+  }
+}
+
+async function installNetworkDiagnostics(client) {
+  if (!client || client.__networkDiagnosticsInstalled) return {installed: false, reason: 'already_installed'};
+  client.__networkDiagnosticsInstalled = true;
+  const requests = new Map();
+  const failures = [];
+  const rememberFailure = (entry) => {
+    failures.push({
+      at: new Date().toISOString(),
+      ...entry,
+      url: safeDiagnosticUrl(entry.url),
+    });
+    while (failures.length > 30) failures.shift();
+  };
+  client.getRecentNetworkFailures = () => failures.slice(-10);
+  client.on?.('Network.requestWillBeSent', ({requestId, request}) => {
+    requests.set(requestId, {
+      method: request?.method || '',
+      url: request?.url || '',
+    });
+    if (requests.size > 250) requests.delete(requests.keys().next().value);
+  });
+  client.on?.('Network.responseReceived', ({requestId, response, type}) => {
+    const status = Number(response?.status);
+    if (!Number.isFinite(status) || status < 400) return;
+    const request = requests.get(requestId) || {};
+    rememberFailure({
+      kind: 'http_response',
+      status,
+      statusText: response?.statusText || '',
+      method: request.method || '',
+      type: type || '',
+      url: response?.url || request.url || '',
+    });
+  });
+  client.on?.('Network.loadingFailed', ({requestId, errorText, type, canceled}) => {
+    if (canceled) return;
+    const request = requests.get(requestId) || {};
+    rememberFailure({
+      kind: 'loading_failed',
+      errorText: errorText || '',
+      method: request.method || '',
+      type: type || '',
+      url: request.url || '',
+    });
+  });
+  await client.send('Network.enable', {}, 5000).catch((error) => {
+    rememberFailure({kind: 'network_enable_failed', errorText: error.message, url: ''});
+  });
+  return {installed: true};
+}
+
 async function pageStepState(page) {
   if (!page) return null;
-  return evaluate(page, `(() => {
+  const state = await evaluate(page, `(() => {
     const text = document.body?.innerText || '';
     return {
       href: location.href,
@@ -101,6 +161,10 @@ async function pageStepState(page) {
       tail: text.slice(-1800),
     };
   })()`).catch((error) => ({error: error.message}));
+  return {
+    ...state,
+    recentNetworkFailures: page.getRecentNetworkFailures?.() || [],
+  };
 }
 
 async function dismissOpenRouterServerErrorToast(page) {
@@ -736,11 +800,17 @@ function cdp(wsUrl, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const pending = new Map();
+    const listeners = new Map();
     const timer = setTimeout(() => reject(new Error(`CDP connect timeout: ${wsUrl}`)), timeoutMs);
 
     ws.onopen = () => {
       clearTimeout(timer);
       resolve({
+        on(method, handler) {
+          if (!listeners.has(method)) listeners.set(method, new Set());
+          listeners.get(method).add(handler);
+          return () => listeners.get(method)?.delete(handler);
+        },
         send(method, params = {}, commandTimeoutMs = timeoutMs) {
           const msg = {id: ++globalMessageId, method, params};
           ws.send(JSON.stringify(msg));
@@ -760,7 +830,15 @@ function cdp(wsUrl, timeoutMs = 15000) {
     ws.onerror = (event) => reject(new Error(`CDP websocket error: ${event.message || wsUrl}`));
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      if (!message.id || !pending.has(message.id)) return;
+      if (!message.id || !pending.has(message.id)) {
+        const eventListeners = listeners.get(message.method);
+        if (eventListeners) {
+          for (const handler of eventListeners) {
+            try { handler(message.params || {}); } catch {}
+          }
+        }
+        return;
+      }
       const pendingCommand = pending.get(message.id);
       pending.delete(message.id);
       clearTimeout(pendingCommand.commandTimer);
@@ -918,11 +996,13 @@ async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
 async function clearDefaultPaymentMethod(page) {
   const before = await fetchStripeData(page);
   if (!before.ok) {
-    if (before.status === 404 && /Customer not found/i.test(before.text || '')) {
+    if (before.status === 404) {
       return {
         clearedDefault: false,
         skipped: true,
-        reason: 'stripe_customer_not_found',
+        reason: /Customer not found/i.test(before.text || '')
+          ? 'stripe_customer_not_found'
+          : 'stripe_data_not_found',
         existingPaymentMethodCount: 0,
         existingPaymentMethods: [],
       };
@@ -1011,8 +1091,14 @@ async function ensureOpenRouterPage(input) {
 }
 
 async function waitForPaymentTarget(debugPort) {
+  let lastStripeTargets = [];
   for (let i = 0; i < 20; i += 1) {
-    const target = getTargets(debugPort).find((item) => (
+    const targets = getTargets(debugPort);
+    lastStripeTargets = targets
+      .filter((item) => item.type === 'iframe' && /stripe\.com/.test(item.url || ''))
+      .map((item) => item.url.split('#')[0])
+      .slice(0, 8);
+    const target = targets.find((item) => (
       item.type === 'iframe'
       && /elements-inner/.test(item.url)
       && /componentName=payment/.test(item.url)
@@ -1020,7 +1106,7 @@ async function waitForPaymentTarget(debugPort) {
     if (target) return target.webSocketDebuggerUrl;
     await sleep(500);
   }
-  throw new Error('Stripe payment iframe target not found');
+  throw new Error(`Stripe payment iframe target not found; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}`);
 }
 
 async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
@@ -1161,9 +1247,15 @@ async function clickAddPaymentMethod(page, options = {}) {
     };
     const isDisabled = (node) => !!node.disabled || node.getAttribute('aria-disabled') === 'true';
     const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+    const isPlusIconButton = (node) => {
+      const pathD = [...node.querySelectorAll?.('svg path') || []].map((path) => path.getAttribute('d') || '').join(' ');
+      const className = String(node.getAttribute('class') || '');
+      return /M12\\s*4\\.5v15m7\\.5-7\\.5h-15/i.test(pathD)
+        || (/\\bw-10\\b/.test(className) && /\\bh-full\\b/.test(className) && !!node.querySelector?.('svg'));
+    };
     const candidates = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => isVisible(node) && !isDisabled(node))
-      .map((node) => ({node, text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '')}));
+      .map((node) => ({node, text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || ''), plusIcon: isPlusIconButton(node)}));
     let item = candidates.find((candidate) => /^Add a Payment Method$|^Add Payment Method$/i.test(candidate.text));
     if (!item) {
       item = candidates.find((candidate) => /\\bAdd a Payment Method\\b|\\bAdd Payment Method\\b/i.test(candidate.text));
@@ -1175,6 +1267,29 @@ async function clickAddPaymentMethod(page, options = {}) {
         .find((candidate) => /\\bAdd a Payment Method\\b|\\bAdd Payment Method\\b/i.test(candidate.text));
       const owner = textOwner?.node.closest('button,a,[role="button"]');
       if (owner && isVisible(owner) && !isDisabled(owner)) item = {node: owner, text: normalize(owner.innerText || owner.textContent || '')};
+    }
+    if (!item && /Purchase Credits/i.test(document.body.innerText || '')) {
+      const modal = [...document.querySelectorAll('body *')]
+        .filter((node) => isVisible(node))
+        .map((node) => ({node, text: normalize(node.innerText || node.textContent || ''), rect: node.getBoundingClientRect()}))
+        .filter((candidate) => /Purchase Credits/i.test(candidate.text) && /Total due/i.test(candidate.text))
+        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0];
+      const modalRect = modal?.rect;
+      const iconItem = candidates
+        .map((candidate) => ({...candidate, rect: candidate.node.getBoundingClientRect(), hasSvg: !!candidate.node.querySelector?.('svg')}))
+        .filter((candidate) => {
+          if (!modalRect) return false;
+          const rect = candidate.rect;
+          const inTopCardArea = rect.x > modalRect.x + modalRect.width * 0.62
+            && rect.x < modalRect.x + modalRect.width - 35
+            && rect.y > modalRect.y + 55
+            && rect.y < modalRect.y + modalRect.height * 0.35;
+          const plusLike = candidate.plusIcon || candidate.text === '+' || candidate.text === '' || candidate.hasSvg;
+          const notClose = rect.y > modalRect.y + 45 && !/close|purchase/i.test(candidate.text);
+          return inTopCardArea && plusLike && notClose && rect.width >= 35 && rect.width <= 140 && rect.height >= 45 && rect.height <= 180;
+        })
+        .sort((a, b) => b.rect.x - a.rect.x || a.rect.y - b.rect.y)[0];
+      if (iconItem) item = {node: iconItem.node, text: iconItem.text || 'icon:add-payment-method'};
     }
     if (!item) return {clicked:false, tail:(document.body.innerText || '').slice(-1800)};
     item.node.scrollIntoView({block:'center', inline:'center'});
@@ -1930,7 +2045,7 @@ async function resolvePurchasePlan(page, purchase) {
         throw new Error(`Invalid purchase target rule: ${JSON.stringify(purchase.rule)}`);
       }
       const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
-      const rawAmount = Math.round((targetBalance - balanceState.balance) * 100) / 100;
+      const rawAmount = Math.ceil(targetBalance - balanceState.balance);
       const amount = branch === 'below_threshold' && rawAmount > 0
         ? (Number.isInteger(rawAmount) ? String(rawAmount) : String(rawAmount))
         : '';
@@ -2513,11 +2628,10 @@ async function executeConfirmedPurchase(page, purchase, debugPort = '', debugDir
     if (result.declined) {
       const message = result.state?.paymentIssueText || 'Payment Issue';
       if (attempt === 0 && /automatic top[- ]up might be pending/i.test(message)) {
-        await closePurchaseModal(page).catch(() => {});
-        autoTopupPendingRecovery = await disableExistingAutoTopupBeforeAddCredits(page, debugPort).catch((error) => ({
-          disabled: false,
-          error: error.message,
-        }));
+        autoTopupPendingRecovery = {
+          skipped: true,
+          reason: 'auto_topup_disable_recovery_removed',
+        };
         writeDiagnostic(debugDir, 'purchase-auto-topup-pending-recovery', {
           kind: 'purchase_auto_topup_pending_recovery',
           message,
@@ -2733,15 +2847,46 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
+      const interactive = [...document.querySelectorAll('button,a,[role="button"]')]
         .map((node) => ({
+          node,
           text: (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' '),
           visible: visible(node),
           disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
+          rect: (() => {
+            const rect = node.getBoundingClientRect();
+            return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+          })(),
+          hasSvg: !!node.querySelector?.('svg'),
+          plusIcon: (() => {
+            const pathD = [...node.querySelectorAll?.('svg path') || []].map((path) => path.getAttribute('d') || '').join(' ');
+            const className = String(node.getAttribute('class') || '');
+            return /M12\\s*4\\.5v15m7\\.5-7\\.5h-15/i.test(pathD)
+              || (/\\bw-10\\b/.test(className) && /\\bh-full\\b/.test(className) && !!node.querySelector?.('svg'));
+          })(),
         }))
+        .filter((item) => item.visible);
+      const buttons = interactive
         .filter((item) => item.visible && item.text);
       const clickable = buttons.filter((item) => !item.disabled).map((item) => item.text);
       const hasClickable = (rx) => clickable.some((label) => rx.test(label));
+      const modal = [...document.querySelectorAll('body *')]
+        .filter((node) => visible(node))
+        .map((node) => ({text: (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' '), rect: node.getBoundingClientRect()}))
+        .filter((item) => /Purchase Credits/i.test(item.text) && /Total due/i.test(item.text))
+        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0];
+      const modalRect = modal?.rect;
+      const hasIconAddPaymentMethod = !!modalRect && interactive
+        .filter((item) => !item.disabled)
+        .some((item) => {
+          const rect = item.rect;
+          const inTopCardArea = rect.x > modalRect.x + modalRect.width * 0.62
+            && rect.x < modalRect.x + modalRect.width - 35
+            && rect.y > modalRect.y + 55
+            && rect.y < modalRect.y + modalRect.height * 0.35;
+          const plusLike = item.plusIcon || item.text === '+' || item.text === '' || item.hasSvg;
+          return inTopCardArea && plusLike && !/close|purchase/i.test(item.text) && rect.width >= 35 && rect.width <= 140 && rect.height >= 45 && rect.height <= 180;
+        });
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
       return {
         purchase: /Purchase Credits/.test(text),
@@ -2750,7 +2895,8 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
           || (!!expiry && new RegExp(last4 + '[\\\\s\\\\S]*' + expiry.replace('/', '\\\\/') + '|' + expiry.replace('/', '\\\\/') + '[\\\\s\\\\S]*' + last4, 'i').test(text))
         ),
         hasAddPaymentMethod: /Add a Payment Method|Add Payment Method/i.test(text),
-        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i),
+        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i) || hasIconAddPaymentMethod,
+        hasIconAddPaymentMethod,
         hasSave: /Save payment method/.test(text),
         disabledEntryButtons: buttons
           .filter((item) => item.disabled && /Add Credits|Add a Payment Method|Add Payment Method/i.test(item.text))
@@ -3494,48 +3640,6 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, fields, saved, state};
 }
 
-async function waitForAutoTopupDisabled(page, timeoutMs = 12000) {
-  const deadline = Date.now() + timeoutMs;
-  let state = null;
-  while (Date.now() < deadline) {
-    state = await getAutoTopupState(page);
-    if (!state.enabled) return {...state, disabled: true};
-    await sleep(600);
-  }
-  throw new Error(`Auto top-up did not disable before Add Credits: ${JSON.stringify(state)}`);
-}
-
-async function disableExistingAutoTopupBeforeAddCredits(page, debugPort = '') {
-  const navigation = await ensureCreditsPage(page);
-  const dismissedOverlays = await dismissSaveCardOverlays(page, debugPort);
-  const state = await waitForAutoTopupOverview(page).catch((error) => ({
-    enabled: false,
-    hasManage: false,
-    hasEnable: false,
-    error: error.message,
-  }));
-  if (!state.enabled && !state.hasManage) {
-    return {disabled: false, skipped: true, reason: state.error || 'no_existing_auto_topup_rule', navigation, dismissedOverlays, state};
-  }
-  await openAutoTopupEditor(page, state);
-  const switchResult = await toggleAutoTopupTo(page, false);
-  const saved = switchResult.wasEnabled === false
-    ? {clicked: false, skipped: true, reason: 'already_disabled'}
-    : await saveAutoTopup(page);
-  const disabledState = await waitForAutoTopupDisabled(page);
-  await closePurchaseModal(page).catch(() => {});
-  return {
-    disabled: true,
-    changed: switchResult.wasEnabled !== false,
-    navigation,
-    dismissedOverlays,
-    initialState: state,
-    switch: switchResult,
-    saved,
-    state: disabledState,
-  };
-}
-
 async function waitForAccountState(page, options = {}) {
   const timeoutMs = options.timeoutMs || DEFAULT_CREDITS_ENTRY_WAIT_MS;
   const requirePaymentEntry = options.requirePaymentEntry !== false;
@@ -3608,14 +3712,16 @@ async function run() {
 
   const pageWs = await ensureOpenRouterPage(input);
   const page = await cdp(pageWs);
+  const pageNetworkDiagnostics = await installNetworkDiagnostics(page);
   let payment;
   let accountForRecovery = '';
   let purchasePlanForRecovery = null;
-  let preAddCreditsAutoTopup = {skipped: true, reason: 'not_checked'};
+  let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
 
   try {
     await page.send('Runtime.enable');
     await page.send('Page.enable').catch(() => {});
+    writeDiagnostic(debugDir, 'network-diagnostics', {kind: 'network_diagnostics', page: pageNetworkDiagnostics});
 	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
 	    const accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
       requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
@@ -3686,7 +3792,6 @@ async function run() {
     }
     if (input.purchaseOnly) {
       const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
-      preAddCreditsAutoTopup = await runLoggedStep('disable-existing-auto-topup-before-add-credits', debugDir, () => disableExistingAutoTopupBeforeAddCredits(page, input.debugPort), page);
       await runLoggedStep('wait-add-credits-purchase-only', debugDir, () => waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS), page);
       await sleep(PAGE_SETTLE_MS);
       const purchaseResult = input.purchase.confirmed
@@ -3715,7 +3820,11 @@ async function run() {
     const removal = input.removeExistingPaymentMethod
       ? await clearDefaultPaymentMethod(page)
       : {clearedDefault: false, existingPaymentMethodCount: null, existingPaymentMethods: []};
-    if (input.removeExistingPaymentMethod && removal.existingPaymentMethodCount > 0) {
+    const shouldTryPickerRemoval = input.removeExistingPaymentMethod && (
+      removal.existingPaymentMethodCount > 0
+      || /stripe_(?:customer|data)_not_found/.test(removal.reason || '')
+    );
+    if (shouldTryPickerRemoval) {
       removal.savedCardPickerRemoval = await removeSavedPaymentMethodsFromPicker(page);
     } else if (input.removeExistingPaymentMethod) {
       removal.savedCardPickerRemoval = {
@@ -3724,7 +3833,6 @@ async function run() {
         reason: removal.reason || 'no_existing_payment_methods',
       };
     }
-    preAddCreditsAutoTopup = await runLoggedStep('disable-existing-auto-topup-before-add-credits', debugDir, () => disableExistingAutoTopupBeforeAddCredits(page, input.debugPort), page);
     const paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
       requireAddPaymentMethod: input.billingAddressOnly,
       timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
@@ -3787,6 +3895,7 @@ async function run() {
 
     const paymentWs = await waitForPaymentTarget(input.debugPort);
     payment = await cdp(paymentWs);
+    await installNetworkDiagnostics(payment);
     await payment.send('Runtime.enable');
     let stripeState;
     try {

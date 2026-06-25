@@ -14,6 +14,7 @@ import {readyToRechargePayload, resolveOpomAccountsPayload} from './opom-orchest
 import {redact} from './redact.mjs';
 import {runnerArgs} from './automation-adapter.mjs';
 import {JobWorker} from './worker.mjs';
+import {createExceptionCard, exceptionCardsCsv, listExceptionCards, replacementDefaults, replacementQueuePayload} from './replacement.mjs';
 
 const db = openDatabase();
 const recoveredJobIds = recoverInterruptedWork(db);
@@ -104,6 +105,38 @@ async function handle(req, res) {
     requireSession(req);
     const payload = await readJsonBody(req);
     sendJson(res, 200, await allocateCardsPayload(payload));
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/replacement/defaults') {
+    requireSession(req);
+    sendJson(res, 200, {ok: true, defaults: replacementDefaults()});
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/replacement/queue') {
+    requireSession(req);
+    const payload = await readJsonBody(req);
+    sendJson(res, 200, await replacementQueuePayload(payload));
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/replacement/exception-cards') {
+    requireSession(req);
+    sendJson(res, 200, {ok: true, cards: listExceptionCards(db)});
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/replacement/exception-cards') {
+    requireSession(req);
+    const payload = await readJsonBody(req);
+    sendJson(res, 201, createExceptionCard(db, payload));
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/replacement/exception-cards.csv') {
+    requireSession(req);
+    sendText(res, 200, exceptionCardsCsv(db), 'text/csv; charset=utf-8');
     return;
   }
 

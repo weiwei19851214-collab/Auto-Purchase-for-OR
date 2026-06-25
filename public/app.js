@@ -14,6 +14,11 @@ let jobsPage = 1;
 let lastJobs = [];
 let refreshTimer = null;
 let generatedAddressMappings = [];
+let replacementDefaults = {};
+let replacementRows = [];
+let replacementNextCursor = '';
+let replacementPollTimer = null;
+let exceptionCards = [];
 const JOBS_PAGE_SIZE = 10;
 const RUNTIME_CONFIG_KEY = 'autoPurchaseRuntimeConfigV1';
 
@@ -110,6 +115,26 @@ const els = {
   configEjhAppKey: document.querySelector('#configEjhAppKey'),
   configEjhAppSecret: document.querySelector('#configEjhAppSecret'),
   configPython: document.querySelector('#configPython'),
+  configReplacementArtifactDir: document.querySelector('#configReplacementArtifactDir'),
+  configReplacementLogRootDir: document.querySelector('#configReplacementLogRootDir'),
+  configReplacementCardType: document.querySelector('#configReplacementCardType'),
+  configReplacementCardExpiryDays: document.querySelector('#configReplacementCardExpiryDays'),
+  replacementPollIntervalMinutes: document.querySelector('#replacementPollIntervalMinutes'),
+  replacementGroup: document.querySelector('#replacementGroup'),
+  replacementStatus: document.querySelector('#replacementStatus'),
+  replacementLimit: document.querySelector('#replacementLimit'),
+  replacementMonitorEnabled: document.querySelector('#replacementMonitorEnabled'),
+  replacementAutoExecute: document.querySelector('#replacementAutoExecute'),
+  replacementAutoCreateCards: document.querySelector('#replacementAutoCreateCards'),
+  replacementAutoBind: document.querySelector('#replacementAutoBind'),
+  replacementQuery: document.querySelector('#replacementQueryBtn'),
+  replacementLoadMore: document.querySelector('#replacementLoadMoreBtn'),
+  replacementSummary: document.querySelector('#replacementSummary'),
+  replacementPaths: document.querySelector('#replacementPaths'),
+  replacementRowsBody: document.querySelector('#replacementRowsBody'),
+  exceptionCardsSummary: document.querySelector('#exceptionCardsSummary'),
+  exceptionCardsBody: document.querySelector('#exceptionCardsBody'),
+  exceptionCardsExportLink: document.querySelector('#exceptionCardsExportLink'),
 };
 
 const CANONICAL_HEADER = [
@@ -163,6 +188,8 @@ async function initSession() {
   sessionToken = data.token;
   sessionConfig = data.integrations || {};
   syncRuntimeConfigState();
+  await loadReplacementDefaults();
+  await loadExceptionCards().catch(() => null);
 }
 
 function optionsPayload() {
@@ -207,6 +234,10 @@ function runtimeConfigPayload() {
     ejhAppKey: els.configEjhAppKey?.value.trim() || '',
     ejhAppSecret: els.configEjhAppSecret?.value.trim() || '',
     python: els.configPython?.value.trim() || '',
+    replacementArtifactDir: els.configReplacementArtifactDir?.value.trim() || '',
+    replacementLogRootDir: els.configReplacementLogRootDir?.value.trim() || '',
+    replacementCardType: els.configReplacementCardType?.value.trim() || '',
+    replacementCardExpiryDays: els.configReplacementCardExpiryDays?.value.trim() || '',
   };
 }
 
@@ -225,6 +256,13 @@ function runtimeConfigForStorage() {
     adspowerSuccessGroupName: els.adspowerSuccessGroupName?.value.trim() || '',
     adspowerFailureGroupName: els.adspowerFailureGroupName?.value.trim() || '',
     adspowerBlockerGroupName: els.adspowerBlockerGroupName?.value.trim() || '',
+    replacementPollIntervalMinutes: els.replacementPollIntervalMinutes?.value.trim() || '18',
+    replacementGroup: els.replacementGroup?.value.trim() || 'recharge',
+    replacementStatus: els.replacementStatus?.value || 'needs_recharge',
+    replacementLimit: els.replacementLimit?.value.trim() || '50',
+    replacementAutoExecute: !!els.replacementAutoExecute?.checked,
+    replacementAutoCreateCards: !!els.replacementAutoCreateCards?.checked,
+    replacementAutoBind: !!els.replacementAutoBind?.checked,
   };
 }
 
@@ -256,6 +294,10 @@ function loadRuntimeConfig() {
   setInputValue(els.configEjhAppKey, config.ejhAppKey || '');
   setInputValue(els.configEjhAppSecret, config.ejhAppSecret || '');
   setInputValue(els.configPython, config.python || 'python3');
+  setInputValue(els.configReplacementArtifactDir, config.replacementArtifactDir || '');
+  setInputValue(els.configReplacementLogRootDir, config.replacementLogRootDir || '');
+  setInputValue(els.configReplacementCardType, config.replacementCardType || '');
+  setInputValue(els.configReplacementCardExpiryDays, config.replacementCardExpiryDays || '');
   setInputValue(els.adspowerStatusMode, config.adspowerStatusMode || 'disabled');
   setInputValue(els.adspowerSuccessGroupId, config.adspowerSuccessGroupId || '');
   setInputValue(els.adspowerFailureGroupId, config.adspowerFailureGroupId || '');
@@ -263,6 +305,14 @@ function loadRuntimeConfig() {
   setInputValue(els.adspowerSuccessGroupName, config.adspowerSuccessGroupName || '');
   setInputValue(els.adspowerFailureGroupName, config.adspowerFailureGroupName || '');
   setInputValue(els.adspowerBlockerGroupName, config.adspowerBlockerGroupName || '');
+  setInputValue(els.replacementPollIntervalMinutes, config.replacementPollIntervalMinutes || '18');
+  setInputValue(els.replacementGroup, config.replacementGroup || 'recharge');
+  setInputValue(els.replacementStatus, config.replacementStatus || 'needs_recharge');
+  setInputValue(els.replacementLimit, config.replacementLimit || '50');
+  if (els.replacementMonitorEnabled) els.replacementMonitorEnabled.checked = false;
+  if (els.replacementAutoExecute) els.replacementAutoExecute.checked = !!config.replacementAutoExecute;
+  if (els.replacementAutoCreateCards) els.replacementAutoCreateCards.checked = !!config.replacementAutoCreateCards;
+  if (els.replacementAutoBind) els.replacementAutoBind.checked = !!config.replacementAutoBind;
   syncRuntimeConfigState();
   showRuntimeConfigLoaded(hasStoredConfig);
 }
@@ -270,6 +320,7 @@ function loadRuntimeConfig() {
 function saveRuntimeConfig() {
   localStorage.setItem(RUNTIME_CONFIG_KEY, JSON.stringify(runtimeConfigForStorage()));
   syncRuntimeConfigState();
+  renderReplacementPaths();
   syncActionButtons();
   showRuntimeConfigSaved();
   invalidateDryRun('本地配置已保存，启动执行时会重新预检。');
@@ -279,6 +330,7 @@ function saveRuntimeConfig() {
 function clearRuntimeConfig() {
   if (!window.confirm('清空当前浏览器保存的本地配置？')) return;
   localStorage.removeItem(RUNTIME_CONFIG_KEY);
+  stopReplacementMonitor();
   loadRuntimeConfig();
   markRuntimeConfigUnsaved('配置已清空，请按需重新填写并确认保存。');
   invalidateDryRun('本地配置已清空，启动执行时会重新预检。');
@@ -344,9 +396,18 @@ function syncRuntimeConfigState() {
 
 function handleRuntimeConfigChanged() {
   syncRuntimeConfigState();
+  renderReplacementPaths();
   markRuntimeConfigUnsaved();
   syncActionButtons();
   invalidateDryRun('本地配置已变化，请点击“确认保存配置”后再执行。');
+}
+
+function handleReplacementConfigChanged() {
+  renderReplacementPaths();
+  renderReplacementSummary();
+  markRuntimeConfigUnsaved();
+  syncActionButtons();
+  if (els.replacementMonitorEnabled?.checked) startReplacementMonitor();
 }
 
 function selectedScopeLabels() {
@@ -453,7 +514,189 @@ function syncActionButtons() {
     ? (matched > 0 ? '真实开卡需要填写 amount、active date、cardholder' : '请先 Match AdsPower，至少需要 1 行 matched')
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
   setButtonAvailability(els.adspowerDiscoverTargets, hasAdsPowerConfig, '请先在本地配置中填写 AdsPower API 地址和 API key');
+  setButtonAvailability(els.replacementQuery, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 OPOM_RECHARGE_TOKEN');
+  setButtonAvailability(els.replacementLoadMore, hasOpomConfig && Boolean(replacementNextCursor), hasOpomConfig
+    ? '当前没有下一页'
+    : '请先在本地配置中填写 OPOM_BASE_URL 和 OPOM_RECHARGE_TOKEN');
   syncExecutionAvailability();
+}
+
+async function loadReplacementDefaults() {
+  const data = await api('/api/replacement/defaults');
+  replacementDefaults = data.defaults || {};
+  applyReplacementDefaults();
+  renderReplacementPaths();
+  renderReplacementRows();
+  renderExceptionCards();
+  syncActionButtons();
+}
+
+function applyReplacementDefaults() {
+  setInputValue(els.replacementPollIntervalMinutes, els.replacementPollIntervalMinutes?.value || replacementDefaults.pollIntervalMinutes || '18');
+  setInputValue(els.replacementGroup, els.replacementGroup?.value || replacementDefaults.group || 'recharge');
+  setInputValue(els.replacementStatus, els.replacementStatus?.value || replacementDefaults.status || 'needs_recharge');
+  setInputValue(els.replacementLimit, els.replacementLimit?.value || replacementDefaults.limit || '50');
+  setInputValue(els.configReplacementArtifactDir, els.configReplacementArtifactDir?.value || replacementDefaults.artifactDir || '');
+  setInputValue(els.configReplacementLogRootDir, els.configReplacementLogRootDir?.value || replacementDefaults.logRootDir || '');
+  setInputValue(els.configReplacementCardType, els.configReplacementCardType?.value || replacementDefaults.cardType || '');
+  setInputValue(els.configReplacementCardExpiryDays, els.configReplacementCardExpiryDays?.value || replacementDefaults.cardExpiryDays || '3');
+}
+
+function replacementPayload({append = false} = {}) {
+  return {
+    ...runtimeConfigPayload(),
+    group: els.replacementGroup?.value.trim() || replacementDefaults.group || 'recharge',
+    status: els.replacementStatus?.value || replacementDefaults.status || 'needs_recharge',
+    limit: els.replacementLimit?.value.trim() || replacementDefaults.limit || '50',
+    cursor: append ? replacementNextCursor : '',
+  };
+}
+
+async function queryReplacementQueue({append = false, silent = false} = {}) {
+  if (!opomConfigured()) {
+    throw new Error('请先在本地配置中填写 OPOM_BASE_URL 和 OPOM_RECHARGE_TOKEN');
+  }
+  const data = await api('/api/replacement/queue', {
+    method: 'POST',
+    body: JSON.stringify(replacementPayload({append})),
+  });
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  replacementRows = append ? [...replacementRows, ...rows] : rows;
+  replacementNextCursor = data.nextCursor || '';
+  renderReplacementRows();
+  renderReplacementSummary({silent});
+  syncActionButtons();
+  return data;
+}
+
+function renderReplacementSummary({silent = false} = {}) {
+  if (!els.replacementSummary) return;
+  const enabled = !!els.replacementMonitorEnabled?.checked;
+  const autoExecute = !!els.replacementAutoExecute?.checked;
+  const autoCreate = !!els.replacementAutoCreateCards?.checked;
+  const autoBind = !!els.replacementAutoBind?.checked;
+  const eligibleCount = replacementRows.filter((row) => row.eligible).length;
+  const parts = [
+    enabled ? `监控中，每 ${replacementPollMinutes()} 分钟轮询` : '监控未启动',
+    `${replacementRows.length} 条待换卡数据`,
+    `${eligibleCount} 条可执行`,
+    `自动执行${autoExecute ? '已开启' : '关闭'}`,
+    `自动开卡${autoCreate ? '已开启' : '关闭'}`,
+    `自动绑定${autoBind ? '已开启' : '关闭'}`,
+  ];
+  if (!autoExecute && replacementRows.length > 0) {
+    parts.push('当前只读取队列，不自动执行');
+  }
+  els.replacementSummary.textContent = silent && replacementRows.length === 0
+    ? parts.join(' · ')
+    : `${parts.join(' · ')}。`;
+}
+
+function renderReplacementPaths() {
+  if (!els.replacementPaths) return;
+  const config = runtimeConfigPayload();
+  const artifactDir = config.replacementArtifactDir || replacementDefaults.artifactDir || '';
+  const logRootDir = config.replacementLogRootDir || replacementDefaults.logRootDir || '';
+  const expiry = config.replacementCardExpiryDays || replacementDefaults.cardExpiryDays || '3';
+  const cardType = config.replacementCardType || replacementDefaults.cardType || '未指定';
+  els.replacementPaths.textContent = `本地产物目录：${artifactDir || '未设置'} · 任务日志目录：${logRootDir || '未设置'} · 卡类型：${cardType} · 卡有效期：${expiry} 天。`;
+}
+
+function renderReplacementRows() {
+  if (!els.replacementRowsBody) return;
+  if (!replacementRows.length) {
+    els.replacementRowsBody.innerHTML = '<tr><td colspan="7" class="empty">暂无待换卡数据。</td></tr>';
+    return;
+  }
+  els.replacementRowsBody.innerHTML = replacementRows.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.opomAccountId || '-')}</td>
+      <td>${escapeHtml(row.loginEmail || '-')}</td>
+      <td>${escapeHtml([row.adsPowerSerialNumber, row.adsPowerUserId].filter(Boolean).join(' / ') || '-')}</td>
+      <td>${statusBadge(row.healthStatus || (row.eligible ? 'ok' : 'blocked'))}<br><span class="muted">${escapeHtml(row.healthReason || row.message || '')}</span></td>
+      <td>${escapeHtml(row.avgDailySpend3d ?? '-')}<br><span class="muted">max ${escapeHtml(row.maxDailySpend3d ?? '-')}</span></td>
+      <td>${escapeHtml(row.suggestedCardAmount ?? '-')}</td>
+      <td>${statusBadge(row.stage || '-')}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadExceptionCards() {
+  const data = await api('/api/replacement/exception-cards');
+  exceptionCards = Array.isArray(data.cards) ? data.cards : [];
+  renderExceptionCards();
+}
+
+function renderExceptionCards() {
+  if (els.exceptionCardsSummary) {
+    els.exceptionCardsSummary.textContent = `${exceptionCards.length} 张`;
+  }
+  if (!els.exceptionCardsBody) return;
+  if (!exceptionCards.length) {
+    els.exceptionCardsBody.innerHTML = '<tr><td colspan="7" class="empty">暂无异常卡。</td></tr>';
+    return;
+  }
+  els.exceptionCardsBody.innerHTML = exceptionCards.map((card) => `
+    <tr>
+      <td>${escapeHtml(formatDateTime(card.createdAt))}</td>
+      <td>${escapeHtml(card.opomAccountId || card.loginEmail || '-')}</td>
+      <td>${escapeHtml([card.adsPowerSerialNumber, card.adsPowerUserId].filter(Boolean).join(' / ') || '-')}</td>
+      <td>${escapeHtml(card.ejhOrderNo || '-')}</td>
+      <td>${escapeHtml(card.cardLast4 ? `****${card.cardLast4}` : card.cardNo || '-')}</td>
+      <td>${escapeHtml(card.reason || '-')}</td>
+      <td>${escapeHtml(card.csvPath || '-')}</td>
+    </tr>
+  `).join('');
+}
+
+function replacementPollMinutes() {
+  const minutes = Number(els.replacementPollIntervalMinutes?.value || replacementDefaults.pollIntervalMinutes || 18);
+  return Number.isFinite(minutes) && minutes > 0 ? Math.max(1, Math.floor(minutes)) : 18;
+}
+
+function startReplacementMonitor() {
+  stopReplacementMonitor({keepChecked: true});
+  if (!els.replacementMonitorEnabled?.checked) {
+    renderReplacementSummary();
+    return;
+  }
+  queryReplacementQueue({silent: true}).catch((error) => {
+    stopReplacementMonitor();
+    showError(error);
+  });
+  replacementPollTimer = window.setInterval(() => {
+    queryReplacementQueue({silent: true}).catch(showError);
+  }, replacementPollMinutes() * 60 * 1000);
+  renderReplacementSummary();
+}
+
+function stopReplacementMonitor({keepChecked = false} = {}) {
+  if (replacementPollTimer) {
+    window.clearInterval(replacementPollTimer);
+    replacementPollTimer = null;
+  }
+  if (!keepChecked && els.replacementMonitorEnabled) els.replacementMonitorEnabled.checked = false;
+  renderReplacementSummary();
+}
+
+async function downloadExceptionCardsCsv(event) {
+  event.preventDefault();
+  const res = await fetch('/api/replacement/exception-cards.csv', {
+    headers: sessionToken ? {'X-Runner-Session': sessionToken} : {},
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = 'exception-cards.csv';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 function syncExecutionAvailability() {
@@ -507,6 +750,19 @@ function escapeHtml(value) {
 function csvEscape(value) {
   const text = String(value ?? '');
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function formatDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date);
 }
 
 function parseCsv(text) {
@@ -1645,6 +1901,33 @@ for (const input of [
 ]) {
   input?.addEventListener('input', handleRuntimeConfigChanged);
 }
+for (const input of [
+  els.configReplacementArtifactDir,
+  els.configReplacementLogRootDir,
+  els.configReplacementCardType,
+  els.configReplacementCardExpiryDays,
+  els.replacementPollIntervalMinutes,
+  els.replacementGroup,
+  els.replacementStatus,
+  els.replacementLimit,
+]) {
+  input?.addEventListener('input', handleReplacementConfigChanged);
+  input?.addEventListener('change', handleReplacementConfigChanged);
+}
+for (const checkbox of [
+  els.replacementAutoExecute,
+  els.replacementAutoCreateCards,
+  els.replacementAutoBind,
+]) {
+  checkbox?.addEventListener('change', handleReplacementConfigChanged);
+}
+els.replacementMonitorEnabled?.addEventListener('change', () => {
+  if (els.replacementMonitorEnabled.checked) startReplacementMonitor();
+  else stopReplacementMonitor({keepChecked: true});
+});
+els.replacementQuery?.addEventListener('click', () => withButtonBusy(els.replacementQuery, '查询中...', () => queryReplacementQueue()).catch(showError));
+els.replacementLoadMore?.addEventListener('click', () => withButtonBusy(els.replacementLoadMore, '加载中...', () => queryReplacementQueue({append: true})).catch(showError));
+els.exceptionCardsExportLink?.addEventListener('click', (event) => downloadExceptionCardsCsv(event).catch(showError));
 els.opomWriteback.addEventListener('change', () => invalidateDryRun());
 els.addressMappingCsv.addEventListener('change', () => {
   generatedAddressMappings = [];
@@ -1730,6 +2013,7 @@ els.download.addEventListener('click', (event) => downloadSelectedResult(event).
 loadRuntimeConfig();
 syncRechargeRuleMode();
 renderGeneratedAddressList();
+renderReplacementSummary();
 syncActionButtons();
 
 initSession()

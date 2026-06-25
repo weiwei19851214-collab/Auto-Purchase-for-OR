@@ -92,6 +92,24 @@ function migrate(db) {
       path TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS exception_cards (
+      id TEXT PRIMARY KEY,
+      opom_account_id TEXT NOT NULL DEFAULT '',
+      login_email TEXT NOT NULL DEFAULT '',
+      ads_power_user_id TEXT NOT NULL DEFAULT '',
+      ads_power_serial_number TEXT NOT NULL DEFAULT '',
+      ejh_order_no TEXT NOT NULL DEFAULT '',
+      card_no TEXT NOT NULL DEFAULT '',
+      card_last4 TEXT NOT NULL DEFAULT '',
+      exp_month TEXT NOT NULL DEFAULT '',
+      exp_year TEXT NOT NULL DEFAULT '',
+      source_job_id TEXT NOT NULL DEFAULT '',
+      source_row_number TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      csv_path TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
   `);
   const columns = db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name);
   if (!columns.includes('options_json')) {

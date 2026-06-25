@@ -117,6 +117,22 @@
               <span>PYTHON</span>
               <input id="configPython" type="text" placeholder="python3" />
             </label>
+            <label class="field">
+              <span>本地产物目录</span>
+              <input id="configReplacementArtifactDir" type="text" placeholder="~/Desktop/YYYY-MM-DD" />
+            </label>
+            <label class="field">
+              <span>自动换卡日志根目录</span>
+              <input id="configReplacementLogRootDir" type="text" placeholder="~/Desktop/YYYY-MM-DD/logs" />
+            </label>
+            <label class="field">
+              <span>EJH cardType</span>
+              <input id="configReplacementCardType" type="text" placeholder="从 EJH 配置读取" />
+            </label>
+            <label class="field">
+              <span>EJH 新卡有效期天数</span>
+              <input id="configReplacementCardExpiryDays" type="number" min="1" step="1" placeholder="3" />
+            </label>
           </div>
 
           <div class="action-row config-actions">
@@ -149,6 +165,93 @@
           <div class="metric-card">
             <span>预检</span>
             <strong id="statDryRun">未执行</strong>
+          </div>
+        </section>
+
+        <section class="panel replacement-panel" aria-label="自动换卡">
+          <div class="step-head">
+            <span class="step-index">R</span>
+            <div>
+              <h2>自动换卡</h2>
+              <p class="muted">监控 OPOM 待换卡列表；真实开卡和 AdsPower 绑定默认关闭。</p>
+            </div>
+          </div>
+
+          <div class="form-grid four">
+            <label class="field">
+              <span>轮询间隔（分钟）</span>
+              <input id="replacementPollIntervalMinutes" type="number" min="1" step="1" value="18" />
+            </label>
+            <label class="field">
+              <span>OPOM Group</span>
+              <input id="replacementGroup" type="text" value="recharge" />
+            </label>
+            <label class="field">
+              <span>OPOM 状态</span>
+              <select id="replacementStatus">
+                <option value="needs_recharge">needs_recharge</option>
+                <option value="failed_retryable">failed_retryable</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>读取数量</span>
+              <input id="replacementLimit" type="number" min="1" max="200" value="50" />
+            </label>
+          </div>
+
+          <div class="check-group replacement-switches">
+            <label><input id="replacementMonitorEnabled" type="checkbox" /> 启动换卡监控</label>
+            <label><input id="replacementAutoExecute" type="checkbox" /> 找到待换卡数据后自动执行</label>
+            <label><input id="replacementAutoCreateCards" type="checkbox" /> 自动创建 EJH 卡</label>
+            <label><input id="replacementAutoBind" type="checkbox" /> 开卡成功后自动进入 AdsPower 换卡绑定</label>
+          </div>
+
+          <div class="action-row">
+            <button id="replacementQueryBtn" type="button" disabled>查询 OPOM 待换卡列表</button>
+            <button id="replacementLoadMoreBtn" type="button" disabled>加载下一页</button>
+            <a id="exceptionCardsExportLink" class="button secondary-link" href="/api/replacement/exception-cards.csv">导出异常卡池 CSV</a>
+          </div>
+
+          <div id="replacementSummary" class="summary muted" role="status" aria-live="polite">自动换卡未启动。</div>
+          <div id="replacementPaths" class="summary muted">产物目录和日志目录将使用本地配置默认值。</div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">OPOM</th>
+                  <th scope="col">邮箱</th>
+                  <th scope="col">AdsPower</th>
+                  <th scope="col">健康</th>
+                  <th scope="col">3 日均耗</th>
+                  <th scope="col">建议额度</th>
+                  <th scope="col">阶段</th>
+                </tr>
+              </thead>
+              <tbody id="replacementRowsBody"></tbody>
+            </table>
+          </div>
+
+          <div class="section-title-row">
+            <h3>异常卡池</h3>
+            <span id="exceptionCardsSummary" class="muted">0 张</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">OPOM</th>
+                  <th scope="col">AdsPower</th>
+                  <th scope="col">EJH</th>
+                  <th scope="col">卡</th>
+                  <th scope="col">原因</th>
+                  <th scope="col">CSV</th>
+                </tr>
+              </thead>
+              <tbody id="exceptionCardsBody"></tbody>
+            </table>
           </div>
         </section>
 

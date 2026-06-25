@@ -277,8 +277,38 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.form-grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .runtime-config-panel {
   grid-column: 1 / -1;
+}
+
+.replacement-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.replacement-panel table {
+  min-width: 1100px;
+}
+
+.replacement-switches {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-title-row h3 {
+  margin: 0;
+  font-size: 15px;
 }
 
 .config-grid {
@@ -789,6 +819,14 @@ tr[role="button"]:focus-visible td {
   .config-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .form-grid.four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .replacement-switches {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -814,6 +852,7 @@ tr[role="button"]:focus-visible td {
   .status-strip,
   .form-grid.two,
   .form-grid.three,
+  .form-grid.four,
   .config-grid,
   .rule-mode,
   .check-group {

@@ -1441,6 +1441,11 @@ function renderJobDetail(job, rows, events = []) {
   if (!job) return;
   const running = rows.find((row) => row.status === 'running');
   const canResumeRows = !['queued', 'running'].includes(job.status);
+  const rowActionHtml = (row) => {
+    if (row.status === 'completed') return '';
+    const label = row.status === 'failed' ? '重试本行' : '从本行继续';
+    return `<button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="${row.status === 'failed' ? '1' : '0'}" ${canResumeRows ? '' : 'disabled'}>${label}</button>`;
+  };
   els.jobMeta.innerHTML = `
     ${statusBadge(job.status)}
     <span>总数 ${job.totalRows}</span>
@@ -1458,6 +1463,7 @@ function renderJobDetail(job, rows, events = []) {
   els.rowsBody.innerHTML = rows.map((row) => `
     <tr>
       <td>${row.rowNumber}</td>
+      <td>${escapeHtml(row.adsPowerSerialNumber || row.profileId || '-')}</td>
       <td>${escapeHtml(row.profileId)}</td>
       <td>${escapeHtml(row.loginEmail || row.username)}</td>
       <td>${statusBadge(row.status)}</td>
@@ -1469,7 +1475,7 @@ function renderJobDetail(job, rows, events = []) {
       <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
       <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
       <td>
-        <button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="${row.status === 'failed' ? '1' : '0'}" ${canResumeRows ? '' : 'disabled'}>${row.status === 'failed' ? '重试本行' : '从本行继续'}</button>
+        ${rowActionHtml(row)}
         ${canRepairOpomWriteback(row, canResumeRows) ? `<button type="button" class="repair-opom-btn" data-row-number="${escapeHtml(row.rowNumber)}">补写 OPOM</button>` : ''}
       </td>
     </tr>

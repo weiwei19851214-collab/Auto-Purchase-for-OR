@@ -37,7 +37,7 @@ test('Stripe card entry skips Link checkbox cleanup after switching a non-US cou
 
 test('CDP navigation has retry and location fallback for slow AdsPower pages', () => {
   const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
-  assert.match(source, /DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000/);
+  assert.match(source, /DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000/);
   assert.match(source, /DEFAULT_NAVIGATION_RETRIES = 3/);
   assert.match(source, /Page\.stopLoading/);
   assert.match(source, /location\.href =/);

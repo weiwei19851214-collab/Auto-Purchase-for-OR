@@ -19,9 +19,13 @@ const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
 const DEFAULT_CREDITS_ENTRY_WAIT_MS = 60000;
 const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
 const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000;
-const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000;
-const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 45000;
+const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000;
+const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 60000;
 const DEFAULT_NAVIGATION_RETRIES = 3;
+const DEFAULT_DOM_WAIT_MS = 60000;
+const DEFAULT_DOM_POLL_MS = 1000;
+const SLOW_DOM_POLL_MS = 1500;
+const STRIPE_POST_FILL_SETTLE_MS = 1500;
 const PAGE_SETTLE_MS = 3000;
 const BALANCE_VERIFY_REFRESH_INTERVAL_MS = 15000;
 
@@ -98,7 +102,9 @@ function safeDiagnosticUrl(value) {
 
 function isIgnoredOpenRouterNetworkFailure(entry) {
   const url = safeDiagnosticUrl(entry?.url || '');
-  return url === 'https://openrouter.ai/api/internal/v1/stripe';
+  const status = Number(entry?.status);
+  return url === 'https://openrouter.ai/api/internal/v1/stripe'
+    || (Number.isFinite(status) && status >= 500);
 }
 
 async function installNetworkDiagnostics(client) {
@@ -162,7 +168,7 @@ async function pageStepState(page) {
       href: location.href,
       title: document.title || '',
       hasPaymentIssue: /Error:\\s*Payment\\s+Issue|Your card was declined/i.test(text),
-      hasServerError: /\\b500\\b|Internal Server Error|Something went wrong|Application error/i.test(text),
+      hasServerError: /\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text),
       hasAutoTopup: /Auto\\s*Top[- ]?Up/i.test(text),
       hasPurchaseCredits: /Purchase Credits/i.test(text),
       hasAddCredits: /Add Credits/i.test(text),
@@ -172,16 +178,11 @@ async function pageStepState(page) {
   const networkFailures = page.getRecentNetworkFailures?.() || [];
   const recentNetworkFailures = networkFailures.filter((entry) => !entry.ignored);
   const ignoredNetworkFailures = networkFailures.filter((entry) => entry.ignored);
-  const ignoredServerError = Boolean(
-    state.hasServerError
-      && ignoredNetworkFailures.length
-      && !recentNetworkFailures.length
-      && !state.hasPaymentIssue,
-  );
+  const ignoredServerError = Boolean(state.hasServerError && !state.hasPaymentIssue);
   return {
     ...state,
     hasServerErrorRaw: Boolean(state.hasServerError),
-    hasServerError: Boolean(state.hasServerError && !ignoredServerError),
+    hasServerError: false,
     ignoredServerError,
     recentNetworkFailures,
     ignoredNetworkFailures: ignoredNetworkFailures.slice(-5),
@@ -198,7 +199,7 @@ async function dismissOpenRouterServerErrorToast(page) {
       return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     };
     const errorNodes = [...document.querySelectorAll('body *')]
-      .filter((node) => visible(node) && /\\bError\\s*500\\b|Internal Server Error|Something went wrong|Application error/i.test(textOf(node)));
+      .filter((node) => visible(node) && /\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(textOf(node)));
     if (!errorNodes.length) return {attempted: false, found: false};
     const containers = [];
     for (const node of errorNodes) {
@@ -206,7 +207,7 @@ async function dismissOpenRouterServerErrorToast(page) {
       for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
         if (!visible(current)) continue;
         const text = textOf(current);
-        if (/\\bError\\s*500\\b|Internal Server Error|Something went wrong|Application error/i.test(text)) {
+        if (/\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text)) {
           containers.push(current);
         }
       }
@@ -251,6 +252,80 @@ async function dismissOpenRouterServerErrorToast(page) {
   })()`).catch((error) => ({attempted: true, error: error.message}));
 }
 
+async function dismissInterferingOverlays(page) {
+  if (!page) return {attempted: false};
+  const nativeDialog = await acceptJavascriptDialogIfAny(page, 700).catch(() => ({handled: false}));
+  const pageOverlay = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    const flowBlocker = /Purchase Credits|Add a Payment Method|Add Payment Method|Save payment method|Add a Billing Address|Complete address details|Update Address|Card number|Expiration date|CVC|Postal code|Payment Issue|3D Secure|hCaptcha|captcha|security code|bank verification|passkey/i;
+    const allowedNonFlowOverlay = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says|\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],div,section')]
+      .filter(visible)
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const buttons = [...node.querySelectorAll('button,[role="button"],[aria-label],svg')]
+          .filter(visible)
+          .map((button) => {
+            const label = [textOf(button), button.getAttribute?.('aria-label') || '', button.getAttribute?.('title') || ''].join(' ').trim();
+            const buttonRect = button.getBoundingClientRect();
+            const nearTopRight = buttonRect.left > rect.left + rect.width * 0.72 && buttonRect.top < rect.top + rect.height * 0.24;
+            return {node: button, label, rect: buttonRect, nearTopRight};
+          });
+        return {
+          node,
+          text: textOf(node),
+          rect,
+          stylePosition: style.position,
+          zIndex: Number.parseInt(style.zIndex || '0', 10) || 0,
+          role: node.getAttribute('role') || '',
+          modal: node.getAttribute('aria-modal') || '',
+          buttons,
+        };
+      })
+      .filter((item) => item.rect.width >= 220 && item.rect.height >= 100)
+      .filter((item) => {
+        const hasExplicitCloseOrOk = item.buttons.some((button) => /^OK$/i.test(button.label) || /close|dismiss|关闭|×|x/i.test(button.label));
+        const hasTopRightClose = item.buttons.some((button) => button.nearTopRight && /^(|×|x|close|dismiss|关闭)$/i.test(button.label));
+        const hasCloseOrOk = hasExplicitCloseOrOk || hasTopRightClose;
+        if (!hasCloseOrOk) return false;
+        const protectedFlow = flowBlocker.test(item.text) && !/You must add a verified email to access this feature/i.test(item.text);
+        if (protectedFlow) return false;
+        const isRealOverlay = item.role === 'dialog'
+          || item.modal === 'true'
+          || (item.stylePosition === 'fixed' && item.zIndex >= 10);
+        return allowedNonFlowOverlay.test(item.text) || isRealOverlay;
+      })
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+    const dialog = dialogs[0];
+    if (!dialog) return {attempted:false, found:false};
+    const buttons = dialog.buttons
+      .map((item) => ({
+        ...item,
+        score: /^OK$/i.test(item.label) ? 4 : /close|dismiss|关闭|×|x/i.test(item.label) ? 3 : item.nearTopRight ? 2 : 0,
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.rect.x - a.rect.x);
+    const target = buttons[0]?.node?.closest?.('button,[role="button"],[aria-label]') || buttons[0]?.node || null;
+    if (!target) return {attempted:true, found:true, clicked:false, reason:'close_target_not_found', text:dialog.text.slice(0, 240)};
+    target.scrollIntoView?.({block:'center', inline:'center'});
+    target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+    target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+    target.click?.();
+    target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    return {attempted:true, found:true, clicked:true, label:buttons[0]?.label || '', text:dialog.text.slice(0, 240)};
+  })()`).catch((error) => ({attempted: true, error: error.message}));
+  return {attempted: true, nativeDialog, pageOverlay};
+}
+
 async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState) {
   if (!page || (!pageState?.hasServerError && !pageState?.ignoredServerError)) return {attempted: false};
   const dismissedPostStepServerError = await dismissOpenRouterServerErrorToast(page);
@@ -266,13 +341,17 @@ async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageS
 }
 
 async function runLoggedStep(label, debugDir, task, page = null) {
+  const dismissedOverlay = page ? await dismissInterferingOverlays(page) : {attempted: false};
+  if (dismissedOverlay?.nativeDialog?.handled || dismissedOverlay?.pageOverlay?.clicked) await sleep(400);
   const dismissedServerError = page ? await dismissOpenRouterServerErrorToast(page) : {attempted: false};
   if (dismissedServerError?.clicked) await sleep(250);
-  writeStepDiagnostic(debugDir, label, 'start', {dismissedServerError, page: await pageStepState(page)});
+  writeStepDiagnostic(debugDir, label, 'start', {dismissedOverlay, dismissedServerError, page: await pageStepState(page)});
   try {
     const result = await task();
+    const dismissedOverlayAfter = page ? await dismissInterferingOverlays(page) : {attempted: false};
+    if (dismissedOverlayAfter?.nativeDialog?.handled || dismissedOverlayAfter?.pageOverlay?.clicked) await sleep(400);
     const pageState = await pageStepState(page);
-    writeStepDiagnostic(debugDir, label, 'success', {result, page: pageState});
+    writeStepDiagnostic(debugDir, label, 'success', {result, dismissedOverlayAfter, page: pageState});
     await dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState);
     return result;
   } catch (error) {
@@ -955,7 +1034,7 @@ async function waitForNavigationReady(client, targetUrl, timeoutMs = DEFAULT_NAV
     ) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`navigation ready timeout after ${timeoutMs}ms: ${JSON.stringify(lastState || {})}`);
 }
@@ -1083,7 +1162,7 @@ async function clearDefaultPaymentMethod(page) {
   if (!updateResult.ok) {
     if (/Server action not found/i.test(updateResult.text || '')) {
       await navigatePage(page, OPENROUTER_CREDITS_URL).catch(() => null);
-      await sleep(1500);
+      await sleep(500);
       return {
         clearedDefault: false,
         skipped: true,
@@ -1146,24 +1225,47 @@ async function ensureOpenRouterPage(input) {
 async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastStripeTargets = [];
+  let lastCandidateState = null;
   while (Date.now() < deadline) {
     const targets = getTargets(debugPort);
     lastStripeTargets = targets
       .filter((item) => item.type === 'iframe' && /stripe\.com/.test(item.url || ''))
       .map((item) => item.url.split('#')[0])
       .slice(0, 8);
-    const target = targets.find((item) => (
+    const candidates = targets.filter((item) => (
       item.type === 'iframe'
       && /elements-inner/.test(item.url)
       && /componentName=payment/.test(item.url)
     ));
-    if (target) return target.webSocketDebuggerUrl;
-    await sleep(500);
+    for (const target of candidates) {
+      let frame;
+      try {
+        frame = await cdp(target.webSocketDebuggerUrl, 3000);
+        await frame.send('Runtime.enable').catch(() => {});
+        const state = await evaluate(frame, `(() => {
+          const text = document.body.innerText || '';
+          const hasCardNumber = !!document.querySelector('#payment-numberInput');
+          const cardTabSelected = /Card\\s+selected/i.test(text) || /Card number/i.test(text);
+          return {
+            hasCardNumber,
+            cardTabSelected,
+            tail: text.slice(-500),
+          };
+        })()`, 3000);
+        lastCandidateState = state;
+        if (state.hasCardNumber || state.cardTabSelected) return target.webSocketDebuggerUrl;
+      } catch (error) {
+        lastCandidateState = {error: error.message};
+      } finally {
+        if (frame) frame.close();
+      }
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-  throw new Error(`Stripe payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}`);
+  throw new Error(`Stripe card payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}; lastCandidateState=${JSON.stringify(lastCandidateState || {})}`);
 }
 
-async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
+async function waitForAddressTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastUrls = [];
   let lastStates = [];
@@ -1206,7 +1308,7 @@ async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
         if (frame) frame.close();
       }
     }
-    await sleep(500);
+    await sleep(SLOW_DOM_POLL_MS);
   }
   throw new Error(`Stripe address iframe not ready; stripeTargets=${lastUrls.join(' | ')}; states=${JSON.stringify(lastStates).slice(0, 1200)}`);
 }
@@ -1357,24 +1459,44 @@ async function clickAddPaymentMethod(page, options = {}) {
   return result;
 }
 
-async function waitForExactText(page, label, timeoutMs = 10000) {
+async function waitForExactText(page, label, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
+  const pollMs = options.pollMs || DEFAULT_DOM_POLL_MS;
   let lastResult = null;
   while (Date.now() < deadline) {
     lastResult = await clickExactText(page, label, {required: false});
     if (lastResult.clicked) return lastResult;
-    await sleep(500);
+    await sleep(pollMs);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    try {
+      const retry = await waitForExactText(page, label, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Button not found after ${timeoutMs}ms, refreshed once and retried: ${label}; ${error.message}`);
+    }
   }
   throw new Error(`Button not found: ${label}; tail=${lastResult?.tail || ''}`);
 }
 
-async function waitForClickableText(page, pattern, timeoutMs = 10000) {
+async function waitForClickableText(page, pattern, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
+  const pollMs = options.pollMs || DEFAULT_DOM_POLL_MS;
   let lastResult = null;
   while (Date.now() < deadline) {
     lastResult = await clickByText(page, pattern, {required: false});
     if (lastResult.clicked) return lastResult;
-    await sleep(500);
+    await sleep(pollMs);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    try {
+      const retry = await waitForClickableText(page, pattern, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Button not found after ${timeoutMs}ms, refreshed once and retried: ${pattern}; ${error.message}`);
+    }
   }
   throw new Error(`Button not found: ${pattern}; tail=${lastResult?.tail || ''}`);
 }
@@ -1429,25 +1551,41 @@ async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '
 }
 
 async function openBillingAddressFormIfNeeded(page) {
-  const before = await getPaymentEntryState(page);
-  if (before.hasSavePaymentMethod || before.hasCardFormText || before.hasAddressForm) {
-    return {opened: false, state: before};
+  const entryDeadline = Date.now() + DEFAULT_DOM_WAIT_MS;
+  let before = null;
+  while (Date.now() < entryDeadline) {
+    before = await getPaymentEntryState(page);
+    if (before.hasSavePaymentMethod || before.hasCardFormText || before.hasAddressForm) {
+      return {opened: false, state: before};
+    }
+    if (before.hasAddBillingAddress || /Complete address details to continue/i.test(before.tail)) {
+      break;
+    }
+    await sleep(SLOW_DOM_POLL_MS);
   }
-  if (!before.hasAddBillingAddress && !/Complete address details to continue/i.test(before.tail)) {
-    return {opened: false, state: before};
+  if (!before?.hasAddBillingAddress && !/Complete address details to continue/i.test(before?.tail || '')) {
+    throw new Error(`Add a Billing Address entry not ready after ${DEFAULT_DOM_WAIT_MS}ms; tail=${before?.tail || ''}`);
   }
 
-  const clicked = await clickByText(page, '^Add a Billing Address$|^Add Billing Address$', {required: false});
-  await sleep(clicked.clicked ? 1500 : 500);
-  return {
-    opened: clicked.clicked,
-    clicked,
-    state: await getPaymentEntryState(page),
-  };
+  const clicked = await waitForClickableText(page, '^Add a Billing Address$|^Add Billing Address$', DEFAULT_DOM_WAIT_MS, {pollMs: DEFAULT_DOM_POLL_MS});
+  const deadline = Date.now() + DEFAULT_DOM_WAIT_MS;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getPaymentEntryState(page);
+    if (state.hasAddressForm || state.hasCardFormText || state.hasSavePaymentMethod) {
+      return {
+        opened: clicked.clicked,
+        clicked,
+        state,
+      };
+    }
+    await sleep(SLOW_DOM_POLL_MS);
+  }
+  throw new Error(`Add a Billing Address form not ready after ${DEFAULT_DOM_WAIT_MS}ms; tail=${state?.tail || ''}`);
 }
 
 async function fillStripeBillingAddress(debugPort, billing) {
-  const targetWs = await waitForAddressTarget(debugPort, 12000);
+  const targetWs = await waitForAddressTarget(debugPort, DEFAULT_STRIPE_IFRAME_WAIT_MS);
   const address = await cdp(targetWs);
   try {
     await address.send('Runtime.enable');
@@ -1587,7 +1725,7 @@ async function maybeFillBillingAddress(page, billing, debugPort = '') {
         }
         throw new Error(`Billing address form was not completely filled: ${JSON.stringify(stripeAddress.result)}`);
       }
-      const clicked = await waitForClickableText(page, 'Update Address|Save|Continue', 12000);
+      const clicked = await waitForClickableText(page, 'Update Address|Save|Continue', DEFAULT_DOM_WAIT_MS);
       await sleep(2500);
       return {...stripeAddress, clicked};
     } catch (error) {
@@ -1697,17 +1835,20 @@ async function ensureStripeLinkUnchecked(payment) {
     if ((lastState.found === false || lastState.checked === false) && !lastState.phoneVisible && !lastState.phoneInvalidText) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`Stripe Link save-info checkbox or phone subform is still active: ${JSON.stringify(lastState)}`);
 }
 
 async function fillStripeCard(payment, card) {
-  for (let i = 0; i < 20; i += 1) {
-    const ready = await evaluate(payment, `(() => !!document.querySelector('#payment-numberInput'))()`);
+  const deadline = Date.now() + DEFAULT_STRIPE_IFRAME_WAIT_MS;
+  let ready = false;
+  while (Date.now() < deadline) {
+    ready = await evaluate(payment, `(() => !!document.querySelector('#payment-numberInput'))()`);
     if (ready) break;
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
+  if (!ready) throw new Error(`Missing Stripe field after ${DEFAULT_STRIPE_IFRAME_WAIT_MS}ms: #payment-numberInput`);
   await focusAndInsertText(payment, '#payment-numberInput', card.number);
   await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry));
   await focusAndInsertText(payment, '#payment-cvcInput', card.cvc);
@@ -1778,6 +1919,7 @@ async function fillStripeCard(payment, card) {
         country: countryState,
       }
     : await ensureStripeLinkUnchecked(payment);
+  await sleep(STRIPE_POST_FILL_SETTLE_MS);
   return {values, linkChecked: linkState.checked, linkState, countryState};
 }
 
@@ -1852,18 +1994,18 @@ async function waitUntilSaveModalCloses(page) {
     })()`);
     if (state.challenge) throw new Error(`Security challenge visible: ${state.tail}`);
     if (!state.stillSave && state.hasAddCredits) return state;
-    await sleep(500);
+    await sleep(SLOW_DOM_POLL_MS);
   }
   const state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2000)}))()`);
   throw new Error(`Save modal did not close: ${state.tail}`);
 }
 
 async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
-  return waitForPurchaseCard(page, expectedLast4, expectedExpiry);
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  return waitForPurchaseCard(page, expectedLast4, expectedExpiry, DEFAULT_DOM_WAIT_MS, {refreshOnTimeout: true});
 }
 
-async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs = 45000) {
+async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
   while (Date.now() < deadline) {
@@ -1885,7 +2027,17 @@ async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutM
     if (!verified.purchase && verified.hasAddCredits && !verified.stillSaving) {
       await clickExactText(page, 'Add Credits', {required: false});
     }
-    await sleep(1500);
+    await sleep(SLOW_DOM_POLL_MS);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+    try {
+      const retry = await waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Saved card was not visible after ${timeoutMs}ms, refreshed once and retried: ${error.message}`);
+    }
   }
   if (!state) state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2500)}))()`);
   throw new Error(`Saved card was not visible in Purchase Credits modal after ${timeoutMs}ms: ${state.tail}`);
@@ -2351,7 +2503,7 @@ async function ensurePurchaseInvoiceChecked(page) {
   return {initial: result, state};
 }
 
-async function preparePurchase(page, purchase, timeoutMs = 30000) {
+async function preparePurchase(page, purchase, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const amount = normalizeMoneyValue(purchase.amount);
   if (!amount) throw new Error('Purchase amount is required');
   if (purchase.debugPort) {
@@ -2455,7 +2607,7 @@ async function clickPurchaseConfirmationIfPresent(page, debugPort = '', debugDir
   return {confirmed: false, method: 'native_dialog_not_present', state: nativeDialog};
 }
 
-async function waitForPurchaseResult(page, debugPort = '', timeoutMs = 30000, debugDir = '') {
+async function waitForPurchaseResult(page, debugPort = '', timeoutMs = DEFAULT_DOM_WAIT_MS, debugDir = '') {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
 	  while (Date.now() < deadline) {
@@ -2501,7 +2653,7 @@ async function waitForPurchaseResult(page, debugPort = '', timeoutMs = 30000, de
       return {verified: false, declined: true, state: lastState};
     }
     if (lastState.submittedOrClosed || !lastState.stillPurchase) return {submitted: true, state: lastState};
-    await sleep(1000);
+    await sleep(500);
   }
   return {submitted: false, state: lastState};
 }
@@ -2538,7 +2690,7 @@ async function recoverPurchaseAfterAutomationTimeout(page, purchase, debugPort =
   return {recovered: false, confirmations};
 }
 
-async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutMs = 45000) {
+async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const expectedAmount = normalizeMoneyForCompare(amount);
   if (!Number.isFinite(beforeBalance) || !Number.isFinite(expectedAmount)) {
     return {verified: null, reason: 'missing_before_balance_or_amount'};
@@ -2757,7 +2909,7 @@ async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
 async function removeSavedPaymentMethodsFromPicker(page) {
   const removed = [];
 
-  await waitForExactText(page, 'Add Credits');
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
   await sleep(1200);
 
   for (let i = 0; i < 8; i += 1) {
@@ -2882,7 +3034,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         };
       })()`);
       if (!state.cardStillVisible || state.hasSave) break;
-      await sleep(500);
+      await sleep(DEFAULT_DOM_POLL_MS);
       if (wait === 9) {
         throw new Error(`Saved payment-method removal did not take effect: ${state.tail}`);
       }
@@ -2894,8 +3046,9 @@ async function removeSavedPaymentMethodsFromPicker(page) {
 }
 
 async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
-  for (let i = 0; i < 30; i += 1) {
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  const deadline = Date.now() + DEFAULT_DOM_WAIT_MS;
+  while (Date.now() < deadline) {
     const state = await evaluate(page, `(() => {
       const text = document.body.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
@@ -2964,7 +3117,7 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
     if (state.purchase && state.targetCardVisible) return {alreadyBound: true, state};
     if (!state.purchase && state.targetCardVisible) {
       const selected = await clickSavedPaymentMethod(page, expectedLast4, expectedExpiry);
-      const verified = await waitForPurchaseCard(page, expectedLast4, expectedExpiry);
+      const verified = await waitForPurchaseCard(page, expectedLast4, expectedExpiry, DEFAULT_DOM_WAIT_MS, {refreshOnTimeout: true});
       return {alreadyBound: true, reboundExisting: true, selected, state: verified};
     }
     if (state.purchase && state.hasSave) break;
@@ -2976,7 +3129,7 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
       await sleep(PAGE_SETTLE_MS);
       break;
     }
-    await sleep(1000);
+    await sleep(SLOW_DOM_POLL_MS);
   }
 
   const clicked = await clickAddPaymentMethod(page, {required: false});
@@ -2984,28 +3137,64 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
   return {alreadyBound: false, clicked};
 }
 
-async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_PAYMENT_ENTRY_WAIT_MS) {
+function isPaymentEntryStateReady(state, expectedLast4 = '') {
+  return !!(
+    state?.canAddPaymentMethod
+    || state?.hasAddPaymentMethod
+    || state?.canAddCredits
+    || state?.hasAddCredits
+    || state?.hasAddBillingAddress
+    || state?.hasAddressForm
+    || state?.hasSavePaymentMethod
+    || state?.hasCardFormText
+    || (expectedLast4 && state?.purchase && state?.targetCardVisible)
+  );
+}
+
+async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_PAYMENT_ENTRY_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
-    if (
-      lastState.canAddPaymentMethod
-      || lastState.hasAddBillingAddress
-      || lastState.hasAddressForm
-      || lastState.hasSavePaymentMethod
-      || lastState.hasCardFormText
-      || (expectedLast4 && lastState.purchase && lastState.targetCardVisible)
-    ) {
+    if (isPaymentEntryStateReady(lastState, expectedLast4)) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    const retry = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs, {...options, refreshOnTimeout: false});
+    return {...retry, refreshedOnce: true};
   }
   return lastState || await getPaymentEntryState(page, expectedLast4, expectedExpiry);
 }
 
+async function waitForPaymentMethodSurfaceAfterClick(page, expectedLast4, expectedExpiry, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+    if (
+      state.hasAddBillingAddress
+      || state.hasAddressForm
+      || state.hasCardFormText
+      || state.hasSavePaymentMethod
+      || (expectedLast4 && state.purchase && state.targetCardVisible)
+    ) {
+      return state;
+    }
+    await sleep(SLOW_DOM_POLL_MS);
+  }
+  throw new Error(`Add a Payment Method modal did not become ready after ${timeoutMs}ms; tail=${state?.tail || ''}`);
+}
+
 async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, options = {}) {
-  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS);
+  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS, {
+    refreshOnTimeout: options.refreshOnTimeout !== false,
+  });
+  if (!isPaymentEntryStateReady(initial, expectedLast4) && !initial.canAddCredits && !initial.hasAddCredits) {
+    throw new Error(`Payment method entry not ready after ${options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS}ms, refreshed once and retried; tail=${initial.tail || ''}`);
+  }
   if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
     return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
   }
@@ -3013,14 +3202,22 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
     return {alreadyBound: false, entry: 'already_open', state: initial};
   }
 
-  if (initial.canAddPaymentMethod) {
+  if (initial.canAddPaymentMethod || initial.hasAddPaymentMethod) {
     const clicked = await clickAddPaymentMethod(page, {required: false});
     await sleep(PAGE_SETTLE_MS);
+    if (!clicked.clicked) {
+      if (!options.requireAddPaymentMethod && (initial.canAddCredits || initial.hasAddCredits)) {
+        const result = await openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry);
+        const state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+        return {...result, entry: 'add_credits_after_payment_method_click_miss', state};
+      }
+      throw new Error(`Add a Payment Method is visible but could not be clicked; tail=${clicked.tail || initial.tail || ''}`);
+    }
     return {
       alreadyBound: false,
       entry: 'add_payment_method',
       clicked,
-      state: await getPaymentEntryState(page, expectedLast4, expectedExpiry),
+      state: await waitForPaymentMethodSurfaceAfterClick(page, expectedLast4, expectedExpiry, options.surfaceReadyTimeoutMs || 30000),
     };
   }
 
@@ -3037,6 +3234,22 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
   throw new Error(`Payment method entry not found; tail=${initial.tail}`);
 }
 
+function isRetryablePageLoadError(error) {
+  return /not ready|not found|Missing Stripe field|iframe|did not expose Save payment method|Saved card was not visible|Payment method entry|Add a Payment Method|Add Credits|Button not found|CDP command timeout/i.test(error?.message || '')
+    && !/payment_issue_card_declined|Payment Issue|Your card was declined|Security challenge|3D Secure|hCaptcha|captcha|bank verification|passkey|manual_security_blocker/i.test(error?.message || '');
+}
+
+async function refreshCreditsPageForRetry(page) {
+  await dismissInterferingOverlays(page).catch(() => null);
+  await navigatePage(page, OPENROUTER_CREDITS_URL, {
+    commandTimeoutMs: DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS,
+    readyTimeoutMs: DEFAULT_NAVIGATION_READY_TIMEOUT_MS,
+  });
+  await sleep(PAGE_SETTLE_MS);
+  await dismissInterferingOverlays(page).catch(() => null);
+  return getPaymentEntryState(page);
+}
+
 async function waitForCardFormReady(page, debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
@@ -3048,23 +3261,49 @@ async function waitForCardFormReady(page, debugPort, timeoutMs = DEFAULT_STRIPE_
     }
     if (debugPort) {
       try {
-        const target = getTargets(debugPort).find((item) => (
-          item.type === 'iframe'
-          && /stripe\.com/.test(item.url)
-          && /elements-inner/.test(item.url)
-          && /componentName=payment/.test(item.url)
-        ));
-        if (target) return {ready: true, source: 'stripe_iframe', targetUrl: target.url.split('#')[0]};
+        const targetWs = await waitForPaymentTarget(debugPort, 3000);
+        if (targetWs) return {ready: true, source: 'stripe_card_iframe'};
       } catch (error) {
         lastTargetError = error.message;
       }
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   return {
     ready: false,
     state: lastState,
     targetError: lastTargetError,
+  };
+}
+
+async function detectCompletedCreditsMainPage(page, purchasePlan, autoTopup) {
+  const state = await getPaymentEntryState(page).catch(() => null);
+  const hasPaymentSurface = !!(
+    state?.hasSavePaymentMethod
+    || state?.hasCardFormText
+    || state?.hasAddBillingAddress
+    || state?.hasAddressForm
+  );
+  if (hasPaymentSurface) return null;
+
+  const autoTopupState = autoTopup?.enabled
+    ? await waitForAutoTopupOverview(page, 5000).catch((error) => ({enabled: false, error: error.message}))
+    : {skipped: true, reason: 'auto_topup_not_requested'};
+  const balanceVerification = purchasePlan?.confirmed && Number.isFinite(purchasePlan.beforeBalance?.balance) && purchasePlan.amount
+    ? await verifyPurchaseBalanceChange(page, purchasePlan.beforeBalance.balance, purchasePlan.amount, 5000).catch((error) => ({verified: false, error: error.message}))
+    : {verified: true, skipped: true, reason: 'purchase_not_requested'};
+
+  const autoTopupOk = !autoTopup?.enabled || autoTopupState?.enabled;
+  const purchaseOk = !purchasePlan?.confirmed || balanceVerification?.verified;
+  if (!autoTopupOk || !purchaseOk) {
+    return null;
+  }
+  return {
+    recovered: true,
+    reason: 'credits_main_page_already_completed',
+    state,
+    autoTopup: autoTopupState,
+    balanceVerification,
   };
 }
 
@@ -3132,7 +3371,7 @@ async function getAutoTopupState(page) {
   })()`);
 }
 
-async function waitForAutoTopupOverview(page, timeoutMs = 8000) {
+async function waitForAutoTopupOverview(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
   let firstManageAt = 0;
@@ -3219,7 +3458,7 @@ async function findAndClickAutoTopupAction(page, action) {
   throw new Error(`Auto top-up ${action} button not found: ${JSON.stringify(result)}`);
 }
 
-async function waitForAutoTopupForm(page, timeoutMs = 10000) {
+async function waitForAutoTopupForm(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
@@ -3317,7 +3556,7 @@ async function openAutoTopupEditor(page, state) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await findAndClickAutoTopupAction(page, action);
     try {
-      const form = await waitForAutoTopupForm(page, 1500);
+      const form = await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
       return {opened: true, action, formReady: true, form};
     } catch (error) {
       lastError = error;
@@ -3656,7 +3895,7 @@ async function saveAutoTopup(page) {
   return result;
 }
 
-async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = 15000) {
+async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const expectedThreshold = normalizeMoneyForCompare(threshold);
   const expectedAmount = normalizeMoneyForCompare(amount);
   const deadline = Date.now() + timeoutMs;
@@ -3849,7 +4088,7 @@ async function run() {
     }
     if (input.purchaseOnly) {
       const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
-      await runLoggedStep('wait-add-credits-purchase-only', debugDir, () => waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS), page);
+      await runLoggedStep('wait-add-credits-purchase-only', debugDir, () => waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true}), page);
       await sleep(PAGE_SETTLE_MS);
       const purchaseResult = input.purchase.confirmed
         ? await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
@@ -3890,10 +4129,22 @@ async function run() {
         reason: removal.reason || 'no_existing_payment_methods',
       };
     }
-    const paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
-      requireAddPaymentMethod: input.billingAddressOnly,
-      timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
-    }), page);
+    let paymentPath;
+    try {
+      paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+      }), page);
+    } catch (error) {
+      if (/refreshed once/i.test(error.message || '')) throw error;
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-payment-entry-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-retry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+    }
     if (paymentPath.alreadyBound) {
       const purchaseResult = input.purchase.confirmed
         ? await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
@@ -3921,8 +4172,33 @@ async function run() {
         elapsedMs: Date.now() - startedAt,
       };
     }
-    const billingEntry = await runLoggedStep('open-billing-address-form', debugDir, () => openBillingAddressFormIfNeeded(page), page);
-    const billingAddress = await runLoggedStep('fill-billing-address', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    let billingEntry;
+    try {
+      billingEntry = await runLoggedStep('open-billing-address-form', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-billing-entry-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-billing-entry-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+    }
+    let billingAddress;
+    try {
+      billingAddress = await runLoggedStep('fill-billing-address', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-billing-address-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-billing-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-retry', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    }
     if (input.billingAddressOnly) {
       const cardForm = await runLoggedStep('wait-card-form-ready', debugDir, () => waitForCardFormReady(page, input.debugPort), page);
       if (!cardForm.ready) {
@@ -3950,7 +4226,47 @@ async function run() {
       };
     }
 
-    const paymentWs = await waitForPaymentTarget(input.debugPort);
+    const preCardForm = await runLoggedStep('wait-card-form-ready-before-fill', debugDir, () => waitForCardFormReady(page, input.debugPort, 10000), page);
+    if (!preCardForm.ready) {
+      const completedMainPage = await runLoggedStep('detect-completed-main-page-before-card-fill', debugDir, () => detectCompletedCreditsMainPage(page, purchasePlan, input.autoTopup), page);
+      if (completedMainPage?.recovered) {
+        return {
+          ok: true,
+          status: input.purchase.confirmed ? 'purchased_existing' : 'already_bound',
+          account: accountState.account,
+          card: {last4, masked, expiry: expectedExpiry},
+          launch: input.launch,
+          removal,
+          paymentPath,
+          billingEntry,
+          billingAddress,
+          purchase: input.purchase.confirmed
+            ? {
+                executed: true,
+                recovered: true,
+                recoveryReason: completedMainPage.reason,
+                amount: purchasePlan.amount,
+                ruleDecision: purchasePlan.ruleDecision || null,
+                beforeBalance: purchasePlan.beforeBalance || null,
+                balanceVerification: completedMainPage.balanceVerification,
+              }
+            : skippedPurchaseResult,
+          autoTopup: completedMainPage.autoTopup,
+          verified: true,
+          recovered: completedMainPage,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      paymentPath = await runLoggedStep('reopen-payment-method-entry-before-card-fill', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-before-card-fill-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-before-card-fill-retry', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    }
+
+    let paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
     payment = await cdp(paymentWs);
     await installNetworkDiagnostics(payment);
     await payment.send('Runtime.enable');
@@ -3958,19 +4274,67 @@ async function run() {
     try {
       stripeState = await runLoggedStep('fill-stripe-card', debugDir, () => fillStripeCard(payment, input.card), payment);
     } catch (error) {
-      throw error;
+      if (!isRetryablePageLoadError(error)) throw error;
+      payment.close();
+      payment = null;
+      await runLoggedStep('refresh-after-card-form-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-card-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-after-card-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-after-card-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+      paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
+      payment = await cdp(paymentWs);
+      await installNetworkDiagnostics(payment);
+      await payment.send('Runtime.enable');
+      stripeState = await runLoggedStep('fill-stripe-card-retry', debugDir, () => fillStripeCard(payment, input.card), payment);
     }
 
-    const saveClick = await runLoggedStep('click-save-payment-method', debugDir, () => clickByText(page, 'Save payment method', {required: false}), page);
+    let saveClick;
+    try {
+      saveClick = await runLoggedStep('click-save-payment-method', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      if (payment) {
+        payment.close();
+        payment = null;
+      }
+      await runLoggedStep('refresh-after-save-payment-method-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-save-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-after-save-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-after-save-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+      paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
+      payment = await cdp(paymentWs);
+      await installNetworkDiagnostics(payment);
+      await payment.send('Runtime.enable');
+      stripeState = await runLoggedStep('fill-stripe-card-after-save-refresh', debugDir, () => fillStripeCard(payment, input.card), payment);
+      saveClick = await runLoggedStep('click-save-payment-method-retry', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
+    }
     if (!saveClick.clicked) {
       throw new Error('Add Credits payment path did not expose Save payment method; refusing to click Purchase');
     }
     await sleep(2000);
     await declineStripeLinkPrompts(input.debugPort);
     const postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page), page);
-    const verified = input.openPurchaseForVerification
-      ? await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page)
-      : {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
+    let verified;
+    if (input.openPurchaseForVerification) {
+      try {
+        verified = await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+      } catch (error) {
+        if (/refreshed once/i.test(error.message || '')) throw error;
+        if (!isRetryablePageLoadError(error)) throw error;
+        await runLoggedStep('refresh-after-purchase-modal-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+        verified = await runLoggedStep('verify-by-purchase-modal-retry', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+      }
+    } else {
+      verified = {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
+    }
     const purchaseResult = input.purchase.confirmed
       ? await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
       : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);

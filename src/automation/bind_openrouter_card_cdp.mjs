@@ -198,8 +198,40 @@ async function dismissOpenRouterServerErrorToast(page) {
       const style = getComputedStyle(node);
       return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     };
+    const clickNode = (target) => {
+      if (!target) return false;
+      target.scrollIntoView?.({block:'center', inline:'center'});
+      const PointerLikeEvent = window.PointerEvent || MouseEvent;
+      target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+      target.click?.();
+      target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+      return true;
+    };
+    const errorPattern = /\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const exactDialogs = [...document.querySelectorAll('[data-slot="dialog-content"],[role="dialog"],[aria-modal="true"]')]
+      .filter((node) => visible(node) && errorPattern.test(textOf(node)))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      });
+    for (const dialog of exactDialogs) {
+      const close = [...dialog.querySelectorAll('button[data-slot="dialog-close"],button[aria-label="Close"],button[title="Close"]')]
+        .find((node) => visible(node) && node.getAttribute('aria-disabled') !== 'true');
+      if (close && clickNode(close)) {
+        return {
+          attempted: true,
+          found: true,
+          clicked: true,
+          method: close.getAttribute('data-slot') === 'dialog-close' ? 'dialog-close-slot' : 'dialog-close-label',
+          text: textOf(dialog).slice(0, 240),
+        };
+      }
+    }
     const errorNodes = [...document.querySelectorAll('body *')]
-      .filter((node) => visible(node) && /\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(textOf(node)));
+      .filter((node) => visible(node) && errorPattern.test(textOf(node)));
     if (!errorNodes.length) return {attempted: false, found: false};
     const containers = [];
     for (const node of errorNodes) {
@@ -207,7 +239,7 @@ async function dismissOpenRouterServerErrorToast(page) {
       for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
         if (!visible(current)) continue;
         const text = textOf(current);
-        if (/\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text)) {
+        if (errorPattern.test(text)) {
           containers.push(current);
         }
       }
@@ -239,17 +271,28 @@ async function dismissOpenRouterServerErrorToast(page) {
     for (const candidate of ordered.slice(0, 6)) {
       const target = candidate.node.closest?.('button,[role="button"],[aria-label]') || candidate.node;
       if (!target || clicked.includes(target)) continue;
-      const PointerLikeEvent = window.PointerEvent || MouseEvent;
-      target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
-      target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
-      target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
-      target.click?.();
-      target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+      clickNode(target);
       clicked.push(target);
     }
     if (!clicked.length) return {attempted: true, found: true, clicked: false, reason: 'close_button_not_found'};
     return {attempted: true, found: true, clicked: true, clickedCount: clicked.length};
   })()`).catch((error) => ({attempted: true, error: error.message}));
+}
+
+async function commandRefreshCreditsPage(page) {
+  if (!page) return {refreshed: false};
+  await page.send('Page.bringToFront').catch(() => {});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91}).catch(() => {});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 4}).catch(() => {});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 4}).catch(() => {});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91}).catch(() => {});
+  const ready = await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
+  if (!ready) {
+    await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
+    await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
+  }
+  await sleep(PAGE_SETTLE_MS);
+  return {refreshed: true, method: 'command_r', ready};
 }
 
 async function dismissInterferingOverlays(page) {
@@ -326,6 +369,33 @@ async function dismissInterferingOverlays(page) {
   return {attempted: true, nativeDialog, pageOverlay};
 }
 
+async function recoverInterferingUi(page) {
+  if (!page) return {attempted: false};
+  const dismissedOverlay = await dismissInterferingOverlays(page);
+  if (dismissedOverlay?.nativeDialog?.handled || dismissedOverlay?.pageOverlay?.clicked) await sleep(400);
+  const dismissedServerError = await dismissOpenRouterServerErrorToast(page);
+  if (dismissedServerError?.clicked) await sleep(400);
+  const state = await pageStepState(page);
+  const paymentSurface = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim();
+    const activeDialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"],form')]
+      .filter(visible)
+      .map((node) => textOf(node))
+      .filter(Boolean);
+    return activeDialogs.some((text) => /Save payment method|Card number|Expiration date|CVC|Add a Billing Address|Purchase Credits[\\s\\S]*Total due|Auto\\s*Top[- ]?Up/i.test(text));
+  })()`).catch(() => false);
+  const refreshed = state.hasServerErrorRaw && !state.hasPaymentIssue && !paymentSurface
+    ? await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}))
+    : {refreshed: false};
+  return {attempted: true, dismissedOverlay, dismissedServerError, paymentSurface, refreshed};
+}
+
 async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState) {
   if (!page || (!pageState?.hasServerError && !pageState?.ignoredServerError)) return {attempted: false};
   const dismissedPostStepServerError = await dismissOpenRouterServerErrorToast(page);
@@ -341,17 +411,13 @@ async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageS
 }
 
 async function runLoggedStep(label, debugDir, task, page = null) {
-  const dismissedOverlay = page ? await dismissInterferingOverlays(page) : {attempted: false};
-  if (dismissedOverlay?.nativeDialog?.handled || dismissedOverlay?.pageOverlay?.clicked) await sleep(400);
-  const dismissedServerError = page ? await dismissOpenRouterServerErrorToast(page) : {attempted: false};
-  if (dismissedServerError?.clicked) await sleep(250);
-  writeStepDiagnostic(debugDir, label, 'start', {dismissedOverlay, dismissedServerError, page: await pageStepState(page)});
+  const recoveredUi = page ? await recoverInterferingUi(page) : {attempted: false};
+  writeStepDiagnostic(debugDir, label, 'start', {recoveredUi, page: await pageStepState(page)});
   try {
     const result = await task();
-    const dismissedOverlayAfter = page ? await dismissInterferingOverlays(page) : {attempted: false};
-    if (dismissedOverlayAfter?.nativeDialog?.handled || dismissedOverlayAfter?.pageOverlay?.clicked) await sleep(400);
+    const recoveredUiAfter = page ? await recoverInterferingUi(page) : {attempted: false};
     const pageState = await pageStepState(page);
-    writeStepDiagnostic(debugDir, label, 'success', {result, dismissedOverlayAfter, page: pageState});
+    writeStepDiagnostic(debugDir, label, 'success', {result, recoveredUiAfter, page: pageState});
     await dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState);
     return result;
   } catch (error) {
@@ -1951,15 +2017,7 @@ async function declineStripeLinkPrompts(debugPort) {
 async function dismissSaveCardOverlays(page, debugPort = '') {
   const stripePrompts = debugPort ? await declineStripeLinkPrompts(debugPort) : [];
 
-  // Chrome/SunBrowser can show a browser-level "Save card?" bubble after Stripe
-  // saves the payment method. It is not part of the page DOM, but Escape normally
-  // dismisses it and prevents it from intercepting the Auto Top-Up Save click.
-  await page.send('Page.bringToFront').catch(() => {});
-  for (let i = 0; i < 2; i += 1) {
-    await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).catch(() => {});
-    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).catch(() => {});
-    await sleep(250);
-  }
+  const browserBubble = await dismissBrowserChromeBubbles(page);
 
   const pageState = await evaluate(page, `(() => {
     const text = document.body.innerText || '';
@@ -1978,7 +2036,28 @@ async function dismissSaveCardOverlays(page, debugPort = '') {
     };
   })()`).catch((error) => ({error: error.message}));
 
-  return {stripePrompts, pageState};
+  return {stripePrompts, browserBubble, pageState};
+}
+
+async function dismissBrowserChromeBubbles(page) {
+  if (!page) return {attempted: false};
+  await page.send('Page.bringToFront').catch(() => {});
+  const escapes = [];
+  for (let i = 0; i < 4; i += 1) {
+    const down = await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).then(() => true).catch(() => false);
+    const up = await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).then(() => true).catch(() => false);
+    escapes.push({down, up});
+    await sleep(180);
+  }
+  const clickAway = await evaluate(page, `(() => ({
+    x: Math.round(window.innerWidth * 0.42),
+    y: Math.round(Math.max(120, window.innerHeight * 0.18)),
+  }))()`).catch(() => ({x: 500, y: 140}));
+  await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: clickAway.x, y: clickAway.y}).catch(() => {});
+  await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: clickAway.x, y: clickAway.y, button: 'left', clickCount: 1}).catch(() => {});
+  await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: clickAway.x, y: clickAway.y, button: 'left', clickCount: 1}).catch(() => {});
+  await sleep(300);
+  return {attempted: true, escapes, clickAway};
 }
 
 async function waitUntilSaveModalCloses(page) {
@@ -3391,6 +3470,7 @@ async function waitForAutoTopupOverview(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
 async function findAndClickAutoTopupAction(page, action) {
   let result = null;
   for (let attempt = 0; attempt < 10; attempt += 1) {
+    await dismissBrowserChromeBubbles(page).catch(() => null);
     result = await evaluate(page, `(() => {
       const action = ${JSON.stringify(action)};
       const visible = (node) => {
@@ -3506,9 +3586,67 @@ async function waitForAutoTopupForm(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
       };
     })()`);
     if (last.ready) return last;
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`Auto top-up form not found: ${last?.tail || ''}`);
+}
+
+async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || '').trim().replace(/\\s+/g, ' ');
+      const readSwitch = (node) => node ? ({
+        found: true,
+        wasEnabled: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        selector: node.id === 'auto-buy' ? '#auto-buy' : '',
+        rect: (() => {
+          const rect = node.getBoundingClientRect();
+          return {x:rect.x, y:rect.y, width:rect.width, height:rect.height};
+        })(),
+      }) : {found:false};
+      const dialog = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"],form,section,article,div')]
+        .filter((node) => visible(node) && /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up|Enable\\s+auto\\s+top\\s+up/i.test(textOf(node)))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          const abody = a === document.body ? 1 : 0;
+          const bbody = b === document.body ? 1 : 0;
+          return abody - bbody || (ar.width * ar.height) - (br.width * br.height);
+        })[0] || null;
+      const scope = dialog || document;
+      const autoBuy = scope.querySelector?.('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+      const text = dialog ? textOf(dialog) : (document.body.innerText || '');
+      const inputs = [...document.querySelectorAll('input')]
+        .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
+        .map((input) => ({
+          type: input.type || '',
+          name: input.name || '',
+          id: input.id || '',
+          placeholder: input.placeholder || '',
+          value: input.value || '',
+        }));
+      const textHasAutoAmounts = /When credits are below/i.test(text) && /Purchase this amount/i.test(text);
+      const hasSaveAction = [...document.querySelectorAll('button,a,[role="button"]')]
+        .some((node) => visible(node) && /^(Save|Update|Enable Auto Top[- ]?Up|Apply)$/i.test(textOf(node)));
+      return {
+        found: Boolean(dialog || visible(autoBuy)),
+        formReady: textHasAutoAmounts && hasSaveAction && inputs.length >= 2,
+        editorSwitch: readSwitch(autoBuy),
+        tail: (document.body.innerText || '').slice(-1800),
+      };
+    })()`);
+    if (last.formReady || last.editorSwitch?.found) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Auto top-up editor shell not found: ${last?.tail || ''}`);
 }
 
 async function getAutoTopupEditorSwitchState(page) {
@@ -3524,6 +3662,18 @@ async function getAutoTopupEditorSwitchState(page) {
       node.closest?.('label')?.innerText,
       node.parentElement?.innerText,
     ].filter(Boolean).join(' ');
+    const direct = document.querySelector('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    if (direct && visible(direct)) {
+      const rect = direct.getBoundingClientRect();
+      return {
+        found: true,
+        wasEnabled: direct.getAttribute('aria-checked') === 'true' || direct.getAttribute('data-state') === 'checked' || direct.checked === true,
+        selector: direct.id === 'auto-buy' ? '#auto-buy' : '',
+        method: 'auto-buy-switch',
+        rect: {x:rect.x, y:rect.y, width:rect.width, height:rect.height},
+        tail: (document.body.innerText || '').slice(-1800),
+      };
+    }
     const controls = [...document.querySelectorAll('[role="switch"],button[aria-checked],button[data-state],input[type="checkbox"]')]
       .map((node) => ({
         node,
@@ -3556,15 +3706,21 @@ async function openAutoTopupEditor(page, state) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await findAndClickAutoTopupAction(page, action);
     try {
-      const form = await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
-      return {opened: true, action, formReady: true, form};
+      const shell = await waitForAutoTopupEditorShell(page, 15000);
+      if (shell.formReady) {
+        const form = await waitForAutoTopupForm(page, 5000);
+        return {opened: true, action, formReady: true, form, shell};
+      }
+      if (shell.editorSwitch?.found) {
+        return {opened: true, action, formReady: false, editorSwitch: shell.editorSwitch, shell};
+      }
     } catch (error) {
       lastError = error;
       const editorSwitch = await getAutoTopupEditorSwitchState(page).catch(() => null);
       if (editorSwitch?.found) {
         return {opened: true, action, formReady: false, editorSwitch};
       }
-      await sleep(500);
+      await sleep(DEFAULT_DOM_POLL_MS);
     }
   }
   throw new Error(`Auto top-up ${action} did not open the settings form: ${lastError?.message || 'unknown error'}`);
@@ -3758,6 +3914,21 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
+    const direct = document.querySelector('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    if (direct && visible(direct)) {
+      const rect = direct.getBoundingClientRect();
+      return {
+        found:true,
+        wasEnabled: direct.getAttribute('aria-checked') === 'true' || direct.getAttribute('data-state') === 'checked' || direct.checked === true,
+        method:'auto-buy-switch',
+        inputCount:[...document.querySelectorAll('input')].filter((input) => {
+          const item = input.getBoundingClientRect();
+          return item.width > 0 && item.height > 0 && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || '');
+        }).length,
+        rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height},
+        score:5000,
+      };
+    }
     const textOf = (node) => (node.innerText || node.textContent || '').trim();
     const labelText = (node) => [
       node.getAttribute?.('aria-label'),
@@ -3846,6 +4017,20 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
     if (state.found && state.wasEnabled === desiredEnabled) {
       return {...result, verified: state};
     }
+    if (i === 3 && result.method === 'auto-buy-switch') {
+      await evaluate(page, `(() => {
+        const target = document.querySelector('button#auto-buy[role="switch"],#auto-buy');
+        if (!target) return false;
+        target.scrollIntoView?.({block:'center', inline:'center'});
+        const PointerLikeEvent = window.PointerEvent || MouseEvent;
+        target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+        target.click?.();
+        target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+        return true;
+      })()`).catch(() => false);
+    }
   }
   throw new Error(`Auto top-up switch did not reach ${desiredEnabled ? 'on' : 'off'}: ${JSON.stringify(result)}`);
 }
@@ -3928,12 +4113,14 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   if (state.enabled && currentThreshold === requestedThreshold && currentAmount === requestedAmount) {
     return {configured: true, changed: false, requested, navigation, dismissedOverlays, state};
   }
-  await openAutoTopupEditor(page, state);
-  await toggleAutoTopupIfNeeded(page);
+  const dismissedBeforeEditor = await dismissSaveCardOverlays(page, debugPort);
+  const opened = await openAutoTopupEditor(page, state);
+  const toggled = await toggleAutoTopupIfNeeded(page);
+  const formAfterToggle = await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
   const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount);
   const saved = fields.unchanged ? {clicked: false, skipped: true, reason: 'values_already_set'} : await saveAutoTopup(page);
   state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
-  return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, fields, saved, state};
+  return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, state};
 }
 
 async function waitForAccountState(page, options = {}) {

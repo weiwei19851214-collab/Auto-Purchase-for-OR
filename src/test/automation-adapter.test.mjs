@@ -235,6 +235,19 @@ test('balance target purchase amount rounds up to the next whole dollar', () => 
   assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);
 });
 
+test('balance target purchase can charge at-or-above threshold amount', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const atOrAboveAmount = normalizeMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
+  assert.match(script, /branch === 'below_threshold'[\s\S]*: atOrAboveAmount/);
+});
+
+test('slow payment method surfaces get extended waits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000/);
+  assert.match(script, /const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000/);
+  assert.match(script, /Purchase modal is not ready after \$\{timeoutMs\}ms/);
+});
+
 test('browser diagnostics include non-fatal network failures', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /installNetworkDiagnostics/);

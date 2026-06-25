@@ -16,8 +16,9 @@ const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
 const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 15000;
 const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
-const DEFAULT_CREDITS_ENTRY_WAIT_MS = 45000;
-const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 45000;
+const DEFAULT_CREDITS_ENTRY_WAIT_MS = 60000;
+const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
+const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000;
 const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000;
 const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 45000;
 const DEFAULT_NAVIGATION_RETRIES = 3;
@@ -1142,9 +1143,10 @@ async function ensureOpenRouterPage(input) {
   return pageTarget.webSocketDebuggerUrl;
 }
 
-async function waitForPaymentTarget(debugPort) {
+async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
   let lastStripeTargets = [];
-  for (let i = 0; i < 20; i += 1) {
+  while (Date.now() < deadline) {
     const targets = getTargets(debugPort);
     lastStripeTargets = targets
       .filter((item) => item.type === 'iframe' && /stripe\.com/.test(item.url || ''))
@@ -1158,7 +1160,7 @@ async function waitForPaymentTarget(debugPort) {
     if (target) return target.webSocketDebuggerUrl;
     await sleep(500);
   }
-  throw new Error(`Stripe payment iframe target not found; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}`);
+  throw new Error(`Stripe payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}`);
 }
 
 async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
@@ -2349,7 +2351,7 @@ async function ensurePurchaseInvoiceChecked(page) {
   return {initial: result, state};
 }
 
-async function preparePurchase(page, purchase) {
+async function preparePurchase(page, purchase, timeoutMs = 30000) {
   const amount = normalizeMoneyValue(purchase.amount);
   if (!amount) throw new Error('Purchase amount is required');
   if (purchase.debugPort) {
@@ -2361,7 +2363,8 @@ async function preparePurchase(page, purchase) {
 
   let state = null;
   const expectedAmount = normalizeMoneyForCompare(amount);
-  for (let i = 0; i < 20; i += 1) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     state = await getPurchaseModalState(page);
     if (state.sendInvoicesText && state.sendInvoicesSwitch?.ambiguous) {
       throw new Error(`Send me invoices switch is ambiguous; refusing purchase: ${JSON.stringify(state.sendInvoicesSwitch)}`);
@@ -2380,7 +2383,7 @@ async function preparePurchase(page, purchase) {
     }
     await sleep(500);
   }
-  throw new Error(`Purchase modal is not ready: ${state?.tail || ''}`);
+  throw new Error(`Purchase modal is not ready after ${timeoutMs}ms: ${state?.tail || ''}`);
 }
 
 async function clickPurchaseButton(page) {
@@ -3034,7 +3037,7 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
   throw new Error(`Payment method entry not found; tail=${initial.tail}`);
 }
 
-async function waitForCardFormReady(page, debugPort, timeoutMs = 25000) {
+async function waitForCardFormReady(page, debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   let lastTargetError = '';

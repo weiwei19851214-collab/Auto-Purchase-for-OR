@@ -50,10 +50,10 @@ try {
     /id=["']defaultAmount["'][^>]*value=["']5["']/.test(html)
       && /id=["']defaultBalanceThreshold["'][^>]*value=["']145["']/.test(html)
       && /id=["']defaultAmountBelow["'][^>]*value=["']150["']/.test(html)
-      && /id=["']defaultAmountAtOrAbove["'][^>]*value=["']10["']/.test(html)
+      && /id=["']defaultAmountAtOrAbove["'][^>]*value=["']20["']/.test(html)
       && /id=["']defaultAutoTopupThreshold["'][^>]*value=["']100["']/.test(html)
       && /id=["']defaultAutoTopupAmount["'][^>]*value=["']150["']/.test(html),
-    'fixed=5 balance=145 below=150 at_or_above=10 auto=100/150',
+    'fixed=5 balance=145 below=150 at_or_above=20 auto=100/150',
   );
   add(
     'OPOM writeback default checked in UI',

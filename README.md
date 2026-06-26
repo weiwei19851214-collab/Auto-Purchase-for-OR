@@ -122,7 +122,7 @@ canonical CSV 中。
 - 默认 billing address 字段
 
 页面默认余额规则为：余额低于 `145` 时补到 `150`，余额大于等于 `145` 时充值
-`10`。其中 `amount_below_threshold` 在页面语义中表示低余额分支的目标余额，
+`20`。其中 `amount_below_threshold` 在页面语义中表示低余额分支的目标余额，
 `amount_at_or_above_threshold` 表示高余额分支的固定充值金额。
 
 可以粘贴 CSV 形式的逐账号 billing address 覆盖值：

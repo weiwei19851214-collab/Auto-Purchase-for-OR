@@ -295,6 +295,57 @@ async function commandRefreshCreditsPage(page) {
   return {refreshed: true, method: 'command_r', ready};
 }
 
+async function detectNewAccountOverlay(page) {
+  if (!page) return {found: false};
+  return evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim().replace(/\\s+/g, ' ');
+    const newAccountPattern = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says/i;
+    const flowPattern = /Purchase Credits|Add a Payment Method|Save payment method|Add a Billing Address|Card number|Expiration date|CVC|Payment Issue|3D Secure|hCaptcha|captcha|passkey/i;
+    const dialog = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-floating-ui-portal] [role="dialog"]')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text:textOf(node)}))
+      .find((item) => newAccountPattern.test(item.text) && !flowPattern.test(item.text));
+    return dialog
+      ? {found:true, text:dialog.text.slice(0, 240), method:'refresh_new_account_overlay'}
+      : {found:false};
+  })()`).catch((error) => ({found: false, error: error.message}));
+}
+
+async function recoverNewAccountBlockerIfPresent(page, reason = 'new_account_blocker') {
+  if (!page) return {recovered: false};
+  const nativeDialog = await acceptJavascriptDialogIfAny(page, 150).catch(() => ({handled: false}));
+  if (nativeDialog.handled) {
+    await sleep(250);
+    // 新号首次点击支付入口会弹验证邮箱提示，强刷可清掉一次性弹层并回到 Credits 主流程。
+    const refreshed = await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}));
+    return {
+      recovered: true,
+      reason: `${reason}:native_dialog`,
+      nativeDialog,
+      pageOverlay: {found: false},
+      refreshed,
+    };
+  }
+  const pageOverlay = await detectNewAccountOverlay(page);
+  if (pageOverlay.found) {
+    const refreshed = await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}));
+    return {
+      recovered: true,
+      reason: `${reason}:page_overlay`,
+      nativeDialog,
+      pageOverlay,
+      refreshed,
+    };
+  }
+  return {recovered: false, nativeDialog, pageOverlay};
+}
+
 async function dismissInterferingOverlays(page) {
   if (!page) return {attempted: false};
   const nativeDialog = await acceptJavascriptDialogIfAny(page, 700).catch(() => ({handled: false}));
@@ -371,6 +422,22 @@ async function dismissInterferingOverlays(page) {
 
 async function recoverInterferingUi(page) {
   if (!page) return {attempted: false};
+  const newAccountBlocker = await recoverNewAccountBlockerIfPresent(page, 'step_boundary');
+  if (newAccountBlocker.recovered) {
+    return {
+      attempted: true,
+      refreshedOnly: true,
+      reason: newAccountBlocker.reason,
+      dismissedOverlay: {
+        attempted: true,
+        nativeDialog: newAccountBlocker.nativeDialog,
+        pageOverlay: newAccountBlocker.pageOverlay,
+      },
+      dismissedServerError: {attempted: false},
+      paymentSurface: false,
+      refreshed: newAccountBlocker.refreshed,
+    };
+  }
   const dismissedOverlay = await dismissInterferingOverlays(page);
   if (dismissedOverlay?.nativeDialog?.handled || dismissedOverlay?.pageOverlay?.clicked) await sleep(400);
   const dismissedServerError = await dismissOpenRouterServerErrorToast(page);
@@ -1616,38 +1683,30 @@ async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '
   })()`);
 }
 
+function isBillingAddressFormOpen(state) {
+  const tail = state?.tail || '';
+  // OpenRouter 新号有时会直接弹出地址表单，此时入口按钮已经不存在，必须继续填地址。
+  return !!state?.hasAddressForm
+    || /Add a Billing Address[\s\S]{0,1000}(Full name|Address line 1|Complete address details to continue|A billing address is required)/i.test(tail)
+    || /A billing address is required to verify your identity/i.test(tail);
+}
+
 async function openBillingAddressFormIfNeeded(page) {
-  const entryDeadline = Date.now() + DEFAULT_DOM_WAIT_MS;
-  let before = null;
-  while (Date.now() < entryDeadline) {
-    before = await getPaymentEntryState(page);
-    if (before.hasSavePaymentMethod || before.hasCardFormText || before.hasAddressForm) {
-      return {opened: false, state: before};
-    }
-    if (before.hasAddBillingAddress || /Complete address details to continue/i.test(before.tail)) {
-      break;
-    }
-    await sleep(SLOW_DOM_POLL_MS);
+  const before = await getPaymentEntryState(page);
+  if (before.hasSavePaymentMethod || before.hasCardFormText || isBillingAddressFormOpen(before)) {
+    return {opened: false, alreadyOpen: isBillingAddressFormOpen(before), state: before};
   }
-  if (!before?.hasAddBillingAddress && !/Complete address details to continue/i.test(before?.tail || '')) {
-    throw new Error(`Add a Billing Address entry not ready after ${DEFAULT_DOM_WAIT_MS}ms; tail=${before?.tail || ''}`);
+  if (!before.hasAddBillingAddress && !/Complete address details to continue/i.test(before.tail)) {
+    return {opened: false, state: before};
   }
 
-  const clicked = await waitForClickableText(page, '^Add a Billing Address$|^Add Billing Address$', DEFAULT_DOM_WAIT_MS, {pollMs: DEFAULT_DOM_POLL_MS});
-  const deadline = Date.now() + DEFAULT_DOM_WAIT_MS;
-  let state = null;
-  while (Date.now() < deadline) {
-    state = await getPaymentEntryState(page);
-    if (state.hasAddressForm || state.hasCardFormText || state.hasSavePaymentMethod) {
-      return {
-        opened: clicked.clicked,
-        clicked,
-        state,
-      };
-    }
-    await sleep(SLOW_DOM_POLL_MS);
-  }
-  throw new Error(`Add a Billing Address form not ready after ${DEFAULT_DOM_WAIT_MS}ms; tail=${state?.tail || ''}`);
+  const clicked = await clickByText(page, '^Add a Billing Address$|^Add Billing Address$', {required: false});
+  await sleep(clicked.clicked ? 1500 : 500);
+  return {
+    opened: clicked.clicked,
+    clicked,
+    state: await getPaymentEntryState(page),
+  };
 }
 
 async function fillStripeBillingAddress(debugPort, billing) {
@@ -3234,6 +3293,13 @@ async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, tim
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
+    const blockerRecovery = await recoverNewAccountBlockerIfPresent(page, 'payment_entry_wait');
+    if (blockerRecovery.recovered) {
+      lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+      if (isPaymentEntryStateReady(lastState, expectedLast4)) {
+        return {...lastState, blockerRecovery};
+      }
+    }
     lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
     if (isPaymentEntryStateReady(lastState, expectedLast4)) {
       return lastState;
@@ -3251,7 +3317,19 @@ async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, tim
 async function waitForPaymentMethodSurfaceAfterClick(page, expectedLast4, expectedExpiry, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
+  let reClickCount = 0;
   while (Date.now() < deadline) {
+    const blockerRecovery = await recoverNewAccountBlockerIfPresent(page, 'payment_surface_wait');
+    if (blockerRecovery.recovered) {
+      state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+      if ((state.canAddPaymentMethod || state.hasAddPaymentMethod) && !state.hasCardFormText && !state.hasSavePaymentMethod && !state.hasAddBillingAddress && !state.hasAddressForm && reClickCount < 2) {
+        // 强刷回 Credits 主页面后，需要重新点击入口，否则会一直等一个已经被刷新掉的弹窗。
+        const clicked = await clickAddPaymentMethod(page, {required: false});
+        reClickCount += 1;
+        await sleep(PAGE_SETTLE_MS);
+        state = {...state, blockerRecovery, reClickedAfterRecovery: clicked};
+      }
+    }
     state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
     if (
       state.hasAddBillingAddress

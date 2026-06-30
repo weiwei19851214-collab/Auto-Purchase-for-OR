@@ -31,7 +31,7 @@ AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Aut
 - 在 no-purchase 和 Live Run 之间切换会使之前的 preflight 确认失效；下一次执行会重新运行 preflight。
 - CVV、cookie、session、密码、API key 和 raw browser storage 不得提交，也不得出现在日志或结果中。
 - `data/` 下的运行时文件默认忽略，只保留 `.gitkeep` 占位文件。
-- OPOM writeback 需要 `OPOM_BASE_URL` 和 `OPOM_RECHARGE_TOKEN`。
+- OPOM writeback 需要 `OPOM_BASE_URL` 和 `RECHARGE_API_TOKEN`（兼容旧 `OPOM_RECHARGE_TOKEN`）。
 - AdsPower 状态写回默认关闭，因为用户已 waived 这个授权门；结果 CSV 仍会记录 waived 状态。之后只有在明确配置 mode/group 后才启用写回。
 
 ## 快速开始
@@ -93,13 +93,16 @@ opom_account_id,login_email,ads_power_user_id,ads_power_serial_number,opom_healt
 
 ```bash
 export OPOM_BASE_URL="https://opom.example.internal"
-export OPOM_RECHARGE_TOKEN="..."
+export RECHARGE_API_TOKEN="..."
+# 可选：只用于绑卡/充值结果写回双写；读队列和账号解析仍只读主 OPOM。
+export OPOM_SECONDARY_BASE_URL="https://opom-backup.example.internal"
+export OPOM_SECONDARY_RECHARGE_TOKEN="..." # 不填时默认复用主 token
 ```
 
 本地控制台的 `Load OPOM group` 按钮会调用 OPOM
 `/api/v1/recharge/accounts`，使用 `group=recharge`，将响应转换为 canonical
 CSV，并复用现有的自动 preflight/live 确认流程。Live job 只有在 job options
-包含 `opomWriteback` 时才写 OPOM；普通 CSV job 仍只在本地执行。
+包含 `opomWriteback` 时才写 OPOM；普通 CSV job 仍只在本地执行。主 OPOM 写回失败会保持当前行未完成，备用 OPOM 写回失败只记录 `secondary writeback failed` 日志，不影响主流程结果。
 
 对于带有 `opom_account_id` 的行，confirmed purchase 模式要求
 `opomWriteback=true`，preflight 才会把该行标记为 ready。No-purchase 模式仍可用于本地验证，但真实 OPOM 来源的充值在没有 OPOM card/result writeback

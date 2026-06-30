@@ -1121,6 +1121,36 @@ test('production preflight has a read-only local development mode', () => {
     assert.ok(result.checks.some((check) => check.label === 'AdsPower native tag API' && /not documented/.test(check.status)));
 });
 
+test('runnerArgs accepts RECHARGE_API_TOKEN and secondary OPOM writeback config', () => {
+  const original = {
+    OPOM_BASE_URL: process.env.OPOM_BASE_URL,
+    OPOM_API_BASE: process.env.OPOM_API_BASE,
+    OPOM_RECHARGE_TOKEN: process.env.OPOM_RECHARGE_TOKEN,
+    RECHARGE_API_TOKEN: process.env.RECHARGE_API_TOKEN,
+    OPOM_SECONDARY_BASE_URL: process.env.OPOM_SECONDARY_BASE_URL,
+    OPOM_SECONDARY_RECHARGE_TOKEN: process.env.OPOM_SECONDARY_RECHARGE_TOKEN,
+  };
+  try {
+    process.env.OPOM_BASE_URL = 'http://opom.primary';
+    process.env.OPOM_API_BASE = '';
+    process.env.OPOM_RECHARGE_TOKEN = 'old-token';
+    process.env.RECHARGE_API_TOKEN = 'new-token';
+    process.env.OPOM_SECONDARY_BASE_URL = 'http://opom.secondary';
+    process.env.OPOM_SECONDARY_RECHARGE_TOKEN = 'secondary-token';
+
+    const args = runnerArgs({opomWriteback: true});
+    assert.equal(args.opomBaseUrl, 'http://opom.primary');
+    assert.equal(args.opomRechargeToken, 'new-token');
+    assert.equal(args.opomSecondaryBaseUrl, 'http://opom.secondary');
+    assert.equal(args.opomSecondaryRechargeToken, 'secondary-token');
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('readiness audit records disabled AdsPower writeback as user-waived', () => {
   const output = execFileSync('node', [
     'scripts/readiness-audit.mjs',

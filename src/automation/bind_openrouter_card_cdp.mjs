@@ -359,6 +359,19 @@ async function dismissInterferingOverlays(page) {
     const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
       .trim()
       .replace(/\\s+/g, ' ');
+    // OpenRouter 维护提醒会影响后续余额回读，只按已确认的 portal id 和关闭按钮 class 处理。
+    const maintenanceBanner = document.querySelector('#maintenance-banner-portal');
+    if (maintenanceBanner && visible(maintenanceBanner)) {
+      const closeControl = maintenanceBanner.getElementsByClassName('ml-2 mt-0.5')[0];
+      const target = closeControl?.closest?.('button,[role="button"]') || closeControl;
+      if (target && visible(target)) {
+        target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+        target.click?.();
+        target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+        return {attempted:true, found:true, clicked:true, kind:'maintenance_banner'};
+      }
+    }
     const flowBlocker = /Purchase Credits|Add a Payment Method|Add Payment Method|Save payment method|Add a Billing Address|Complete address details|Update Address|Card number|Expiration date|CVC|Postal code|Payment Issue|3D Secure|hCaptcha|captcha|security code|bank verification|passkey/i;
     const allowedNonFlowOverlay = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says|\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
     const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],div,section')]
@@ -2843,6 +2856,7 @@ async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutM
         await navigatePage(page, OPENROUTER_CREDITS_URL);
         lastRefreshAt = Date.now();
         await sleep(PAGE_SETTLE_MS);
+        await dismissInterferingOverlays(page).catch(() => null);
       }
       const issue = await detectPaymentIssue(page).catch(() => null);
       if (issue?.found) {

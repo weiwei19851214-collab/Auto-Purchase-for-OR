@@ -49,8 +49,16 @@
               <input id="configOpomBaseUrl" type="url" placeholder="http://20.2.209.2:3000" />
             </label>
             <label class="field">
-              <span>OPOM_RECHARGE_TOKEN</span>
-              <input id="configOpomRechargeToken" type="password" autocomplete="off" placeholder="OPOM machine token" />
+              <span>RECHARGE_API_TOKEN</span>
+              <input id="configOpomRechargeToken" type="password" autocomplete="off" placeholder="兼容旧 OPOM_RECHARGE_TOKEN" />
+            </label>
+            <label class="field">
+              <span>OPOM_SECONDARY_BASE_URL</span>
+              <input id="configOpomSecondaryBaseUrl" type="url" placeholder="备用 OPOM 写回地址，可选" />
+            </label>
+            <label class="field">
+              <span>OPOM_SECONDARY_RECHARGE_TOKEN</span>
+              <input id="configOpomSecondaryRechargeToken" type="password" autocomplete="off" placeholder="可选，默认复用主 token" />
             </label>
             <label class="field">
               <span>OPOM_REQUEST_TIMEOUT_MS</span>

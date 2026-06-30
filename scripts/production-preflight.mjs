@@ -30,6 +30,11 @@ function requiredEnv(name, enabled = true) {
   add(`env ${name}`, !enabled || present, enabled ? (present ? 'present' : 'missing') : 'not_required');
 }
 
+function requiredAnyEnv(names, enabled = true) {
+  const presentName = names.find((name) => process.env[name]);
+  add(`env ${names.join(' or ')}`, !enabled || Boolean(presentName), enabled ? (presentName || 'missing') : 'not_required');
+}
+
 const runner = runnerArgs();
 const ejh = ejhDefaults();
 const requireOpom = args.requireOpom !== false;
@@ -44,14 +49,14 @@ for (const check of local.checks) {
 }
 
 requiredEnv('OPOM_BASE_URL', requireOpom && !process.env.OPOM_API_BASE);
-requiredEnv('OPOM_RECHARGE_TOKEN', requireOpom);
+requiredAnyEnv(['RECHARGE_API_TOKEN', 'OPOM_RECHARGE_TOKEN'], requireOpom);
 if (process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE) {
   add('OPOM base url shape', isHttpUrl(process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE), 'configured');
 }
 if (args.withOpomRead) {
   const opomRead = await checkOpomRead({
     baseUrl: process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    token: process.env.OPOM_RECHARGE_TOKEN || '',
+    token: process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
     group: args.opomGroup,
   });
   add('OPOM recharge queue read', opomRead.ok, opomRead.status, opomRead.extra);

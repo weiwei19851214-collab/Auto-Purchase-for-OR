@@ -8,10 +8,19 @@ const DEFAULT_OPOM_WRITEBACK_RETRIES = 3;
 const DEFAULT_OPOM_RETRY_DELAY_MS = 1500;
 
 export function opomDefaults(env = process.env) {
+  const primaryRechargeToken = rechargeTokenFromEnv(env);
   return {
     opomBaseUrl: env.OPOM_BASE_URL || env.OPOM_API_BASE || '',
-    opomRechargeToken: env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: primaryRechargeToken,
+    opomSecondaryBaseUrl: env.OPOM_SECONDARY_BASE_URL || env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: env.OPOM_SECONDARY_RECHARGE_TOKEN
+      || env.OPOM_WRITEBACK_SECONDARY_TOKEN
+      || primaryRechargeToken,
   };
+}
+
+function rechargeTokenFromEnv(env = process.env) {
+  return env.RECHARGE_API_TOKEN || env.OPOM_RECHARGE_TOKEN || '';
 }
 
 function normalizeBaseUrl(value) {
@@ -30,7 +39,106 @@ function authHeaders(args) {
 
 function assertConfigured(args) {
   if (!normalizeBaseUrl(args.opomBaseUrl)) throw new Error('OPOM_BASE_URL is not configured');
-  if (!args.opomRechargeToken) throw new Error('OPOM_RECHARGE_TOKEN is not configured');
+  if (!args.opomRechargeToken) throw new Error('OPOM_RECHARGE_TOKEN/RECHARGE_API_TOKEN is not configured');
+}
+
+function writebackTargets(args) {
+  const primaryBaseUrl = normalizeBaseUrl(args.opomBaseUrl);
+  const primaryRechargeToken = args.opomRechargeToken || rechargeTokenFromEnv();
+  const secondaryBaseUrl = normalizeBaseUrl(
+    args.opomSecondaryBaseUrl
+    || process.env.OPOM_SECONDARY_BASE_URL
+    || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL
+    || '',
+  );
+  const secondaryRechargeToken = args.opomSecondaryRechargeToken
+    || process.env.OPOM_SECONDARY_RECHARGE_TOKEN
+    || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN
+    || primaryRechargeToken;
+  const targets = [{
+    role: 'primary',
+    baseUrl: primaryBaseUrl,
+    rechargeToken: primaryRechargeToken,
+    required: true,
+  }];
+
+  // 备 OPOM 只参与写回，不参与拉取/解析；失败只能写日志，不能影响主流程完成。
+  if (secondaryBaseUrl && secondaryBaseUrl !== primaryBaseUrl) {
+    targets.push({
+      role: 'secondary',
+      baseUrl: secondaryBaseUrl,
+      rechargeToken: secondaryRechargeToken,
+      required: false,
+    });
+  }
+  return targets;
+}
+
+function argsForWritebackTarget(args, target) {
+  return {
+    ...args,
+    opomBaseUrl: target.baseUrl,
+    opomRechargeToken: target.rechargeToken,
+  };
+}
+
+async function requestWritebackTargets(args, path, options = {}) {
+  let primaryBody = {};
+  const secondaryFailures = [];
+  for (const target of writebackTargets(args)) {
+    try {
+      const body = await requestJson(argsForWritebackTarget(args, target), path, options);
+      if (target.role === 'primary') primaryBody = body;
+    } catch (error) {
+      if (target.required) throw error;
+      secondaryFailures.push(secondaryWritebackFailure(target, path, error));
+    }
+  }
+  return {body: primaryBody, secondaryFailures};
+}
+
+async function requestResultWritebackTargets(args, path, body) {
+  let primaryBody = {};
+  const secondaryFailures = [];
+  for (const target of writebackTargets(args)) {
+    try {
+      const result = await requestResultForTarget(argsForWritebackTarget(args, target), path, body);
+      if (target.role === 'primary') primaryBody = result;
+    } catch (error) {
+      if (target.required) throw error;
+      secondaryFailures.push(secondaryWritebackFailure(target, path, error));
+    }
+  }
+  return {body: primaryBody, secondaryFailures};
+}
+
+async function requestResultForTarget(args, path, body) {
+  try {
+    return await requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (!shouldRetryWithoutNegativeBalances(error, body)) throw error;
+    // 兼容旧 OPOM 余额字段不能为负的校验；重试只作用于当前 target，避免主备互相串状态。
+    return requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(omitNegativeBalances(body)),
+    });
+  }
+}
+
+function secondaryWritebackFailure(target, path, error) {
+  const message = redact(`secondary writeback failed: ${target.baseUrl}${path}: ${error?.message || 'unknown error'}`);
+  console.warn(message);
+  return {
+    role: target.role,
+    baseUrl: target.baseUrl,
+    path,
+    message,
+  };
 }
 
 async function readJsonResponse(res) {
@@ -147,6 +255,8 @@ export async function resolveRechargeAccounts(args, input = {}) {
       })),
       ...(input.group ? {group: input.group} : {}),
       ...(input.status ? {status: input.status} : {}),
+      includeAllStatus: input.includeAllStatus === true,
+      fallbackAll: input.fallbackAll === true,
     }),
   });
   return {
@@ -198,12 +308,13 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
 
 export function cardExpiryIso(row) {
   const explicit = row.expires_at || row.validityDate || row.validity_date || '';
-  if (explicit) return new Date(explicit).toISOString();
+  if (explicit) return String(explicit).trim();
   const month = Number(String(row.exp_month || '').replace(/\D/g, ''));
   let year = Number(String(row.exp_year || '').replace(/\D/g, ''));
   if (year > 0 && year < 100) year += 2000;
   if (!month || !year) return '';
-  return new Date(Date.UTC(year, month, 0, 0, 0, 0)).toISOString();
+  // 新 OPOM 文档支持 YYYY-MM；这里保留历史函数名，实际传月份精度，避免时区日期偏移。
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
 }
 
 export async function writeCompletedRow(args, row, details, context = {}) {
@@ -233,25 +344,32 @@ export async function writeCompletedRow(args, row, details, context = {}) {
     ...adsPowerPayload(row, details),
     binding: {
       boundAt: new Date().toISOString(),
-      source: 'recharge-runner',
+      source: 'recharge-api',
       notes: runId ? `${runId} row ${context.rowNumber || ''}`.trim() : 'recharge-runner',
     },
   };
+  const secondaryFailures = [];
   try {
-    await requestJson(args, `/api/v1/recharge/accounts/${encodeURIComponent(opomAccountId)}/card-binding`, {
+    const writeback = await requestWritebackTargets(args, `/api/v1/recharge/accounts/${encodeURIComponent(opomAccountId)}/card-binding`, {
       method: 'PUT',
       idempotent: true,
       body: JSON.stringify(bindingBody),
     });
+    secondaryFailures.push(...writeback.secondaryFailures);
   } catch (error) {
     throw writebackError(error, {cardStatus: 'failed', resultStatus: 'skipped'});
   }
   try {
-    await writeRowResult(args, row, details, {...context, status: 'completed'});
+    const resultWriteback = await writeRowResult(args, row, details, {...context, status: 'completed'});
+    secondaryFailures.push(...(resultWriteback.secondaryFailures || []));
   } catch (error) {
     throw writebackError(error, {cardStatus: 'written', resultStatus: 'failed'});
   }
-  return {cardStatus: 'written', resultStatus: 'written'};
+  return {
+    cardStatus: 'written',
+    resultStatus: 'written',
+    ...(secondaryFailures.length ? {secondaryFailures} : {}),
+  };
 }
 
 export async function writeRowResult(args, row, details, context = {}) {
@@ -285,21 +403,11 @@ export async function writeRowResult(args, row, details, context = {}) {
     occurredAt: new Date().toISOString(),
   };
   const path = `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`;
-  try {
-    await requestJson(args, path, {
-      method: 'POST',
-      idempotent: true,
-      body: JSON.stringify(body),
-    });
-  } catch (error) {
-    if (!shouldRetryWithoutNegativeBalances(error, body)) throw error;
-    await requestJson(args, path, {
-      method: 'POST',
-      idempotent: true,
-      body: JSON.stringify(omitNegativeBalances(body)),
-    });
-  }
-  return {resultStatus: 'written'};
+  const writeback = await requestResultWritebackTargets(args, path, body);
+  return {
+    resultStatus: 'written',
+    ...(writeback.secondaryFailures.length ? {secondaryFailures: writeback.secondaryFailures} : {}),
+  };
 }
 
 function shouldRetryWithoutNegativeBalances(error, body) {

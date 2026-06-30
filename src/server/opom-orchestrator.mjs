@@ -94,7 +94,9 @@ export async function readyToRechargePayload(payload = {}) {
   const args = {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: payload.opomRechargeToken || process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomSecondaryBaseUrl: payload.opomSecondaryBaseUrl || process.env.OPOM_SECONDARY_BASE_URL || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: payload.opomSecondaryRechargeToken || process.env.OPOM_SECONDARY_RECHARGE_TOKEN || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN || '',
     opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
     opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
     opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
@@ -238,7 +240,9 @@ function opomArgsFromPayload(payload = {}) {
   return {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: payload.opomRechargeToken || process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomSecondaryBaseUrl: payload.opomSecondaryBaseUrl || process.env.OPOM_SECONDARY_BASE_URL || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: payload.opomSecondaryRechargeToken || process.env.OPOM_SECONDARY_RECHARGE_TOKEN || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN || '',
     opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
     opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
     opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
@@ -268,8 +272,14 @@ function mergeBatchResolvedRow(row, result = {}) {
   };
 }
 
-async function resolveOpomAccountsBatch(args, rows, {group, status} = {}) {
-  const body = await opom.resolveRechargeAccounts(args, {rows, group, status});
+async function resolveOpomAccountsBatch(args, rows, {group, status, includeAllStatus = false, fallbackAll = false} = {}) {
+  const body = await opom.resolveRechargeAccounts(args, {
+    rows,
+    group,
+    status,
+    includeAllStatus,
+    fallbackAll,
+  });
   const resultByIndex = new Map();
   for (const [fallbackIndex, item] of body.results.entries()) {
     const index = Number.isInteger(item.index) ? item.index : fallbackIndex;
@@ -357,6 +367,8 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     return await resolveOpomAccountsBatch(args, rows, {
       group: payload.group || 'recharge',
       status: payload.status || 'needs_recharge',
+      includeAllStatus: payload.includeAllStatus === true,
+      fallbackAll: payload.fallbackAll === true,
     });
   } catch (error) {
     if (![404, 405].includes(Number(error?.httpStatus))) throw error;

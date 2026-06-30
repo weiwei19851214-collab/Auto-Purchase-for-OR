@@ -102,6 +102,8 @@ const els = {
   configAdspowerStartTimeoutMs: document.querySelector('#configAdspowerStartTimeoutMs'),
   configOpomBaseUrl: document.querySelector('#configOpomBaseUrl'),
   configOpomRechargeToken: document.querySelector('#configOpomRechargeToken'),
+  configOpomSecondaryBaseUrl: document.querySelector('#configOpomSecondaryBaseUrl'),
+  configOpomSecondaryRechargeToken: document.querySelector('#configOpomSecondaryRechargeToken'),
   configOpomRequestTimeoutMs: document.querySelector('#configOpomRequestTimeoutMs'),
   configOpomRequestRetries: document.querySelector('#configOpomRequestRetries'),
   configOpomWritebackRetries: document.querySelector('#configOpomWritebackRetries'),
@@ -199,6 +201,8 @@ function runtimeConfigPayload() {
     adspowerStartTimeoutMs: els.configAdspowerStartTimeoutMs?.value.trim() || '',
     opomBaseUrl: els.configOpomBaseUrl?.value.trim() || '',
     opomRechargeToken: els.configOpomRechargeToken?.value.trim() || '',
+    opomSecondaryBaseUrl: els.configOpomSecondaryBaseUrl?.value.trim() || '',
+    opomSecondaryRechargeToken: els.configOpomSecondaryRechargeToken?.value.trim() || '',
     opomRequestTimeoutMs: els.configOpomRequestTimeoutMs?.value.trim() || '',
     opomRequestRetries: els.configOpomRequestRetries?.value.trim() || '',
     opomWritebackRetries: els.configOpomWritebackRetries?.value.trim() || '',
@@ -248,6 +252,8 @@ function loadRuntimeConfig() {
   setInputValue(els.configAdspowerStartTimeoutMs, config.adspowerStartTimeoutMs || '');
   setInputValue(els.configOpomBaseUrl, config.opomBaseUrl || 'http://20.2.209.2:3000');
   setInputValue(els.configOpomRechargeToken, config.opomRechargeToken || '');
+  setInputValue(els.configOpomSecondaryBaseUrl, config.opomSecondaryBaseUrl || '');
+  setInputValue(els.configOpomSecondaryRechargeToken, config.opomSecondaryRechargeToken || '');
   setInputValue(els.configOpomRequestTimeoutMs, config.opomRequestTimeoutMs || '');
   setInputValue(els.configOpomRequestRetries, config.opomRequestRetries || '');
   setInputValue(els.configOpomWritebackRetries, config.opomWritebackRetries || '');
@@ -441,7 +447,7 @@ function syncActionButtons() {
   const hasOpomConfig = opomConfigured();
   const hasCardsCsv = hasUploadedCardCsv();
   const hasCreateInputs = hasCreateCardInputs();
-  setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 OPOM_RECHARGE_TOKEN');
+  setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 RECHARGE_API_TOKEN');
   setButtonAvailability(els.adsPowerMatch, hasRows && hasAdsPowerConfig, hasRows
     ? '请先在本地配置中填写 AdsPower API 地址和 API key'
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');

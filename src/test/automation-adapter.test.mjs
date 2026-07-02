@@ -42,7 +42,7 @@ const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_b
 `;
 
 const BALANCE_RULE_WITH_AT_OR_ABOVE_CSV = `status,ID,username,balance_threshold,amount_below_threshold,amount_at_or_above_threshold
-,1415,user@example.com,145,150,10
+,1415,user@example.com,145,150,20
 `;
 
 const CARD_ONLY_CSV = `status,ID,username,card_number,exp_month,exp_year,cvv,postal_code
@@ -125,7 +125,7 @@ test('parsePlan validates execution scopes independently', async () => {
     scopeAutoTopup: false,
   });
   assert.equal(balanceRuleWithAtOrAbove.rows[0].status, 'ready');
-  assert.equal(balanceRuleWithAtOrAbove.rows[0].purchasePlan, 'balance_top_up_to_target');
+  assert.equal(balanceRuleWithAtOrAbove.rows[0].purchasePlan, 'balance_threshold_amounts');
 
   const card = await parsePlan(CARD_ONLY_CSV, {
     scopeBillingAddress: false,
@@ -146,17 +146,16 @@ test('parsePlan validates execution scopes independently', async () => {
   assert.equal(billing.rows[0].executionScope, 'billing_address');
 });
 
-test('purchasePlan supports target balance with at-or-above recharge amount', () => {
+test('purchasePlan supports fixed recharge amounts by balance threshold', () => {
   const plan = rechargePlan.purchasePlan({
     balance_threshold: '145',
     amount_below_threshold: '150',
-    amount_at_or_above_threshold: '10',
+    amount_at_or_above_threshold: '20',
   });
-  assert.equal(plan.mode, 'balance_top_up_to_target');
+  assert.equal(plan.mode, 'balance_threshold_amounts');
   assert.equal(plan.purchase.rule.threshold, '145');
-  assert.equal(plan.purchase.rule.targetBalance, '150');
   assert.equal(plan.purchase.rule.belowAmount, '150');
-  assert.equal(plan.purchase.rule.atOrAboveAmount, '10');
+  assert.equal(plan.purchase.rule.atOrAboveAmount, '20');
 });
 
 test('parsePlan rejects empty execution scope', async () => {
@@ -235,10 +234,10 @@ test('balance target purchase amount rounds up to the next whole dollar', () => 
   assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);
 });
 
-test('balance target purchase can charge at-or-above threshold amount', () => {
+test('balance threshold purchase uses fixed branch amounts', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /const atOrAboveAmount = normalizeMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
-  assert.match(script, /branch === 'below_threshold'[\s\S]*: atOrAboveAmount/);
+  assert.match(script, /const amount = branch === 'below_threshold' \? belowAmount : atOrAboveAmount/);
 });
 
 test('slow payment method surfaces get extended waits', () => {

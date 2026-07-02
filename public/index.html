@@ -239,7 +239,7 @@
 
               <div id="balanceRuleFields" class="rule-fields">
                 <div class="rule-explain">
-                  例如：余额低于 145 时补到 150；余额 -200 充值 350，余额 140 充值 10，余额大于等于 145 充值 20。
+                  例如：余额低于 145 时充值 150，余额大于等于 145 时充值 20。
                 </div>
                 <div class="form-grid three">
                   <label class="field">
@@ -247,7 +247,7 @@
                     <input id="defaultBalanceThreshold" type="number" min="0" step="0.01" value="145" />
                   </label>
                   <label class="field">
-                    <span>充值后目标余额</span>
+                    <span>余额低于阈值时充值</span>
                     <input id="defaultAmountBelow" type="number" min="0" step="0.01" value="150" />
                   </label>
                   <label class="field">

@@ -663,7 +663,7 @@ function purchaseRuleLabel(row) {
   if (row.balance_threshold || row.amount_below_threshold || row.amount_at_or_above_threshold) {
     const complete = row.balance_threshold && row.amount_below_threshold;
     if (complete && row.amount_at_or_above_threshold) {
-      return `余额低于 ${row.balance_threshold} 时补到 ${row.amount_below_threshold}，余额大于等于 ${row.balance_threshold} 时充值 ${row.amount_at_or_above_threshold}`;
+      return `余额低于 ${row.balance_threshold} 时充值 ${row.amount_below_threshold}，余额大于等于 ${row.balance_threshold} 时充值 ${row.amount_at_or_above_threshold}`;
     }
     return complete
       ? `余额低于 ${row.balance_threshold} 时补到 ${row.amount_below_threshold}，否则不处理`

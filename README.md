@@ -48,6 +48,22 @@ npm start
 http://127.0.0.1:4100
 ```
 
+## 打开 AdsPower 后的执行顺序
+
+当前浏览器自动化以 OpenRouter Credits 页面为中心，打开 AdsPower 环境并进入
+Credits 页后，按下面顺序处理单个账号：
+
+1. 读取余额：如果低于 `145`，充值 `150`；否则充值 `20`。
+2. 确认当前 OpenRouter 登录账号和任务行邮箱一致。
+3. 处理支付方式：老账号直接添加或替换新卡，新账号先补充 billing address。
+4. 在 Stripe 卡表单里填写卡号、有效期、CVC、邮编等信息。
+5. 点击 `Save payment method`，等待支付方式保存完成。
+6. 打开或确认 Purchase Credits，点击购买并处理确认弹框。
+7. 回到 Credits 页刷新读取余额，确认余额已经增加。
+8. 按任务配置确认 Auto Top-Up 是否开启、金额和阈值是否正确。
+9. 如果启用 OPOM 写回，先写回卡绑定，再写回充值结果。
+10. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
+
 ## CSV 模板
 
 使用 [openrouter-recharge-input-template.csv](./openrouter-recharge-input-template.csv)
@@ -124,8 +140,8 @@ canonical CSV 中。
 - `auto_topup_threshold` 和 `auto_topup_amount`
 - 默认 billing address 字段
 
-页面默认余额规则为：余额低于 `145` 时补到 `150`，余额大于等于 `145` 时充值
-`20`。其中 `amount_below_threshold` 在页面语义中表示低余额分支的目标余额，
+页面默认余额规则为：余额低于 `145` 时充值 `150`，余额大于等于 `145` 时充值
+`20`。其中 `amount_below_threshold` 在页面语义中表示低余额分支的固定充值金额，
 `amount_at_or_above_threshold` 表示高余额分支的固定充值金额。
 
 可以粘贴 CSV 形式的逐账号 billing address 覆盖值：

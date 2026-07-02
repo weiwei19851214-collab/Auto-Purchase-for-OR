@@ -144,20 +144,20 @@ export function purchasePlan(row) {
     };
   }
   if (allRule) {
-    const targetBalance = normalizeMoneyValue(belowRaw);
+    const belowAmount = normalizeMoneyValue(belowRaw);
     const atOrAboveAmount = normalizeMoneyValue(atOrAboveRaw);
     return {
       purchase: {
         confirmed: true,
         rule: {
           threshold: normalizeMoneyValue(thresholdRaw),
-          targetBalance,
-          belowAmount: targetBalance,
+          // 三字段余额规则表示两个固定充值金额：低于阈值充值 belowAmount，高于等于阈值充值 atOrAboveAmount。
+          belowAmount,
           atOrAboveAmount,
         },
       },
       missing: [],
-      mode: 'balance_top_up_to_target',
+      mode: 'balance_threshold_amounts',
     };
   }
   if (anyRule) {

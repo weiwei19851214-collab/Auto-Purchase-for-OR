@@ -2436,11 +2436,13 @@ async function resolvePurchasePlan(page, purchase) {
       throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
     }
     const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
+    // 业务规则：完整三字段余额规则使用固定充值金额，不能再按“补到目标余额”动态扣减。
     const amount = branch === 'below_threshold' ? belowAmount : atOrAboveAmount;
     return {
       ...purchase,
       amount,
       ruleDecision: {
+        mode: 'threshold_fixed_amounts',
         threshold: purchase.rule.threshold,
         belowAmount,
         atOrAboveAmount,

@@ -3081,6 +3081,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
             text: (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' '),
             title: node.getAttribute('title') || '',
             aria: node.getAttribute('aria-label') || '',
+            className: String(node.getAttribute('class') || ''),
             disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
             rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
           };
@@ -3103,6 +3104,12 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         };
       }
 
+      // OpenRouter 的保存卡删除按钮没有文案；末尾这几个 Tailwind 类稳定表达“小按钮在卡片右上角”。
+      const hasDeleteButtonClass = (item) => {
+        const classes = item.className.split(/\\s+/);
+        return ['h-6', 'w-6', 'absolute', 'right-2', 'top-2']
+          .every((name) => classes.includes(name));
+      };
       const trash = buttons
         .filter((item) => (
           item.index !== card.index
@@ -3116,7 +3123,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
           && item.rect.x >= card.rect.x + card.rect.width - 110
           && item.rect.x <= card.rect.x + card.rect.width + 20
         ))
-        .sort((a, b) => a.rect.y - b.rect.y)[0];
+        .sort((a, b) => Number(hasDeleteButtonClass(b)) - Number(hasDeleteButtonClass(a)) || a.rect.y - b.rect.y)[0];
 
       if (!trash) {
         const points = [

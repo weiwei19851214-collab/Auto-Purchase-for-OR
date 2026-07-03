@@ -238,6 +238,14 @@ test('balance threshold purchase uses fixed branch amounts', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /const atOrAboveAmount = normalizeMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
   assert.match(script, /const amount = branch === 'below_threshold' \? belowAmount : atOrAboveAmount/);
+  assert.ok(script.indexOf('if (belowAmount && atOrAboveAmount)') < script.indexOf('const targetBalance = normalizeMoneyForCompare(purchase.rule.targetBalance)'));
+});
+
+test('credit balance parser preserves negative balances', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.ok(script.includes('Remaining credits:\\\\s*\\\\$?\\\\s*([-+]?\\\\s*[0-9]'));
+  assert.ok(script.includes('fromCreditsBlock = beforeBuy.match(/\\\\$\\\\s*([-+]?\\\\s*[0-9]'));
+  assert.ok(script.includes("Number(raw.replace(/[\\\\s,]/g, ''))"));
 });
 
 test('slow payment method surfaces get extended waits', () => {

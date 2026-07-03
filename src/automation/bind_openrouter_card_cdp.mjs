@@ -2348,10 +2348,10 @@ async function getCurrentCreditBalance(page) {
     const ariaBalance = [...document.querySelectorAll('[aria-label]')]
       .map((node) => node.getAttribute('aria-label') || '')
       .find((label) => /Remaining credits:\\s*[-+]?\\d/i.test(label));
-    const ariaMatch = ariaBalance?.match(/Remaining credits:\\s*([-+]?[0-9][\\d,]*(?:\\.\\d+)?)/i) || null;
+    const ariaMatch = ariaBalance?.match(/Remaining credits:\\s*\\$?\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/i) || null;
     const normalized = text.replace(/\\s+/g, ' ');
     const beforeBuy = normalized.split(/\\b(?:Buy|Add)\\s+Credits\\b|\\bAuto\\s*Top[- ]?Up\\b/i)[0] || normalized;
-    const fromCreditsBlock = beforeBuy.match(/\\$\\s*([0-9][\\d,]*(?:\\.\\d+)?)/);
+    const fromCreditsBlock = beforeBuy.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -2367,16 +2367,16 @@ async function getCurrentCreditBalance(page) {
           fontSize: Number.parseFloat(style.fontSize || '0') || 0,
         };
       })
-      .filter((item) => /\\$\\s*[0-9]/.test(item.text) && !/Service\\s+fees|Total\\s+due|Sales\\s+Tax|VAT/i.test(item.text));
+      .filter((item) => /\\$\\s*[-+]?\\s*[0-9]/.test(item.text) && !/Service\\s+fees|Total\\s+due|Sales\\s+Tax|VAT/i.test(item.text));
     const elementCandidate = elements
       .map((item) => {
-        const match = item.text.match(/\\$\\s*([0-9][\\d,]*(?:\\.\\d+)?)/);
+        const match = item.text.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
         return match ? {...item, rawAmount: match[1]} : null;
       })
       .filter(Boolean)
       .sort((a, b) => b.fontSize - a.fontSize || a.rect.y - b.rect.y)[0] || null;
     const raw = ariaMatch?.[1] || fromCreditsBlock?.[1] || elementCandidate?.rawAmount || '';
-    const balance = raw ? Number(raw.replace(/,/g, '')) : null;
+    const balance = raw ? Number(raw.replace(/[\\s,]/g, '')) : null;
     return {
       balance: Number.isFinite(balance) ? balance : null,
       raw,
@@ -2396,6 +2396,36 @@ async function resolvePurchasePlan(page, purchase) {
   const balanceState = await getCurrentCreditBalance(page);
   if (purchase.rule?.enabled) {
     const threshold = normalizeMoneyForCompare(purchase.rule.threshold);
+    const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
+    const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
+    if (belowAmount && atOrAboveAmount) {
+      if (!Number.isFinite(threshold)) {
+        throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
+      }
+      const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
+      // 业务规则：完整三字段余额规则使用固定充值金额，不能再按“补到目标余额”动态扣减。
+      const amount = branch === 'below_threshold' ? belowAmount : atOrAboveAmount;
+      return {
+        ...purchase,
+        amount,
+        ruleDecision: {
+          mode: 'threshold_fixed_amounts',
+          threshold: purchase.rule.threshold,
+          belowAmount,
+          atOrAboveAmount,
+          balance: balanceState.balance,
+          balanceRaw: balanceState.raw,
+          balanceSource: balanceState.source,
+          branch,
+          selectedAmount: amount,
+        },
+        beforeBalance: {
+          balance: balanceState.balance,
+          raw: balanceState.raw,
+          source: balanceState.source,
+        },
+      };
+    }
     const targetBalance = normalizeMoneyForCompare(purchase.rule.targetBalance);
     if (Number.isFinite(targetBalance)) {
       if (!Number.isFinite(threshold)) {
@@ -2403,7 +2433,6 @@ async function resolvePurchasePlan(page, purchase) {
       }
       const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
       const rawAmount = Math.ceil(targetBalance - balanceState.balance);
-      const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
       const amount = branch === 'below_threshold'
         ? (rawAmount > 0 ? String(rawAmount) : '')
         : atOrAboveAmount;
@@ -2430,34 +2459,7 @@ async function resolvePurchasePlan(page, purchase) {
         },
       };
     }
-    const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
-    const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
-    if (!Number.isFinite(threshold) || !belowAmount || !atOrAboveAmount) {
-      throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
-    }
-    const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
-    // 业务规则：完整三字段余额规则使用固定充值金额，不能再按“补到目标余额”动态扣减。
-    const amount = branch === 'below_threshold' ? belowAmount : atOrAboveAmount;
-    return {
-      ...purchase,
-      amount,
-      ruleDecision: {
-        mode: 'threshold_fixed_amounts',
-        threshold: purchase.rule.threshold,
-        belowAmount,
-        atOrAboveAmount,
-        balance: balanceState.balance,
-        balanceRaw: balanceState.raw,
-        balanceSource: balanceState.source,
-        branch,
-        selectedAmount: amount,
-      },
-      beforeBalance: {
-        balance: balanceState.balance,
-        raw: balanceState.raw,
-        source: balanceState.source,
-      },
-    };
+    throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
   }
   if (!purchase.amount) throw new Error('Purchase amount is required');
   return {

@@ -52,6 +52,10 @@ function expiryParts(row) {
   return {month: '', year: ''};
 }
 
+function expiryValue(row) {
+  return firstValue(row, ['expires_at', 'validityDate', 'validity_date', 'expiry', 'expires']);
+}
+
 export function parseSafeCardCsv(cardCsvText = '') {
   const parsed = csv.parseCsv(cardCsvText);
   if (parsed.length < 2) return [];
@@ -69,6 +73,9 @@ export function parseSafeCardCsv(cardCsvText = '') {
       openStatus: status,
       orderNo: firstValue(source, ['order_no', 'orderNo']),
       cardNo,
+      provider: firstValue(source, ['card_provider', 'cardProvider', 'provider']),
+      cardType: firstValue(source, ['card_type', 'cardType', 'card_product', 'cardProduct']),
+      expiresAt: expiryValue(source),
       expMonth: expiry.month,
       expYear: expiry.year,
       cvv: firstValue(source, ['cvv', 'cvvPassword']),
@@ -118,6 +125,9 @@ export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) 
     const next = {...row};
     next.order_no = card.orderNo;
     next.card_no = card.cardNo;
+    if (card.provider) next.card_provider = card.provider;
+    if (card.cardType) next.card_type = card.cardType;
+    if (card.expiresAt) next.expires_at = card.expiresAt;
     next.exp_month = card.expMonth;
     next.exp_year = card.expYear;
     next.cvv = card.cvv;

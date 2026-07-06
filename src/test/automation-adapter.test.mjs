@@ -82,6 +82,12 @@ test('runnerArgs clamps concurrency to a safe local range', () => {
   assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
 });
 
+test('runnerArgs carries OPOM card provider selection', () => {
+  assert.equal(runnerArgs({}).cardProvider, 'LEGACY');
+  assert.equal(runnerArgs({cardProvider: 'PINGPONG'}).cardProvider, 'PINGPONG');
+  assert.equal(runnerArgs({cardProvider: 'bad'}).cardProvider, 'LEGACY');
+});
+
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {
   const args = runnerArgs({scopePurchase: false, confirmPurchase: true, preparePurchaseOnly: true});
   assert.equal(args.scopePurchase, false);
@@ -312,6 +318,30 @@ test('createJob stores queued row summaries in sqlite', async () => {
     assert.notEqual(result.job.fileName, 'account.csv');
     assert.doesNotMatch(JSON.stringify(result), /card_number|"cvv"|cvv=/i);
     assert.equal(jobDetails(db, result.job.id).job.readyRows, 1);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('createJob exposes card provider, type, and expiry in row details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-card-meta-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const csvText = `status,ID,username,amount,card_number,exp_month,exp_year,expires_at,card_type,cvv,postal_code,auto_topup_threshold,auto_topup_amount
+,1415,user@example.com,10,5257970000000001,06,28,2028-06,PINGPONG_VISA,456,97001,2,25
+`;
+    const options = {cardProvider: 'PINGPONG'};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText, options});
+    const result = await createJob(db, {
+      fileName: 'account.csv',
+      csvText,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+
+    assert.equal(result.rows[0].cardProvider, 'PINGPONG');
+    assert.equal(result.rows[0].cardType, 'PINGPONG_VISA');
+    assert.equal(result.rows[0].cardExpiresAt, '2028-06');
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

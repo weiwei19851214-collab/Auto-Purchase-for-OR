@@ -795,6 +795,7 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
       ads_power_serial_number: '1415',
       order_no: 'ejh_order_1',
       card_no: '5257970000000001',
+      card_type: 'MASTER_B1_3',
       exp_month: '06',
       exp_year: '28',
       cvv: '456',
@@ -818,9 +819,11 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
     assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
     assert.equal(calls.length, 2);
     assert.match(calls[0].url, /card-binding$/);
+    assert.equal(calls[0].body.card.provider, 'LEGACY');
     assert.equal(calls[0].body.card.expiresAt, '2028-06');
+    assert.equal(calls[0].body.card.expires_at, '2028-06');
+    assert.equal(calls[0].body.card.card_type, 'MASTER_B1_3');
     assert.equal(calls[0].body.card.cvvPresent, true);
-    assert.equal(calls[0].body.card.provider, undefined);
     assert.equal(calls[0].body.binding.source, 'recharge-api');
     assert.deepEqual(calls[0].body.adsPower, {userId: 'profile_ok', serialNumber: '1415'});
     assert.equal(JSON.stringify(calls).includes('456'), false);
@@ -830,6 +833,45 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
     assert.equal(calls[1].body.errorCode, undefined);
     assert.equal(calls[1].body.errorMessage, undefined);
     assert.equal(calls[1].body.stage, undefined);
+  });
+});
+
+test('writeCompletedRow sends selected card provider and explicit OPOM card fields', async () => {
+  const calls = [];
+  await withFetch(async (url, options) => {
+    calls.push({url: String(url), body: JSON.parse(options.body)});
+    return Response.json({data: {ok: true}});
+  }, async () => {
+    const row = {
+      opom_account_id: 'acct_1',
+      login_email: 'user@example.com',
+      ads_power_user_id: 'profile_ok',
+      order_no: 'pp_order_1',
+      card_no: '5257970000000001',
+      expires_at: '2028-06',
+      card_type: 'PINGPONG_VISA',
+      cvv: '456',
+    };
+    await writeCompletedRow({
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      cardProvider: 'PINGPONG',
+      runId: 'run_1',
+      opomWritebackRetries: 1,
+    }, row, {
+      purchaseStatus: 'verified',
+      purchaseAmount: '20',
+      balanceBefore: '180',
+      balanceAfter: '200',
+      cardLast4: '0001',
+      autoTopupStatus: 'updated',
+    }, {rowNumber: 2});
+
+    assert.equal(calls[0].body.card.provider, 'PINGPONG');
+    assert.equal(calls[0].body.card.expiresAt, '2028-06');
+    assert.equal(calls[0].body.card.expires_at, '2028-06');
+    assert.equal(calls[0].body.card.card_type, 'PINGPONG_VISA');
   });
 });
 
@@ -1422,9 +1464,9 @@ test('writeRowResult omits masked login email values from OPOM payload', async (
 });
 
 test('allocateCardsToRows assigns completed EJH safe CSV cards to canonical OPOM rows', () => {
-  const cardCsv = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
-batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
-batch_1,2,EJH,completed,order_2,5257970000000002,07,2029,789,0002
+  const cardCsv = `card_batch_id,row_number,card_provider,card_product,open_status,order_no,card_no,expiry_month,expiry_year,expires_at,cvv,pan_last4
+batch_1,1,EJH,MASTER_B1_3,completed,order_1,5257970000000001,06,2028,2028-06,456,0001
+batch_1,2,EJH,MASTER_B1_3,completed,order_2,5257970000000002,07,2029,2029-07,789,0002
 `;
   const result = allocateCardsToRows([
     {opom_account_id: 'acct_1', login_email: 'user1@example.com', ads_match_status: 'matched', postal_code: '97001'},
@@ -1434,6 +1476,9 @@ batch_1,2,EJH,completed,order_2,5257970000000002,07,2029,789,0002
   assert.equal(result.summary.allocated, 2);
   assert.equal(result.rows[0].order_no, 'order_1');
   assert.equal(result.rows[0].card_no, '5257970000000001');
+  assert.equal(result.rows[0].card_provider, 'EJH');
+  assert.equal(result.rows[0].card_type, 'MASTER_B1_3');
+  assert.equal(result.rows[0].expires_at, '2028-06');
   assert.equal(result.rows[0].exp_year, '28');
   assert.equal(result.rows[1].postal_code, '97002');
   assert.match(result.csvText, /opom_account_id,login_email/);
@@ -1463,6 +1508,8 @@ test('parseSafeCardCsv accepts EJH generated CSV while dropping raw diagnostic c
   const cards = parseSafeCardCsv(rawCsv);
   assert.equal(cards[0].completed, true);
   assert.equal(cards[0].orderNo, 'order_1');
+  assert.equal(cards[0].cardType, 'MASTER_B1_1');
+  assert.equal(cards[0].expiresAt, '0628');
   assert.equal(cards[0].expMonth, '06');
   assert.equal(cards[0].expYear, '28');
 
@@ -1482,6 +1529,9 @@ ejh-20260612-224636,1,EJH,MASTER_B1_3,completed,,,CI2026061222452090000112,53648
   assert.equal(cards[0].completed, true);
   assert.equal(cards[0].orderNo, 'CI2026061222452090000112');
   assert.equal(cards[0].cardNo, '5364890000008914');
+  assert.equal(cards[0].provider, 'EJH');
+  assert.equal(cards[0].cardType, 'MASTER_B1_3');
+  assert.equal(cards[0].expiresAt, '0628');
   assert.equal(cards[0].expMonth, '06');
   assert.equal(cards[0].expYear, '28');
   assert.equal(cards[0].cvv, '123');

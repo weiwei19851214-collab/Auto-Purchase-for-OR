@@ -118,10 +118,12 @@ export async function createJob(db, payload) {
     INSERT INTO job_rows (
       id, job_id, row_number, raw_index, profile_id, opom_account_id,
       username_masked, login_email_masked, ads_power_user_id, ads_power_serial_number,
-      ads_match_status, ejh_order_no, card_no, card_last4, purchase_plan, amount,
+      ads_match_status, ejh_order_no, card_no, card_last4, card_provider, card_type,
+      expires_at, purchase_plan, amount,
       status, stage, message, missing_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const jobArgs = runnerArgs(jobOptions);
   for (const row of plan.rows) {
     const item = rowInsertFromDryRun(jobId, row);
     insertRow.run(
@@ -139,6 +141,9 @@ export async function createJob(db, payload) {
       item.ejhOrderNo,
       item.cardNo,
       item.cardLast4,
+      item.cardProvider || jobArgs.cardProvider,
+      item.cardType,
+      item.cardExpiresAt,
       item.purchasePlan,
       item.amount,
       item.status,
@@ -159,9 +164,12 @@ export async function createJob(db, payload) {
         rawIndex: row.rawIndex,
         status: row.status,
         message: row.message,
-      details: {
+        details: {
           cardLast4: row.cardLast4,
           cardNo: row.cardNo,
+          cardProvider: row.cardProvider,
+          cardType: row.cardType,
+          cardExpiresAt: row.cardExpiresAt,
           opomAccountId: row.opomAccountId,
           username: row.username,
           loginEmail: row.loginEmail || row.username,
@@ -276,6 +284,9 @@ export async function cancelJob(db, jobId) {
         details: {
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          cardProvider: row.card_provider,
+          cardType: row.card_type,
+          cardExpiresAt: row.expires_at,
           opomAccountId: row.opom_account_id,
           username: row.username_masked,
           loginEmail: row.login_email_masked,
@@ -655,6 +666,9 @@ async function rewriteResumeResult(db, jobId) {
         balanceAfter: row.balance_after,
         cardLast4: row.card_last4,
         cardNo: row.card_no,
+        cardProvider: row.card_provider,
+        cardType: row.card_type,
+        cardExpiresAt: row.expires_at,
         autoTopupStatus: row.auto_topup_status,
         autoTopupThreshold: row.auto_topup_threshold,
         autoTopupAmount: row.auto_topup_amount,

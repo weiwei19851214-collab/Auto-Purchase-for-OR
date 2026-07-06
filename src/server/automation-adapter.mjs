@@ -31,6 +31,9 @@ const OPTIONAL_COLUMNS = [
   'order_no',
   'ejh_order_no',
   'card_no',
+  'card_provider',
+  'card_type',
+  'expires_at',
   'holder_name',
   'country',
   'address_line1',
@@ -48,6 +51,13 @@ export function safeFileName(name) {
   return safe.endsWith('.csv') ? safe : `${safe}.csv`;
 }
 
+const CARD_PROVIDERS = new Set(['EJH', 'PINGPONG', 'LEGACY']);
+
+function normalizeCardProvider(value) {
+  const normalized = String(value || 'LEGACY').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'LEGACY';
+}
+
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
   const concurrency = Math.min(5, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
@@ -63,6 +73,7 @@ export function runnerArgs(options = {}) {
     scopeAutoTopup: options.scopeAutoTopup !== false,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
+    cardProvider: normalizeCardProvider(options.cardProvider),
     rowTimeoutMs: Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS),
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',
@@ -174,6 +185,9 @@ export function rowInsertFromDryRun(jobId, row) {
     ejhOrderNo: row.ejhOrderNo || '',
     cardNo: row.cardNo || '',
     cardLast4: row.cardLast4 || '',
+    cardProvider: row.cardProvider || '',
+    cardType: row.cardType || '',
+    cardExpiresAt: row.cardExpiresAt || '',
     purchasePlan: row.purchasePlan || '',
     amount: row.amount || '',
     status: row.status === 'ready' ? 'queued' : row.status,
@@ -209,6 +223,7 @@ export function publicJob(row) {
       scopePurchase: args.scopePurchase,
       scopeAutoTopup: args.scopeAutoTopup,
       opomWriteback: args.opomWriteback,
+      cardProvider: args.cardProvider,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       opomBaseUrl: args.opomBaseUrl,
       opomSecondaryBaseUrl: args.opomSecondaryBaseUrl,
@@ -252,6 +267,9 @@ export function publicRow(row) {
     ejhOrderNo: row.ejh_order_no,
     cardNo: row.card_no,
     cardLast4: row.card_last4,
+    cardProvider: row.card_provider,
+    cardType: row.card_type,
+    cardExpiresAt: row.expires_at,
     purchasePlan: row.purchase_plan,
     amount: row.amount,
     status: row.status,

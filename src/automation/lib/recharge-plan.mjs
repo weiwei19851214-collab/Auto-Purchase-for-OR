@@ -32,6 +32,18 @@ export function cardNumber(row) {
   return String(row.card_number || row.card_no || '').trim();
 }
 
+export function cardProvider(row) {
+  return String(row.card_provider || row.cardProvider || '').trim();
+}
+
+export function cardType(row) {
+  return String(row.card_type || row.cardType || row.card_product || row.cardProduct || '').trim();
+}
+
+export function cardExpiresAt(row) {
+  return String(row.expires_at || row.validityDate || row.validity_date || row.expiry || row.expires || '').trim();
+}
+
 export function ejhOrderNo(row) {
   return String(row.ejh_order_no || row.order_no || '').trim();
 }
@@ -315,6 +327,9 @@ export function baseRowResult(rowNumber, row) {
     amount: row.amount || '',
     cardNo: cardNumber(row),
     cardLast4: cardLast4(cardNumber(row)),
+    cardProvider: cardProvider(row),
+    cardType: cardType(row),
+    cardExpiresAt: cardExpiresAt(row),
   };
 }
 
@@ -322,6 +337,7 @@ export function dryRunResult(rowNumber, row, args) {
   const missing = validateRow(row, args);
   return {
     ...baseRowResult(rowNumber, row),
+    cardProvider: args.cardProvider || cardProvider(row) || '',
     executionScope: scopeSummary(args),
     autoTopup: executionScope(args).autoTopup ? safeAutoTopupPlan(row, args) : {threshold: '', amount: '', skipped: true},
     ready: missing.length === 0,
@@ -342,6 +358,9 @@ export function rowMetadata(row, extra = {}) {
     adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerUserId(row) || adsPowerSerialNumber(row) ? 'not_verified' : ''),
     ejhOrderNo: ejhOrderNo(row),
     cardNo: extra.cardNo || cardNumber(row),
+    cardProvider: extra.cardProvider || cardProvider(row),
+    cardType: extra.cardType || cardType(row),
+    cardExpiresAt: extra.cardExpiresAt || cardExpiresAt(row),
     opomCardWritebackStatus: extra.opomCardWritebackStatus || '',
     opomResultWritebackStatus: extra.opomResultWritebackStatus || '',
     adspowerTagStatus: extra.adspowerTagStatus || 'skipped_user_waived',

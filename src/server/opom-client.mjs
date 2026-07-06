@@ -6,6 +6,7 @@ const DEFAULT_OPOM_REQUEST_TIMEOUT_MS = 45000;
 const DEFAULT_OPOM_REQUEST_RETRIES = 3;
 const DEFAULT_OPOM_WRITEBACK_RETRIES = 3;
 const DEFAULT_OPOM_RETRY_DELAY_MS = 1500;
+const CARD_PROVIDERS = new Set(['EJH', 'PINGPONG', 'LEGACY']);
 
 export function opomDefaults(env = process.env) {
   const primaryRechargeToken = rechargeTokenFromEnv(env);
@@ -317,6 +318,15 @@ export function cardExpiryIso(row) {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
 }
 
+function normalizeCardProvider(value) {
+  const normalized = String(value || 'LEGACY').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'LEGACY';
+}
+
+function cardType(row) {
+  return String(row.card_type || row.cardType || row.card_product || row.cardProduct || '').trim();
+}
+
 export async function writeCompletedRow(args, row, details, context = {}) {
   const opomAccountId = plan.opomAccountId(row);
   if (!args.opomWriteback || !opomAccountId) {
@@ -327,6 +337,8 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   const cardNo = plan.cardNumber(row);
   const idempotencyKey = row.card_binding_idempotency_key || `card_binding:${opomAccountId}:${orderNo || details.cardLast4 || runId}`;
   const expiresAt = cardExpiryIso(row);
+  const provider = normalizeCardProvider(args.cardProvider || row.card_provider || row.cardProvider);
+  const type = cardType(row);
   if (!orderNo || !cardNo || !expiresAt) {
     throw writebackError(new Error('OPOM card binding requires orderNo, cardNo, and expiresAt'), {
       cardStatus: 'failed',
@@ -336,9 +348,13 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   const bindingBody = {
     idempotencyKey,
     card: {
+      // OPOM 绑卡写回需要明确卡通道；页面默认 LEGACY，避免未选择时丢失来源口径。
+      provider,
       orderNo,
       cardNo,
       expiresAt,
+      expires_at: expiresAt,
+      ...(type ? {card_type: type} : {}),
       cvvPresent: !!row.cvv,
     },
     ...adsPowerPayload(row, details),

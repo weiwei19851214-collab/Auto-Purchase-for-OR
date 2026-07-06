@@ -112,6 +112,7 @@ const els = {
   configEjhAppKey: document.querySelector('#configEjhAppKey'),
   configEjhAppSecret: document.querySelector('#configEjhAppSecret'),
   configPython: document.querySelector('#configPython'),
+  cardProvider: document.querySelector('#cardProvider'),
 };
 
 const CANONICAL_HEADER = [
@@ -126,6 +127,9 @@ const CANONICAL_HEADER = [
   'ads_match_status',
   'order_no',
   'card_no',
+  'card_provider',
+  'card_type',
+  'expires_at',
   'exp_month',
   'exp_year',
   'cvv',
@@ -182,6 +186,7 @@ function optionsPayload() {
     preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
     autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
+    cardProvider: els.cardProvider?.value || 'LEGACY',
     ...config,
     opomWriteback: els.opomWriteback.checked && !els.opomWriteback.disabled,
     adspowerStatusMode: els.adspowerStatusMode?.value || 'disabled',
@@ -657,6 +662,21 @@ function cardNoLabel(row = {}) {
   const last4 = row.cardLast4 || String(cardNo).replace(/\D/g, '').slice(-4);
   const cardLabel = cardNo ? `card ${cardNo}` : (last4 ? `card ****${last4}` : '');
   return [row.ejhOrderNo || row.order_no || '', cardLabel].filter(Boolean).join(' / ');
+}
+
+function cardInfoHtml(row = {}, job = {}) {
+  const provider = job.options?.cardProvider || row.cardProvider || row.card_provider || '';
+  const cardType = row.cardType || row.card_type || '';
+  const expiresAt = row.cardExpiresAt || row.expires_at || '';
+  const meta = [
+    provider ? `通道 ${provider}` : '',
+    cardType ? `类型 ${cardType}` : '',
+    expiresAt ? `过期 ${expiresAt}` : '',
+  ].filter(Boolean).join(' / ');
+  return [
+    escapeHtml(cardNoLabel(row) || '-'),
+    meta ? `<br><span class="muted">${escapeHtml(meta)}</span>` : '',
+  ].join('');
 }
 
 function purchaseRuleLabel(row) {
@@ -1477,7 +1497,7 @@ function renderJobDetail(job, rows, events = []) {
       <td>${escapeHtml(row.purchaseAmount || row.amount || '')}</td>
       <td>${escapeHtml(row.balanceBefore)} → ${escapeHtml(row.balanceAfter)}</td>
       <td>${escapeHtml(row.autoTopupStatus)} ${escapeHtml(row.autoTopupThreshold)}/${escapeHtml(row.autoTopupAmount)}</td>
-      <td>${escapeHtml(cardNoLabel(row))}</td>
+      <td>${cardInfoHtml(row, job)}</td>
       <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
       <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
       <td>
@@ -1684,6 +1704,7 @@ els.allocateCards.addEventListener('click', () => withButtonBusy(els.allocateCar
 els.createCards.addEventListener('click', () => withButtonBusy(els.createCards, 'Creating...', () => allocateCards({createCards: true})).catch(showError));
 els.removeExisting.addEventListener('change', () => invalidateDryRun());
 els.stopProfiles.addEventListener('change', () => invalidateDryRun());
+els.cardProvider?.addEventListener('change', () => invalidateDryRun('卡通道已变化，启动执行时会重新预检。'));
 els.concurrency.addEventListener('input', () => invalidateDryRun('并发数量已变化，启动执行时会重新预检。'));
 els.adspowerStatusMode?.addEventListener('change', () => {
   els.adspowerUseDiscoveredTargets.disabled = true;

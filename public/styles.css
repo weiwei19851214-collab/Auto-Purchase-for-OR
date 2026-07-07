@@ -661,6 +661,14 @@ tr:hover td {
   background: #f8fbff;
 }
 
+.detail-row-failed td {
+  background: #ffe4e6;
+}
+
+.detail-row-failed:hover td {
+  background: #fecdd3;
+}
+
 tr.selected td {
   background: #eef4ff;
 }

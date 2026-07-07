@@ -679,6 +679,16 @@ function cardInfoHtml(row = {}, job = {}) {
   ].join('');
 }
 
+function isFailedJobRow(row = {}) {
+  return [
+    'failed',
+    'purchase_unverified',
+    'payment_issue_card_declined',
+    'identity_mismatch',
+    'login_required',
+  ].includes(String(row.status || '').trim());
+}
+
 function purchaseRuleLabel(row) {
   if (row.balance_threshold || row.amount_below_threshold || row.amount_at_or_above_threshold) {
     const complete = row.balance_threshold && row.amount_below_threshold;
@@ -1487,7 +1497,7 @@ function renderJobDetail(job, rows, events = []) {
   els.download.setAttribute('aria-disabled', job.resultCsvReady ? 'false' : 'true');
   els.cancel.textContent = job.status === 'running' ? '请求停止后续行' : '取消排队任务';
   els.rowsBody.innerHTML = rows.map((row) => `
-    <tr>
+    <tr class="${isFailedJobRow(row) ? 'detail-row-failed' : ''}">
       <td>${row.rowNumber}</td>
       <td>${escapeHtml(row.adsPowerSerialNumber || row.profileId || '-')}</td>
       <td>${escapeHtml(row.profileId)}</td>

@@ -1941,6 +1941,39 @@ async function focusAndInsertText(client, selector, text, options = {}) {
   const expected = normalizeStripeInputValue(options.expectedValue || text);
   let lastState = null;
 
+  const readValueState = async () => evaluate(client, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return {found:false};
+    return {
+      found: true,
+      value: el.value || '',
+      active: document.activeElement === el,
+    };
+  })()`);
+
+  const forceSetValue = async () => evaluate(client, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return {found:false};
+    const value = ${JSON.stringify(String(text || ''))};
+    el.focus();
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
+      || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(el, value);
+    else el.value = value;
+    try {
+      el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
+    } catch {
+      el.dispatchEvent(new Event('input', {bubbles:true}));
+    }
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+    return {
+      found: true,
+      value: el.value || '',
+      active: document.activeElement === el,
+      method: 'native_value_setter',
+    };
+  })()`);
+
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const target = await evaluate(client, `(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
@@ -1984,18 +2017,17 @@ async function focusAndInsertText(client, selector, text, options = {}) {
     await client.send('Input.insertText', {text});
     await sleep(260);
 
-    const state = await evaluate(client, `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return {found:false};
-      return {
-        found: true,
-        value: el.value || '',
-        active: document.activeElement === el,
-      };
-    })()`);
+    let state = await readValueState();
     lastState = state;
-    const actual = normalizeStripeInputValue(state.value);
     // Stripe 字段偶发重渲染会吞掉 CDP 输入；必须以页面真实保留值为准，不能只看输入动作成功。
+    let actual = normalizeStripeInputValue(state.value);
+    if (expected && actual === expected) return state;
+    if (!expected && actual) return state;
+
+    // 有些 AdsPower/Stripe 组合里 CDP 键盘焦点会丢失，表现为 active=false 且 value 为空；此时用原生 setter 补一次。
+    state = await forceSetValue();
+    lastState = state;
+    actual = normalizeStripeInputValue(state.value);
     if (expected && actual === expected) return state;
     if (!expected && actual) return state;
     await sleep(350);

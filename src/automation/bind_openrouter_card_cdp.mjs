@@ -1933,18 +1933,75 @@ async function maybeFillBillingAddress(page, billing, debugPort = '') {
   return result;
 }
 
-async function focusAndInsertText(client, selector, text) {
-  const ok = await evaluate(client, `(() => {
-    const el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return false;
-    el.focus();
-    if (el.select) el.select();
-    return true;
-  })()`);
-  if (!ok) throw new Error(`Missing Stripe field: ${selector}`);
-  await sleep(120);
-  await client.send('Input.insertText', {text});
-  await sleep(180);
+function normalizeStripeInputValue(value) {
+  return String(value || '').replace(/[^\dA-Za-z]/g, '').toLowerCase();
+}
+
+async function focusAndInsertText(client, selector, text, options = {}) {
+  const expected = normalizeStripeInputValue(options.expectedValue || text);
+  let lastState = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const target = await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return {found:false};
+      el.scrollIntoView?.({block:'center', inline:'center'});
+      const rect = el.getBoundingClientRect();
+      el.focus();
+      if (el.select) el.select();
+      if (el.setSelectionRange) {
+        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
+      }
+      return {
+        found: true,
+        visible: rect.width > 0 && rect.height > 0,
+        value: el.value || '',
+        rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+      };
+    })()`);
+    if (!target.found) throw new Error(`Missing Stripe field: ${selector}`);
+    lastState = target;
+
+    if (target.visible && target.rect) {
+      const x = target.rect.x + target.rect.width / 2;
+      const y = target.rect.y + target.rect.height / 2;
+      await client.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
+      await client.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1}).catch(() => {});
+      await client.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1}).catch(() => {});
+    }
+
+    await sleep(120);
+    await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return false;
+      el.focus();
+      if (el.select) el.select();
+      if (el.setSelectionRange) {
+        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
+      }
+      return true;
+    })()`).catch(() => false);
+    await client.send('Input.insertText', {text});
+    await sleep(260);
+
+    const state = await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return {found:false};
+      return {
+        found: true,
+        value: el.value || '',
+        active: document.activeElement === el,
+      };
+    })()`);
+    lastState = state;
+    const actual = normalizeStripeInputValue(state.value);
+    // Stripe 字段偶发重渲染会吞掉 CDP 输入；必须以页面真实保留值为准，不能只看输入动作成功。
+    if (expected && actual === expected) return state;
+    if (!expected && actual) return state;
+    await sleep(350);
+  }
+
+  throw new Error(`Stripe field did not retain value: ${selector}; state=${JSON.stringify(lastState)}`);
 }
 
 async function ensureStripeLinkUnchecked(payment) {
@@ -1987,9 +2044,9 @@ async function fillStripeCard(payment, card) {
     await sleep(DEFAULT_DOM_POLL_MS);
   }
   if (!ready) throw new Error(`Missing Stripe field after ${DEFAULT_STRIPE_IFRAME_WAIT_MS}ms: #payment-numberInput`);
-  await focusAndInsertText(payment, '#payment-numberInput', card.number);
-  await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry));
-  await focusAndInsertText(payment, '#payment-cvcInput', card.cvc);
+  await focusAndInsertText(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+  await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+  await focusAndInsertText(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
   const countryState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-countryInput');
     if (!el) return {exists:false, changedFromNonUs:false, selected:false};
@@ -2036,7 +2093,7 @@ async function fillStripeCard(payment, card) {
   })()`);
   if (postalState.exists) {
     if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
-    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode);
+    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
   }
 
   const values = await evaluate(payment, `(() => [...document.querySelectorAll('input,select')].map((el) => ({
@@ -3730,10 +3787,11 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
       const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
         || node?.getAttribute('data-state') === 'checked'
         || node?.hasAttribute('data-checked');
-      const readSwitch = (node) => node ? ({
+      const readSwitch = (node, method = 'auto-buy-switch') => node ? ({
         found: true,
         wasEnabled: readChecked(node),
         selector: node.id === 'auto-buy' ? '#auto-buy' : '',
+        method,
         rect: (() => {
           const rect = node.getBoundingClientRect();
           return {x:rect.x, y:rect.y, width:rect.width, height:rect.height};
@@ -3751,6 +3809,55 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
       const scope = dialog || document;
       const autoBuy = scope.querySelector?.('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
       const text = dialog ? textOf(dialog) : (document.body.innerText || '');
+      const labelText = (node) => [
+        node.getAttribute?.('aria-label'),
+        node.labels?.[0]?.innerText,
+        node.closest?.('label')?.innerText,
+        node.parentElement?.innerText,
+      ].filter(Boolean).join(' ');
+      const switchControls = [...scope.querySelectorAll('[role="switch"],button[aria-checked],button[data-state],input[type="checkbox"]')]
+        .map((node) => {
+          const labelNode = node.closest?.('label') || node.labels?.[0] || null;
+          const rect = node.getBoundingClientRect();
+          const labelRect = labelNode?.getBoundingClientRect?.() || rect;
+          const nodeText = textOf(node);
+          const label = labelText(node);
+          const switchShape = rect.width >= 20 && rect.width <= 80 && rect.height >= 10 && rect.height <= 50;
+          const hasAutoTopupLabel = /Enable\\s+auto\\s+top\\s+up|Automatically buy credits|Auto\\s*Top[- ]?Up/i.test(nodeText + ' ' + label);
+          return {
+            node,
+            labelNode,
+            rect,
+            labelRect,
+            text: nodeText,
+            label,
+            checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
+            role: node.getAttribute('role') || '',
+            type: node.getAttribute('type') || '',
+            switchShape,
+            hasAutoTopupLabel,
+          };
+        })
+        .filter((item) => {
+          const visibleControl = item.type === 'checkbox'
+            ? (visible(item.node) || visible(item.labelNode))
+            : visible(item.node);
+          if (!visibleControl) return false;
+          return item.role === 'switch' || item.node.hasAttribute('aria-checked') || item.node.hasAttribute('data-state') || item.type === 'checkbox';
+        })
+        .map((item) => {
+          const clickRect = visible(item.node) ? item.rect : item.labelRect;
+          const nearestEnableLabel = /Enable\\s+auto\\s+top\\s+up/i.test(text)
+            ? Math.abs(clickRect.y - (dialog?.getBoundingClientRect?.().y || clickRect.y))
+            : 0;
+          const score = (item.hasAutoTopupLabel ? 1000 : 0)
+            + (item.role === 'switch' ? 300 : 0)
+            + (item.switchShape ? 200 : 0)
+            - nearestEnableLabel / 20;
+          return {...item, clickRect, score};
+        })
+        .sort((a, b) => b.score - a.score);
+      const genericSwitch = switchControls[0] || null;
       const inputs = [...scope.querySelectorAll('input')]
         .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
         .map((input) => ({
@@ -3763,10 +3870,19 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
       const textHasAutoAmounts = /When credits are below/i.test(text) && /Purchase this amount/i.test(text);
       const hasSaveAction = [...scope.querySelectorAll('button,a,[role="button"]')]
         .some((node) => visible(node) && /^(Save|Update|Enable Auto Top[- ]?Up|Apply)$/i.test(textOf(node)));
+      const directSwitch = readSwitch(autoBuy);
       return {
         found: Boolean(dialog || visible(autoBuy)),
         formReady: textHasAutoAmounts && hasSaveAction && inputs.length >= 2,
-        editorSwitch: readSwitch(autoBuy),
+        // 业务规则：截图这种只露出开关的弹窗已经足够继续，不能再等完整金额表单。
+        editorSwitch: directSwitch.found ? directSwitch : (genericSwitch ? {
+          found: true,
+          wasEnabled: genericSwitch.checked,
+          selector: '',
+          method: genericSwitch.role === 'switch' ? 'role-switch' : (genericSwitch.type === 'checkbox' ? 'checkbox' : 'state-button'),
+          score: genericSwitch.score,
+          rect: {x:genericSwitch.clickRect.x, y:genericSwitch.clickRect.y, width:genericSwitch.clickRect.width, height:genericSwitch.clickRect.height},
+        } : {found:false}),
         tail: (document.body.innerText || '').slice(-1800),
       };
     })()`);
@@ -4249,9 +4365,22 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   const dismissedBeforeEditor = await dismissSaveCardOverlays(page, debugPort);
   const opened = await openAutoTopupEditor(page, state);
   const toggled = await toggleAutoTopupIfNeeded(page);
-  const formAfterToggle = await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
+  const formAfterToggle = opened.formReady
+    ? opened.form
+    : await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
   const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount);
-  const saved = fields.unchanged ? {clicked: false, skipped: true, reason: 'values_already_set'} : await saveAutoTopup(page);
+  if (fields.unchanged && toggled.wasEnabled === true && toggled.verified?.wasEnabled === true) {
+    // 弹窗中开关已开启且两个金额字段已经是目标值时，按页面字段确认即可，避免等待外层 overview 文案刷新。
+    state = {
+      enabled: true,
+      amount: requested.amount,
+      threshold: requested.threshold,
+      configured: true,
+      source: 'auto_topup_editor_fields',
+    };
+    return {configured: true, changed: false, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved: {clicked: false, skipped: true, reason: 'values_already_set'}, state};
+  }
+  const saved = await saveAutoTopup(page);
   state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
   return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, state};
 }

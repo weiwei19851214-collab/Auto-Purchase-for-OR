@@ -243,6 +243,8 @@ test('browser path recognizes updated Auto top-up buttons and scoped inputs', ()
   assert.doesNotMatch(script, /direct\.checked === true/);
   assert.match(script, /labelOf\(node\)/);
   assert.match(script, /scope\.querySelectorAll\('input'\)/);
+  assert.match(script, /switchControls/);
+  assert.match(script, /auto_topup_editor_fields/);
 });
 
 test('balance target purchase amount rounds up to the next whole dollar', () => {

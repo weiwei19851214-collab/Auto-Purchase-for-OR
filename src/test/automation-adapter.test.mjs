@@ -235,6 +235,16 @@ test('browser path no longer disables Auto top-up before opening Add Credits', (
   assert.match(script, /auto_topup_pre_disable_removed/);
 });
 
+test('browser path recognizes updated Auto top-up buttons and scoped inputs', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.ok(script.includes('button#auto-buy[role="switch"],button#auto-buy'));
+  assert.ok(script.includes("node?.getAttribute('aria-checked') === 'true'"));
+  assert.ok(script.includes("node?.getAttribute('data-state') === 'checked'"));
+  assert.doesNotMatch(script, /direct\.checked === true/);
+  assert.match(script, /labelOf\(node\)/);
+  assert.match(script, /scope\.querySelectorAll\('input'\)/);
+});
+
 test('balance target purchase amount rounds up to the next whole dollar', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);

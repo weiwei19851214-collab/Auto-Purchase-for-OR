@@ -3527,20 +3527,30 @@ async function getAutoTopupState(page) {
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
-    const autoContainer = [...document.querySelectorAll('section,article,div,main,body')]
-      .filter((node) => visible(node) && /Auto\\s*Top[- ]?Up/i.test(textOf(node)))
-      .sort((a, b) => {
-        const ar = a.getBoundingClientRect();
-        const br = b.getBoundingClientRect();
-        const abody = a === document.body ? 1 : 0;
-        const bbody = b === document.body ? 1 : 0;
-        return abody - bbody || (ar.width * ar.height) - (br.width * br.height);
-      })[0] || document.body;
-    const actions = [...autoContainer.querySelectorAll('button,a,[role="button"]')]
+    const labelOf = (node) => [
+      textOf(node),
+      node.getAttribute?.('aria-label') || '',
+      node.getAttribute?.('title') || '',
+    ].filter(Boolean).join(' ').trim().replace(/\\s+/g, ' ');
+    const actions = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
-      .map((node) => textOf(node));
-    const hasEnable = actions.some((label) => /^Enable$/i.test(label) || /^Enable Auto Top[- ]?Up$/i.test(label));
-    const hasManage = actions.some((label) => /^Manage$/i.test(label));
+      .map((node) => {
+        let container = node.parentElement;
+        let containerText = '';
+        for (let depth = 0; container && depth < 8; depth += 1, container = container.parentElement) {
+          if (!visible(container)) continue;
+          const candidateText = textOf(container);
+          if (/Auto\\s*Top[- ]?Up/i.test(candidateText)) {
+            containerText = candidateText;
+            break;
+          }
+        }
+        return {label: labelOf(node), containerText};
+      })
+      .filter((item) => /Auto\\s*Top[- ]?Up/i.test(item.containerText))
+      .map((item) => item.label);
+    const hasEnable = actions.some((label) => /\\bEnable\\b/i.test(label) || /Enable Auto Top[- ]?Up/i.test(label));
+    const hasManage = actions.some((label) => /\\bManage\\b/i.test(label));
     return {
       enabled,
       amount: enabledMatch ? enabledMatch[1] : '',
@@ -3581,13 +3591,19 @@ async function findAndClickAutoTopupAction(page, action) {
         return rect.width > 0 && rect.height > 0;
       };
       const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
+      const labelOf = (node) => [
+        textOf(node),
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('title') || '',
+      ].filter(Boolean).join(' ').trim().replace(/\\s+/g, ' ');
       const hasAutoTopup = (node) => /Auto\\s*Top[- ]?Up/i.test(textOf(node));
+      const actionPattern = new RegExp('(^|\\\\b)' + action + '(\\\\b|$)', 'i');
       const pageAnchors = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
         .filter((node) => visible(node) && hasAutoTopup(node))
         .map((node) => node.getBoundingClientRect());
       const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
-        .map((node) => ({node, rect: node.getBoundingClientRect(), text: textOf(node), disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true'}))
-        .filter((item) => visible(item.node) && !item.disabled && new RegExp('^' + action + '$', 'i').test(item.text));
+        .map((node) => ({node, rect: node.getBoundingClientRect(), text: textOf(node), label: labelOf(node), disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true'}))
+        .filter((item) => visible(item.node) && !item.disabled && actionPattern.test(item.label));
 
       const scored = buttons.map((button) => {
         let node = button.node.parentElement;
@@ -3623,16 +3639,21 @@ async function findAndClickAutoTopupAction(page, action) {
       if (!target || (!/Auto\\s*Top[- ]?Up/i.test(target.containerText || '') && target.nearestAnchorDistance > 350)) {
         return {
           clicked:false,
-          buttonTexts:buttons.map((button) => button.text),
-          scored: scored.map((item) => ({text:item.text, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
+          buttonTexts:buttons.map((button) => button.label),
+          scored: scored.map((item) => ({text:item.text, label:item.label, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
           tail:(document.body.innerText || '').slice(-2500),
         };
       }
       target.node.scrollIntoView({block:'center', inline:'center'});
-      target.node.click();
-      return {clicked:true, label:target.text, score:target.score};
+      const rect = target.node.getBoundingClientRect();
+      return {clicked:true, label:target.label || target.text, score:target.score, rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height}};
     })()`);
     if (result.clicked) {
+      const x = result.rect.x + result.rect.width / 2;
+      const y = result.rect.y + result.rect.height / 2;
+      await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
+      await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
+      await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
       await sleep(1200);
       return result;
     }
@@ -3706,9 +3727,12 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
       };
       const textOf = (node) => (node?.innerText || node?.textContent || '').trim().replace(/\\s+/g, ' ');
+      const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
+        || node?.getAttribute('data-state') === 'checked'
+        || node?.hasAttribute('data-checked');
       const readSwitch = (node) => node ? ({
         found: true,
-        wasEnabled: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        wasEnabled: readChecked(node),
         selector: node.id === 'auto-buy' ? '#auto-buy' : '',
         rect: (() => {
           const rect = node.getBoundingClientRect();
@@ -3723,11 +3747,11 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
           const abody = a === document.body ? 1 : 0;
           const bbody = b === document.body ? 1 : 0;
           return abody - bbody || (ar.width * ar.height) - (br.width * br.height);
-        })[0] || null;
+      })[0] || null;
       const scope = dialog || document;
-      const autoBuy = scope.querySelector?.('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+      const autoBuy = scope.querySelector?.('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
       const text = dialog ? textOf(dialog) : (document.body.innerText || '');
-      const inputs = [...document.querySelectorAll('input')]
+      const inputs = [...scope.querySelectorAll('input')]
         .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
         .map((input) => ({
           type: input.type || '',
@@ -3737,7 +3761,7 @@ async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
           value: input.value || '',
         }));
       const textHasAutoAmounts = /When credits are below/i.test(text) && /Purchase this amount/i.test(text);
-      const hasSaveAction = [...document.querySelectorAll('button,a,[role="button"]')]
+      const hasSaveAction = [...scope.querySelectorAll('button,a,[role="button"]')]
         .some((node) => visible(node) && /^(Save|Update|Enable Auto Top[- ]?Up|Apply)$/i.test(textOf(node)));
       return {
         found: Boolean(dialog || visible(autoBuy)),
@@ -3759,18 +3783,21 @@ async function getAutoTopupEditorSwitchState(page) {
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim();
+    const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
+      || node?.getAttribute('data-state') === 'checked'
+      || node?.hasAttribute('data-checked');
     const labelText = (node) => [
       node.getAttribute?.('aria-label'),
       node.labels?.[0]?.innerText,
       node.closest?.('label')?.innerText,
       node.parentElement?.innerText,
     ].filter(Boolean).join(' ');
-    const direct = document.querySelector('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    const direct = document.querySelector('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
     if (direct && visible(direct)) {
       const rect = direct.getBoundingClientRect();
       return {
         found: true,
-        wasEnabled: direct.getAttribute('aria-checked') === 'true' || direct.getAttribute('data-state') === 'checked' || direct.checked === true,
+        wasEnabled: readChecked(direct),
         selector: direct.id === 'auto-buy' ? '#auto-buy' : '',
         method: 'auto-buy-switch',
         rect: {x:rect.x, y:rect.y, width:rect.width, height:rect.height},
@@ -3783,7 +3810,7 @@ async function getAutoTopupEditorSwitchState(page) {
         rect: node.getBoundingClientRect(),
         text: textOf(node),
         label: labelText(node),
-        checked: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
         role: node.getAttribute('role') || '',
         type: node.getAttribute('type') || '',
       }))
@@ -4017,12 +4044,15 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
-    const direct = document.querySelector('button#auto-buy[role="switch"],#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
+      || node?.getAttribute('data-state') === 'checked'
+      || node?.hasAttribute('data-checked');
+    const direct = document.querySelector('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
     if (direct && visible(direct)) {
       const rect = direct.getBoundingClientRect();
       return {
         found:true,
-        wasEnabled: direct.getAttribute('aria-checked') === 'true' || direct.getAttribute('data-state') === 'checked' || direct.checked === true,
+        wasEnabled: readChecked(direct),
         method:'auto-buy-switch',
         inputCount:[...document.querySelectorAll('input')].filter((input) => {
           const item = input.getBoundingClientRect();
@@ -4050,7 +4080,7 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
         label: labelText(node),
         labelNode: checkboxLabel(node),
         rect: node.getBoundingClientRect(),
-        checked: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
         role: node.getAttribute('role') || '',
         type: node.getAttribute('type') || '',
       }))
@@ -4122,7 +4152,7 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
     }
     if (i === 3 && result.method === 'auto-buy-switch') {
       await evaluate(page, `(() => {
-        const target = document.querySelector('button#auto-buy[role="switch"],#auto-buy');
+        const target = document.querySelector('button#auto-buy[role="switch"],button#auto-buy');
         if (!target) return false;
         target.scrollIntoView?.({block:'center', inline:'center'});
         const PointerLikeEvent = window.PointerEvent || MouseEvent;

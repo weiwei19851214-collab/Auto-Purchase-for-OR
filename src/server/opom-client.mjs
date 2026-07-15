@@ -327,7 +327,7 @@ function cardType(row) {
   return String(row.card_type || row.cardType || row.card_product || row.cardProduct || '').trim();
 }
 
-export async function writeCompletedRow(args, row, details, context = {}) {
+export async function writeCardBinding(args, row, details, context = {}) {
   const opomAccountId = plan.opomAccountId(row);
   if (!args.opomWriteback || !opomAccountId) {
     return {cardStatus: 'skipped', resultStatus: 'skipped'};
@@ -355,7 +355,7 @@ export async function writeCompletedRow(args, row, details, context = {}) {
       expiresAt,
       expires_at: expiresAt,
       ...(type ? {card_type: type} : {}),
-      cvvPresent: !!row.cvv,
+      cvvPresent: !!(row.cvv || row.cvv_present),
     },
     ...adsPowerPayload(row, details),
     binding: {
@@ -375,17 +375,16 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   } catch (error) {
     throw writebackError(error, {cardStatus: 'failed', resultStatus: 'skipped'});
   }
-  try {
-    const resultWriteback = await writeRowResult(args, row, details, {...context, status: 'completed'});
-    secondaryFailures.push(...(resultWriteback.secondaryFailures || []));
-  } catch (error) {
-    throw writebackError(error, {cardStatus: 'written', resultStatus: 'failed'});
-  }
   return {
     cardStatus: 'written',
-    resultStatus: 'written',
+    resultStatus: 'skipped',
     ...(secondaryFailures.length ? {secondaryFailures} : {}),
   };
+}
+
+export async function writeCompletedRow(args, row, details, context = {}) {
+  // 当前 OPOM 合同只需要在充值成功后写回绑卡信息；充值结果接口不再调用，避免重复改变 OPOM 充值状态。
+  return writeCardBinding(args, row, details, context);
 }
 
 export async function writeRowResult(args, row, details, context = {}) {

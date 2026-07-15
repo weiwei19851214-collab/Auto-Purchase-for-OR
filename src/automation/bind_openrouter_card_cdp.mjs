@@ -10,6 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import {isRechargeBalanceIncreaseVerified} from './lib/balance-verification.mjs';
+import {writeCardBinding} from '../server/opom-client.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
@@ -611,6 +612,7 @@ function normalizeInput(args) {
   const billing = {...(json.billing || {})};
   const autoTopup = {...(json.autoTopup || {})};
   const purchase = {...(json.purchase || {})};
+  const opom = {...(json.opom || {})};
   const purchaseRule = {...(json.purchaseRule || purchase.rule || {})};
   const autoTopupThreshold = args['auto-topup-threshold'] || autoTopup.threshold || process.env.AUTO_TOPUP_THRESHOLD || '';
   const autoTopupAmount = args['auto-topup-amount'] || autoTopup.amount || process.env.AUTO_TOPUP_AMOUNT || '';
@@ -684,6 +686,19 @@ function normalizeInput(args) {
     },
     removeExistingPaymentMethod: !!(args['remove-existing'] || json.removeExistingPaymentMethod),
     verbose: !!(args.verbose || json.verbose),
+    opom: {
+      enabled: !!opom.enabled,
+      opomBaseUrl: opom.opomBaseUrl || '',
+      opomRechargeToken: opom.opomRechargeToken || '',
+      opomSecondaryBaseUrl: opom.opomSecondaryBaseUrl || '',
+      opomSecondaryRechargeToken: opom.opomSecondaryRechargeToken || '',
+      opomRequestTimeoutMs: opom.opomRequestTimeoutMs || '',
+      opomRequestRetries: opom.opomRequestRetries || '',
+      opomWritebackRetries: opom.opomWritebackRetries || '',
+      opomRetryDelayMs: opom.opomRetryDelayMs || '',
+      runId: opom.runId || '',
+      row: {...(opom.row || {})},
+    },
     autoTopup: {
       enabled: !!(args['configure-auto-topup'] || json.configureAutoTopup || autoTopup.enabled || autoTopupThreshold || autoTopupAmount),
       threshold: normalizeMoneyValue(autoTopupThreshold),
@@ -4417,6 +4432,42 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, state};
 }
 
+function purchaseVerifiedForOpomCardBinding(purchaseResult) {
+  return !!purchaseResult
+    && purchaseResult.submitted !== false
+    && purchaseResult.balanceVerification?.verified === true
+    && !purchaseResult.skippedByRule;
+}
+
+async function writeOpomCardBindingAfterPurchase(input, purchaseResult, cardSummary, debugDir) {
+  if (!input.opom?.enabled || !purchaseVerifiedForOpomCardBinding(purchaseResult)) {
+    return {cardStatus: 'skipped', resultStatus: 'skipped', reason: input.opom?.enabled ? 'purchase_not_verified' : 'opom_writeback_disabled'};
+  }
+  const {row: opomRow = {}, ...opomArgs} = input.opom;
+  const row = {
+    ...opomRow,
+    card_no: opomRow.card_no || input.card?.number || '',
+    card_number: opomRow.card_no || input.card?.number || '',
+    cvv_present: opomRow.cvv_present === true || !!input.card?.cvc,
+  };
+  const details = {
+    cardLast4: cardSummary?.last4 || maskCard(row.card_no || row.card_number).last4 || '',
+    adsPowerUserId: row.ads_power_user_id || input.profileId || '',
+    adsPowerSerialNumber: row.ads_power_serial_number || input.profileNo || '',
+    purchaseAmount: purchaseResult.amount || purchaseResult.ruleDecision?.selectedAmount || '',
+    balanceBefore: purchaseResult.balanceVerification?.beforeBalance ?? purchaseResult.beforeBalance?.balance ?? '',
+    balanceAfter: purchaseResult.balanceVerification?.afterBalance ?? '',
+  };
+  // 业务时机：OpenRouter 充值验证成功后立即写 OPOM 绑卡，不能再等 Auto Top-Up 设置完成。
+  return runLoggedStep('opom-card-binding-after-purchase', debugDir, () => writeCardBinding({
+    ...opomArgs,
+    opomWriteback: true,
+    cardProvider: row.card_provider,
+  }, row, details, {
+    runId: opomArgs.runId,
+  }));
+}
+
 async function waitForAccountState(page, options = {}) {
   const timeoutMs = options.timeoutMs || DEFAULT_CREDITS_ENTRY_WAIT_MS;
   const requirePaymentEntry = options.requirePaymentEntry !== false;
@@ -4577,6 +4628,7 @@ async function run() {
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
+      const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {}, debugDir);
       const autoTopupResult = await runLoggedStep('configure-auto-topup-after-purchase-only', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
@@ -4589,6 +4641,7 @@ async function run() {
         preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
+        opomCardWriteback,
         verified: true,
         purchaseModalOpened: input.purchase.confirmed || input.preparePurchaseOnly,
         elapsedMs: Date.now() - startedAt,
@@ -4633,6 +4686,7 @@ async function run() {
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
+      const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {last4}, debugDir);
       const autoTopupResult = await runLoggedStep('configure-auto-topup-existing-card', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
@@ -4648,6 +4702,7 @@ async function run() {
         preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
+        opomCardWriteback,
         verified: true,
         purchaseModalOpened: true,
         elapsedMs: Date.now() - startedAt,
@@ -4822,6 +4877,7 @@ async function run() {
     if (input.preparePurchaseOnly) purchaseResult.submitted = false;
     if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
     if (input.openPurchaseForVerification && !input.purchase.confirmed) await closePurchaseModal(page);
+    const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {last4}, debugDir);
     const autoTopupResult = await runLoggedStep('configure-auto-topup-final', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
 
     return {
@@ -4833,6 +4889,7 @@ async function run() {
       removal,
       autoTopup: autoTopupResult,
       purchase: purchaseResult,
+      opomCardWriteback,
       linkCheckedAfterUncheck: stripeState.linkChecked,
       postSave: {hasAddCredits: postSave.hasAddCredits},
       preAddCreditsAutoTopup,
@@ -4847,6 +4904,16 @@ async function run() {
         throw recoveryError;
       });
       if (recovery?.recovered) {
+        const recoveredPurchase = {
+          executed: true,
+          amount: purchasePlanForRecovery?.amount || purchasePlanForRecovery?.ruleDecision?.selectedAmount || '',
+          ruleDecision: purchasePlanForRecovery?.ruleDecision || null,
+          beforeBalance: purchasePlanForRecovery?.beforeBalance || null,
+          confirmation: {method: 'timeout_recovery', confirmations: recovery.confirmations},
+          result: {submitted: true, state: {timeoutRecovery: true}},
+          balanceVerification: recovery.balanceVerification,
+        };
+        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, recoveredPurchase, {last4}, debugDir);
         const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
         return {
           ok: true,
@@ -4856,15 +4923,8 @@ async function run() {
           launch: input.launch,
           preAddCreditsAutoTopup,
           autoTopup: autoTopupResult,
-          purchase: {
-            executed: true,
-            amount: purchasePlanForRecovery?.amount || purchasePlanForRecovery?.ruleDecision?.selectedAmount || '',
-            ruleDecision: purchasePlanForRecovery?.ruleDecision || null,
-            beforeBalance: purchasePlanForRecovery?.beforeBalance || null,
-            confirmation: {method: 'timeout_recovery', confirmations: recovery.confirmations},
-            result: {submitted: true, state: {timeoutRecovery: true}},
-            balanceVerification: recovery.balanceVerification,
-          },
+          purchase: recoveredPurchase,
+          opomCardWriteback,
           verified: true,
           purchaseModalOpened: true,
           elapsedMs: Date.now() - startedAt,

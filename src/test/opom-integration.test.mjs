@@ -782,7 +782,7 @@ test('parsePlan requires card expiration before confirmed OPOM writeback even wi
   assert.ok(blocked.rows[0].missing.includes('exp_year'));
 });
 
-test('writeCompletedRow writes OPOM card binding and result without CVV value', async () => {
+test('writeCompletedRow writes only OPOM card binding without CVV value', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     calls.push({url: String(url), body: JSON.parse(options.body)});
@@ -816,8 +816,8 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
       autoTopupThreshold: '2',
       autoTopupAmount: '25',
     }, {rowNumber: 2});
-    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
-    assert.equal(calls.length, 2);
+    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'skipped'});
+    assert.equal(calls.length, 1);
     assert.match(calls[0].url, /card-binding$/);
     assert.equal(calls[0].body.card.provider, 'LEGACY');
     assert.equal(calls[0].body.card.expiresAt, '2028-06');
@@ -827,12 +827,7 @@ test('writeCompletedRow writes OPOM card binding and result without CVV value', 
     assert.equal(calls[0].body.binding.source, 'recharge-api');
     assert.deepEqual(calls[0].body.adsPower, {userId: 'profile_ok', serialNumber: '1415'});
     assert.equal(JSON.stringify(calls).includes('456'), false);
-    assert.match(calls[1].url, /\/api\/v1\/recharge\/runs\/run_1\/results$/);
-    assert.equal(calls[1].body.loginEmail, 'user@example.com');
-    assert.deepEqual(calls[1].body.adsPower, {userId: 'profile_ok', serialNumber: '1415'});
-    assert.equal(calls[1].body.errorCode, undefined);
-    assert.equal(calls[1].body.errorMessage, undefined);
-    assert.equal(calls[1].body.stage, undefined);
+    assert.equal(calls.some((call) => /\/results$/.test(call.url)), false);
   });
 });
 
@@ -875,7 +870,7 @@ test('writeCompletedRow sends selected card provider and explicit OPOM card fiel
   });
 });
 
-test('writeCompletedRow mirrors card binding and result writeback to secondary OPOM', async () => {
+test('writeCompletedRow mirrors only card binding to secondary OPOM', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     calls.push({url: String(url), body: JSON.parse(options.body)});
@@ -907,14 +902,12 @@ test('writeCompletedRow mirrors card binding and result writeback to secondary O
       cardLast4: '0001',
     }, {rowNumber: 2});
 
-    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
-    assert.equal(calls.length, 4);
+    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'skipped'});
+    assert.equal(calls.length, 2);
     assert.match(calls[0].url, /^http:\/\/opom\.primary\/api\/v1\/recharge\/accounts\/acct_1\/card-binding$/);
     assert.match(calls[1].url, /^http:\/\/opom\.secondary\/api\/v1\/recharge\/accounts\/acct_1\/card-binding$/);
-    assert.match(calls[2].url, /^http:\/\/opom\.primary\/api\/v1\/recharge\/runs\/run_1\/results$/);
-    assert.match(calls[3].url, /^http:\/\/opom\.secondary\/api\/v1\/recharge\/runs\/run_1\/results$/);
     assert.equal(calls[0].body.idempotencyKey, calls[1].body.idempotencyKey);
-    assert.equal(calls[2].body.idempotencyKey, calls[3].body.idempotencyKey);
+    assert.equal(calls.some((call) => /\/results$/.test(call.url)), false);
     assert.equal(JSON.stringify(calls).includes('456'), false);
   });
 });
@@ -956,13 +949,13 @@ test('writeCompletedRow keeps completed status when only secondary OPOM writebac
       }, {rowNumber: 2});
 
       assert.equal(result.cardStatus, 'written');
-      assert.equal(result.resultStatus, 'written');
-      assert.equal(result.secondaryFailures.length, 2);
-      assert.equal(warnings.length, 2);
+      assert.equal(result.resultStatus, 'skipped');
+      assert.equal(result.secondaryFailures.length, 1);
+      assert.equal(warnings.length, 1);
       assert.ok(warnings.every((message) => /secondary writeback failed/.test(message)));
       assert.equal(JSON.stringify(warnings).includes('token=secret'), false);
-      assert.equal(calls.filter((call) => call.url.startsWith('http://opom.primary')).length, 2);
-      assert.equal(calls.filter((call) => call.url.startsWith('http://opom.secondary')).length, 2);
+      assert.equal(calls.filter((call) => call.url.startsWith('http://opom.primary')).length, 1);
+      assert.equal(calls.filter((call) => call.url.startsWith('http://opom.secondary')).length, 1);
     });
   } finally {
     console.warn = originalWarn;
@@ -990,7 +983,7 @@ test('opomDefaults prefers new RECHARGE_API_TOKEN while keeping old OPOM token c
   }).opomRechargeToken, 'old-token');
 });
 
-test('writeCompletedRow derives OPOM result card last4 from row card number when worker details omit it', async () => {
+test('writeRowResult derives OPOM result card last4 from row card number when worker details omit it', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     const body = JSON.parse(options.body);
@@ -1012,7 +1005,7 @@ test('writeCompletedRow derives OPOM result card last4 from row card number when
       exp_year: '28',
       cvv: '456',
     };
-    const result = await writeCompletedRow({
+    const result = await writeRowResult({
       opomWriteback: true,
       opomBaseUrl: 'http://opom.local',
       opomRechargeToken: 'test-token',
@@ -1025,11 +1018,12 @@ test('writeCompletedRow derives OPOM result card last4 from row card number when
       balanceAfter: '30',
     }, {rowNumber: 2});
 
-    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
-    assert.equal(calls.length, 2);
-    assert.equal(calls[1].body.card.orderNo, 'ejh_order_1');
-    assert.equal(JSON.stringify(calls[1]).includes('5257970000000001'), false);
-    assert.equal(JSON.stringify(calls[1]).includes('456'), false);
+    assert.deepEqual(result, {resultStatus: 'written'});
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
+    assert.equal(calls[0].body.card.panLast4, '0001');
+    assert.equal(JSON.stringify(calls[0]).includes('5257970000000001'), false);
+    assert.equal(JSON.stringify(calls[0]).includes('456'), false);
   });
 });
 
@@ -1073,13 +1067,10 @@ test('writeCompletedRow refuses OPOM card writeback without card expiration befo
   });
 });
 
-test('writeCompletedRow preserves partial OPOM writeback status when result write fails', async () => {
+test('writeCompletedRow skips OPOM result writeback for completed rows', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     calls.push({url: String(url), body: JSON.parse(options.body)});
-    if (String(url).endsWith('/results')) {
-      return Response.json({error: 'temporary result writeback outage token=secret'}, {status: 503});
-    }
     return Response.json({data: {ok: true}});
   }, async () => {
     const row = {
@@ -1093,8 +1084,7 @@ test('writeCompletedRow preserves partial OPOM writeback status when result writ
       exp_year: '28',
       cvv: '456',
     };
-    await assert.rejects(
-      () => writeCompletedRow({
+    const result = await writeCompletedRow({
         opomWriteback: true,
         opomBaseUrl: 'http://opom.local',
         opomRechargeToken: 'test-token',
@@ -1106,22 +1096,15 @@ test('writeCompletedRow preserves partial OPOM writeback status when result writ
         balanceBefore: '20',
         balanceAfter: '30',
         cardLast4: '0001',
-      }, {rowNumber: 2}),
-      (error) => {
-        assert.equal(error.opomCardWritebackStatus, 'written');
-        assert.equal(error.opomResultWritebackStatus, 'failed');
-        assert.match(error.message, /token=\[secret\]/);
-        assert.doesNotMatch(error.message, /token=secret/);
-        return true;
-      },
-    );
-    assert.equal(calls.length, 2);
+      }, {rowNumber: 2});
+    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'skipped'});
+    assert.equal(calls.length, 1);
     assert.match(calls[0].url, /card-binding$/);
-    assert.match(calls[1].url, /\/results$/);
+    assert.equal(calls.some((call) => /\/results$/.test(call.url)), false);
   });
 });
 
-test('writeCompletedRow retries OPOM result without negative balances for older OPOM validation', async () => {
+test('writeRowResult retries OPOM result without negative balances for older OPOM validation', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     const body = JSON.parse(options.body);
@@ -1142,7 +1125,7 @@ test('writeCompletedRow retries OPOM result without negative balances for older 
       exp_year: '28',
       cvv: '456',
     };
-    const result = await writeCompletedRow({
+    const result = await writeRowResult({
       opomWriteback: true,
       opomBaseUrl: 'http://opom.local',
       opomRechargeToken: 'test-token',
@@ -1156,21 +1139,20 @@ test('writeCompletedRow retries OPOM result without negative balances for older 
       cardLast4: '0001',
     }, {rowNumber: 2});
 
-    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
-    assert.equal(calls.length, 3);
-    assert.match(calls[0].url, /card-binding$/);
+    assert.deepEqual(result, {resultStatus: 'written'});
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].url, /\/results$/);
+    assert.equal(calls[0].body.balanceBeforeUsd, -5.174);
+    assert.equal(calls[0].body.balanceAfterUsd, 144.826);
     assert.match(calls[1].url, /\/results$/);
-    assert.equal(calls[1].body.balanceBeforeUsd, -5.174);
+    assert.equal(calls[1].body.balanceBeforeUsd, undefined);
     assert.equal(calls[1].body.balanceAfterUsd, 144.826);
-    assert.match(calls[2].url, /\/results$/);
-    assert.equal(calls[2].body.balanceBeforeUsd, undefined);
-    assert.equal(calls[2].body.balanceAfterUsd, 144.826);
   });
 });
 
 test('writeCompletedRow includes OPOM method path and status in request errors', async () => {
   await withFetch(async (url, options) => {
-    if (String(url).endsWith('/results')) {
+    if (String(url).endsWith('/card-binding')) {
       return Response.json({error: 'Invalid request'}, {status: 400});
     }
     return Response.json({data: {ok: true}});
@@ -1198,25 +1180,22 @@ test('writeCompletedRow includes OPOM method path and status in request errors',
         cardLast4: '0001',
       }, {rowNumber: 2}),
       (error) => {
-        assert.match(error.message, /POST \/api\/v1\/recharge\/runs\/run_1\/results HTTP 400: Invalid request/);
-        assert.equal(error.opomCardWritebackStatus, 'written');
-        assert.equal(error.opomResultWritebackStatus, 'failed');
+        assert.match(error.message, /PUT \/api\/v1\/recharge\/accounts\/acct_1\/card-binding HTTP 400: Invalid request/);
+        assert.equal(error.opomCardWritebackStatus, 'failed');
+        assert.equal(error.opomResultWritebackStatus, 'skipped');
         return true;
       },
     );
   });
 });
 
-test('writeCompletedRow retries idempotent OPOM card and result writeback after transient 500s', async () => {
+test('writeCompletedRow retries idempotent OPOM card binding after transient 500s', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     const body = JSON.parse(options.body);
     calls.push({url: String(url), body});
     if (String(url).endsWith('/card-binding') && calls.filter((call) => call.url.endsWith('/card-binding')).length === 1) {
       return Response.json({error: 'temporary card binding transaction timeout'}, {status: 500});
-    }
-    if (String(url).endsWith('/results') && calls.filter((call) => call.url.endsWith('/results')).length === 1) {
-      return Response.json({error: 'temporary result writeback outage'}, {status: 503});
     }
     return Response.json({data: {ok: true, idempotent: true}});
   }, async () => {
@@ -1245,15 +1224,14 @@ test('writeCompletedRow retries idempotent OPOM card and result writeback after 
       cardLast4: '0001',
     }, {rowNumber: 2});
 
-    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'written'});
+    assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'skipped'});
     assert.equal(calls.filter((call) => call.url.endsWith('/card-binding')).length, 2);
-    assert.equal(calls.filter((call) => call.url.endsWith('/results')).length, 2);
+    assert.equal(calls.filter((call) => call.url.endsWith('/results')).length, 0);
     assert.equal(calls[0].body.idempotencyKey, calls[1].body.idempotencyKey);
-    assert.equal(calls[2].body.idempotencyKey, calls[3].body.idempotencyKey);
   });
 });
 
-test('writeCompletedRow uses distinct OPOM result idempotency keys for completed and writeback failure events', async () => {
+test('writeRowResult uses distinct OPOM result idempotency keys for failure events', async () => {
   const calls = [];
   await withFetch(async (url, options) => {
     const body = JSON.parse(options.body);
@@ -1275,12 +1253,6 @@ test('writeCompletedRow uses distinct OPOM result idempotency keys for completed
       balanceAfter: '30',
       cardLast4: '0001',
     };
-    await writeCompletedRow({
-      opomWriteback: true,
-      opomBaseUrl: 'http://opom.local',
-      opomRechargeToken: 'test-token',
-      runId: 'run_1',
-    }, row, details, {rowNumber: 2});
     await writeRowResult({
       opomWriteback: true,
       opomBaseUrl: 'http://opom.local',
@@ -1296,10 +1268,8 @@ test('writeCompletedRow uses distinct OPOM result idempotency keys for completed
     const resultKeys = calls
       .filter((call) => call.url.endsWith('/results'))
       .map((call) => call.body.idempotencyKey);
-    assert.equal(resultKeys.length, 2);
-    assert.notEqual(resultKeys[0], resultKeys[1]);
-    assert.match(resultKeys[0], /:completed:completed$/);
-    assert.match(resultKeys[1], /:failed:opom\.writeback$/);
+    assert.equal(resultKeys.length, 1);
+    assert.match(resultKeys[0], /:failed:opom\.writeback$/);
   });
 });
 

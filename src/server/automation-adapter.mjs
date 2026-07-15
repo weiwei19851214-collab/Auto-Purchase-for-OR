@@ -491,7 +491,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
     let completed = purchaseOk && autoTopupOk;
-    if (completed && args.opomWriteback && args.confirmPurchase) {
+    if (completed && args.opomWriteback && args.confirmPurchase && details.opomCardWritebackStatus !== 'written') {
       try {
         const writeback = await opomAdapter.writeCompletedRow(args, row, details, {rowNumber: rawIndex + 2});
         details.opomCardWritebackStatus = writeback.cardStatus;
@@ -535,12 +535,17 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
 
   const contract = status.classifyError(outcome.error);
   const failureDetails = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
-  await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
-    rowNumber: rawIndex + 2,
-    status: contract.status,
-    message: commonAdapter.redact(outcome.error),
-    errorCode: contract.status,
-  });
+  if (isOpomCardBindingFailure(outcome.error)) {
+    failureDetails.opomCardWritebackStatus = 'failed';
+    failureDetails.opomResultWritebackStatus = 'skipped';
+  } else {
+    await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
+      rowNumber: rawIndex + 2,
+      status: contract.status,
+      message: commonAdapter.redact(outcome.error),
+      errorCode: contract.status,
+    });
+  }
   if (args.stopProfiles && contract.stopProfile) {
     profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }
@@ -563,6 +568,10 @@ async function writeNonCompletedOpomResult(opomAdapter, args, row, details, cont
   } catch {
     details.opomResultWritebackStatus = 'failed';
   }
+}
+
+function isOpomCardBindingFailure(error) {
+  return /OPOM .*card-binding|\/api\/v1\/recharge\/accounts\/[^/\s]+\/card-binding/i.test(String(error || ''));
 }
 
 function ensureAutomationLogDir(runtimeLog = {}, rawIndex = 0) {

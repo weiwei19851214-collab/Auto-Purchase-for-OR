@@ -292,6 +292,34 @@ export function buildClosedLoopTask(row, args) {
     purchaseOnly,
     autoTopup: {enabled: scope.autoTopup, threshold: autoTopup.threshold, amount: autoTopup.amount},
     purchase,
+    opom: args.opomWriteback ? {
+      enabled: true,
+      opomBaseUrl: args.opomBaseUrl || '',
+      opomRechargeToken: args.opomRechargeToken || '',
+      opomSecondaryBaseUrl: args.opomSecondaryBaseUrl || '',
+      opomSecondaryRechargeToken: args.opomSecondaryRechargeToken || '',
+      opomRequestTimeoutMs: args.opomRequestTimeoutMs || '',
+      opomRequestRetries: args.opomRequestRetries || '',
+      opomWritebackRetries: args.opomWritebackRetries || '',
+      opomRetryDelayMs: args.opomRetryDelayMs || '',
+      runId: args.runId || '',
+      row: {
+        opom_account_id: opomAccountId(row),
+        login_email: loginEmail(row),
+        ads_power_user_id: adsPowerUserId(row),
+        ads_power_serial_number: adsPowerSerialNumber(row),
+        ads_match_status: adsMatchStatus(row) || '',
+        ejh_order_no: ejhOrderNo(row),
+        order_no: ejhOrderNo(row),
+        card_no: cardNumber(row),
+        exp_month: row.exp_month,
+        exp_year: row.exp_year,
+        expires_at: cardExpiresAt(row),
+        card_provider: args.cardProvider || cardProvider(row) || '',
+        card_type: cardType(row),
+        cvv_present: !!row.cvv,
+      },
+    } : {enabled: false},
     card: {
       number: cardNumber(row),
       expMonth: row.exp_month,
@@ -420,7 +448,6 @@ export function completionEvidence(status, details = {}) {
     if (detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
     missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
     if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
-    if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
   }
 
   return {
@@ -449,6 +476,8 @@ export function successDetails(row, result, args) {
       : 'skipped',
     autoTopupThreshold: requestedAutoTopup.threshold || '',
     autoTopupAmount: requestedAutoTopup.amount || '',
+    opomCardWritebackStatus: result.opomCardWriteback?.cardStatus || result.opomCardWritebackStatus || '',
+    opomResultWritebackStatus: result.opomCardWriteback?.resultStatus || result.opomResultWritebackStatus || '',
   };
 }
 

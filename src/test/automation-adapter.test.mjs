@@ -245,6 +245,8 @@ test('browser path recognizes updated Auto top-up buttons and scoped inputs', ()
   assert.match(script, /scope\.querySelectorAll\('input'\)/);
   assert.match(script, /switchControls/);
   assert.match(script, /auto_topup_editor_fields/);
+  assert.match(script, /writeOpomCardBindingAfterPurchase/);
+  assert.ok(script.indexOf('writeOpomCardBindingAfterPurchase(input, purchaseResult') < script.indexOf("runLoggedStep('configure-auto-topup-final'"));
 });
 
 test('balance target purchase amount rounds up to the next whole dollar', () => {
@@ -643,7 +645,7 @@ test('writeResultCsv preserves source metadata when outcome details omit it', as
     assert.equal(firstRow.cardno, '5257970000000001');
     assert.equal(firstRow.completion_evidence_status, 'incomplete');
     assert.match(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
-    assert.match(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
+    assert.doesNotMatch(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
     assert.equal(firstRow.adspower_tag_status, 'skipped_user_waived');
     assert.equal(firstRow.adspower_status_target, 'waived_by_user');
     assert.doesNotMatch(firstRow.completion_evidence_missing, /adspower_tag_status/);
@@ -1082,10 +1084,9 @@ test('repairOpomWriteback completes verified opom writeback failures without rer
     assert.equal(repaired.rows[0].status, 'completed');
     assert.equal(repaired.rows[0].stage, 'closed_loop.complete');
     assert.equal(repaired.rows[0].opomCardWritebackStatus, 'written');
-    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
-    assert.equal(calls.length, 2);
+    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'skipped');
+    assert.equal(calls.length, 1);
     assert.match(calls[0].url, /\/card-binding$/);
-    assert.match(calls[1].url, /\/results$/);
     assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
     assert.equal(calls[0].body.card.cardNo, '5257970000000001');
     assert.equal(calls[0].body.card.cvv, undefined);

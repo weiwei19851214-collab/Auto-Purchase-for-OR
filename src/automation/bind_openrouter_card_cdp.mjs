@@ -3819,126 +3819,6 @@ async function waitForAutoTopupForm(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   throw new Error(`Auto top-up form not found: ${last?.tail || ''}`);
 }
 
-async function waitForAutoTopupEditorShell(page, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  let last = null;
-  while (Date.now() < deadline) {
-    last = await evaluate(page, `(() => {
-      const visible = (node) => {
-        if (!node) return false;
-        const rect = node.getBoundingClientRect();
-        const style = getComputedStyle(node);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      };
-      const textOf = (node) => (node?.innerText || node?.textContent || '').trim().replace(/\\s+/g, ' ');
-      const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
-        || node?.getAttribute('data-state') === 'checked'
-        || node?.hasAttribute('data-checked');
-      const readSwitch = (node, method = 'auto-buy-switch') => node ? ({
-        found: true,
-        wasEnabled: readChecked(node),
-        selector: node.id === 'auto-buy' ? '#auto-buy' : '',
-        method,
-        rect: (() => {
-          const rect = node.getBoundingClientRect();
-          return {x:rect.x, y:rect.y, width:rect.width, height:rect.height};
-        })(),
-      }) : {found:false};
-      const dialog = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"],form,section,article,div')]
-        .filter((node) => visible(node) && /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up|Enable\\s+auto\\s+top\\s+up/i.test(textOf(node)))
-        .sort((a, b) => {
-          const ar = a.getBoundingClientRect();
-          const br = b.getBoundingClientRect();
-          const abody = a === document.body ? 1 : 0;
-          const bbody = b === document.body ? 1 : 0;
-          return abody - bbody || (ar.width * ar.height) - (br.width * br.height);
-      })[0] || null;
-      const scope = dialog || document;
-      const autoBuy = scope.querySelector?.('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
-      const text = dialog ? textOf(dialog) : (document.body.innerText || '');
-      const labelText = (node) => [
-        node.getAttribute?.('aria-label'),
-        node.labels?.[0]?.innerText,
-        node.closest?.('label')?.innerText,
-        node.parentElement?.innerText,
-      ].filter(Boolean).join(' ');
-      const switchControls = [...scope.querySelectorAll('[role="switch"],button[aria-checked],button[data-state],input[type="checkbox"]')]
-        .map((node) => {
-          const labelNode = node.closest?.('label') || node.labels?.[0] || null;
-          const rect = node.getBoundingClientRect();
-          const labelRect = labelNode?.getBoundingClientRect?.() || rect;
-          const nodeText = textOf(node);
-          const label = labelText(node);
-          const switchShape = rect.width >= 20 && rect.width <= 80 && rect.height >= 10 && rect.height <= 50;
-          const hasAutoTopupLabel = /Enable\\s+auto\\s+top\\s+up|Automatically buy credits|Auto\\s*Top[- ]?Up/i.test(nodeText + ' ' + label);
-          return {
-            node,
-            labelNode,
-            rect,
-            labelRect,
-            text: nodeText,
-            label,
-            checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
-            role: node.getAttribute('role') || '',
-            type: node.getAttribute('type') || '',
-            switchShape,
-            hasAutoTopupLabel,
-          };
-        })
-        .filter((item) => {
-          const visibleControl = item.type === 'checkbox'
-            ? (visible(item.node) || visible(item.labelNode))
-            : visible(item.node);
-          if (!visibleControl) return false;
-          return item.role === 'switch' || item.node.hasAttribute('aria-checked') || item.node.hasAttribute('data-state') || item.type === 'checkbox';
-        })
-        .map((item) => {
-          const clickRect = visible(item.node) ? item.rect : item.labelRect;
-          const nearestEnableLabel = /Enable\\s+auto\\s+top\\s+up/i.test(text)
-            ? Math.abs(clickRect.y - (dialog?.getBoundingClientRect?.().y || clickRect.y))
-            : 0;
-          const score = (item.hasAutoTopupLabel ? 1000 : 0)
-            + (item.role === 'switch' ? 300 : 0)
-            + (item.switchShape ? 200 : 0)
-            - nearestEnableLabel / 20;
-          return {...item, clickRect, score};
-        })
-        .sort((a, b) => b.score - a.score);
-      const genericSwitch = switchControls[0] || null;
-      const inputs = [...scope.querySelectorAll('input')]
-        .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
-        .map((input) => ({
-          type: input.type || '',
-          name: input.name || '',
-          id: input.id || '',
-          placeholder: input.placeholder || '',
-          value: input.value || '',
-        }));
-      const textHasAutoAmounts = /When credits are below/i.test(text) && /Purchase this amount/i.test(text);
-      const hasSaveAction = [...scope.querySelectorAll('button,a,[role="button"]')]
-        .some((node) => visible(node) && /^(Save|Update|Enable Auto Top[- ]?Up|Apply)$/i.test(textOf(node)));
-      const directSwitch = readSwitch(autoBuy);
-      return {
-        found: Boolean(dialog || visible(autoBuy)),
-        formReady: textHasAutoAmounts && hasSaveAction && inputs.length >= 2,
-        // 业务规则：截图这种只露出开关的弹窗已经足够继续，不能再等完整金额表单。
-        editorSwitch: directSwitch.found ? directSwitch : (genericSwitch ? {
-          found: true,
-          wasEnabled: genericSwitch.checked,
-          selector: '',
-          method: genericSwitch.role === 'switch' ? 'role-switch' : (genericSwitch.type === 'checkbox' ? 'checkbox' : 'state-button'),
-          score: genericSwitch.score,
-          rect: {x:genericSwitch.clickRect.x, y:genericSwitch.clickRect.y, width:genericSwitch.clickRect.width, height:genericSwitch.clickRect.height},
-        } : {found:false}),
-        tail: (document.body.innerText || '').slice(-1800),
-      };
-    })()`);
-    if (last.formReady || last.editorSwitch?.found) return last;
-    await sleep(DEFAULT_DOM_POLL_MS);
-  }
-  throw new Error(`Auto top-up editor shell not found: ${last?.tail || ''}`);
-}
-
 async function getAutoTopupEditorSwitchState(page) {
   return evaluate(page, `(() => {
     const visible = (node) => {
@@ -3999,14 +3879,8 @@ async function openAutoTopupEditor(page, state) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await findAndClickAutoTopupAction(page, action);
     try {
-      const shell = await waitForAutoTopupEditorShell(page, 15000);
-      if (shell.formReady) {
-        const form = await waitForAutoTopupForm(page, 5000);
-        return {opened: true, action, formReady: true, form, shell};
-      }
-      if (shell.editorSwitch?.found) {
-        return {opened: true, action, formReady: false, editorSwitch: shell.editorSwitch, shell};
-      }
+      const form = await waitForAutoTopupForm(page, 1500);
+      return {opened: true, action, formReady: true, form};
     } catch (error) {
       lastError = error;
       const editorSwitch = await getAutoTopupEditorSwitchState(page).catch(() => null);
@@ -4401,7 +4275,7 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
     threshold: autoTopup.threshold,
     amount: autoTopup.amount,
   };
-  let state = await waitForAutoTopupOverview(page);
+  let state = await waitForAutoTopupOverview(page, 8000);
   const currentThreshold = normalizeMoneyForCompare(state.threshold);
   const currentAmount = normalizeMoneyForCompare(state.amount);
   const requestedThreshold = normalizeMoneyForCompare(requested.threshold);
@@ -4414,7 +4288,7 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   const toggled = await toggleAutoTopupIfNeeded(page);
   const formAfterToggle = opened.formReady
     ? opened.form
-    : await waitForAutoTopupForm(page, DEFAULT_DOM_WAIT_MS);
+    : await waitForAutoTopupForm(page, 5000);
   const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount);
   if (fields.unchanged && toggled.wasEnabled === true && toggled.verified?.wasEnabled === true) {
     // 弹窗中开关已开启且两个金额字段已经是目标值时，按页面字段确认即可，避免等待外层 overview 文案刷新。

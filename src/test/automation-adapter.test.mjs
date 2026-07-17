@@ -242,8 +242,8 @@ test('browser path recognizes updated Auto top-up buttons and scoped inputs', ()
   assert.ok(script.includes("node?.getAttribute('data-state') === 'checked'"));
   assert.doesNotMatch(script, /direct\.checked === true/);
   assert.match(script, /labelOf\(node\)/);
-  assert.match(script, /scope\.querySelectorAll\('input'\)/);
-  assert.match(script, /switchControls/);
+  assert.match(script, /document\.querySelectorAll\('input'\)/);
+  assert.doesNotMatch(script, /waitForAutoTopupEditorShell/);
   assert.match(script, /auto_topup_editor_fields/);
   assert.match(script, /writeOpomCardBindingAfterPurchase/);
   assert.ok(script.indexOf('writeOpomCardBindingAfterPurchase(input, purchaseResult') < script.indexOf("runLoggedStep('configure-auto-topup-final'"));

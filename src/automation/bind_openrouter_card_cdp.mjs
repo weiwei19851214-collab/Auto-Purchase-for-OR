@@ -161,6 +161,43 @@ async function installNetworkDiagnostics(client) {
   return {installed: true};
 }
 
+async function installJavaScriptDialogAutoAccept(client) {
+  if (!client || client.__dialogAutoAcceptInstalled) return {installed: false, reason: 'already_installed'};
+  client.__dialogAutoAcceptInstalled = true;
+  const source = `(() => {
+    const remember = (kind, message) => {
+      try {
+        window.__orAutomationDialogs = window.__orAutomationDialogs || [];
+        window.__orAutomationDialogs.push({kind, message: String(message || ''), at: Date.now()});
+        if (window.__orAutomationDialogs.length > 20) window.__orAutomationDialogs.shift();
+      } catch {}
+    };
+    // 浏览器级 window.alert 会阻塞页面 JS；这里提前覆盖，避免新号邮箱校验弹框卡住地址/支付流程。
+    window.alert = (message) => remember('alert', message);
+    window.confirm = (message) => {
+      remember('confirm', message);
+      return true;
+    };
+    window.prompt = (message, value = '') => {
+      remember('prompt', message);
+      return value ?? '';
+    };
+  })();`;
+  await client.send('Page.enable', {}, 5000).catch(() => {});
+  const removeListener = client.on?.('Page.javascriptDialogOpening', (event = {}) => {
+    client.send('Page.handleJavaScriptDialog', {accept: true}, 5000).catch(() => {});
+    client.__lastJavaScriptDialog = {
+      type: event.type || '',
+      message: event.message || '',
+      url: event.url || '',
+      at: new Date().toISOString(),
+    };
+  });
+  await client.send('Page.addScriptToEvaluateOnNewDocument', {source}, 5000).catch(() => null);
+  await evaluate(client, source, 5000).catch(() => null);
+  return {installed: true, listener: !!removeListener, strategy: 'addScriptToEvaluateOnNewDocument_and_javascriptDialogOpening'};
+}
+
 async function pageStepState(page) {
   if (!page) return null;
   const state = await evaluate(page, `(() => {
@@ -173,6 +210,7 @@ async function pageStepState(page) {
       hasAutoTopup: /Auto\\s*Top[- ]?Up/i.test(text),
       hasPurchaseCredits: /Purchase Credits/i.test(text),
       hasAddCredits: /Add Credits/i.test(text),
+      automationDialogs: window.__orAutomationDialogs || [],
       tail: text.slice(-1800),
     };
   })()`).catch((error) => ({error: error.message}));
@@ -187,6 +225,7 @@ async function pageStepState(page) {
     ignoredServerError,
     recentNetworkFailures,
     ignoredNetworkFailures: ignoredNetworkFailures.slice(-5),
+    lastJavaScriptDialog: page.__lastJavaScriptDialog || null,
   };
 }
 
@@ -4423,7 +4462,9 @@ async function run() {
   try {
     await page.send('Runtime.enable');
     await page.send('Page.enable').catch(() => {});
+    const dialogAutoAccept = await installJavaScriptDialogAutoAccept(page);
     writeDiagnostic(debugDir, 'network-diagnostics', {kind: 'network_diagnostics', page: pageNetworkDiagnostics});
+    writeDiagnostic(debugDir, 'dialog-auto-accept', {kind: 'dialog_auto_accept', dialogAutoAccept});
 	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
 	    const accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
       requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,

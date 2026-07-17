@@ -300,6 +300,16 @@ test('browser path records and dismisses non-fatal OpenRouter server errors afte
   assert.match(script, /clickedCount/);
 });
 
+test('browser path auto-accepts JavaScript dialogs before navigating Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /installJavaScriptDialogAutoAccept/);
+  assert.match(script, /Page\.addScriptToEvaluateOnNewDocument/);
+  assert.match(script, /Page\.javascriptDialogOpening/);
+  assert.match(script, /Page\.handleJavaScriptDialog/);
+  assert.match(script, /window\.alert = \(message\) => remember\('alert', message\)/);
+  assert.ok(script.indexOf('installJavaScriptDialogAutoAccept(page)') < script.indexOf("runLoggedStep('navigate-credits-page'"));
+});
+
 test('dryRunPayload reports row-level missing fields', async () => {
   const result = await dryRunPayload({fileName: 'missing.csv', csvText: MISSING_CSV});
   assert.equal(result.ok, true);

@@ -307,6 +307,11 @@ test('browser path auto-accepts JavaScript dialogs before navigating Credits', (
   assert.match(script, /Page\.javascriptDialogOpening/);
   assert.match(script, /Page\.handleJavaScriptDialog/);
   assert.match(script, /window\.alert = \(message\) => remember\('alert', message\)/);
+  assert.match(script, /window\.setInterval\(\(\) =>/);
+  assert.match(script, /button\.cl-modalCloseButton\[aria-label="Close modal"\]/);
+  assert.match(script, /stillVisiblePortal\.remove\(\)/);
+  assert.match(script, /removed floating-ui portal/);
+  assert.match(script, /window\.clearInterval\(window\.__orCloseClerkModalInterval\)/);
   assert.ok(script.indexOf('installJavaScriptDialogAutoAccept(page)') < script.indexOf("runLoggedStep('navigate-credits-page'"));
 });
 

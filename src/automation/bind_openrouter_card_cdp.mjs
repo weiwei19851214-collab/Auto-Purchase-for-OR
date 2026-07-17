@@ -182,6 +182,46 @@ async function installJavaScriptDialogAutoAccept(client) {
       remember('prompt', message);
       return value ?? '';
     };
+    if (!window.__orCloseClerkModalInterval) {
+      window.__orCloseClerkModalInterval = window.setInterval(() => {
+        const modalPattern = /Account|Profile details|Email addresses|Connected accounts|Web3 wallets|Manage your account info/i;
+        const portals = [...document.querySelectorAll('[data-floating-ui-portal]')]
+          .filter((node) => modalPattern.test(node.innerText || node.textContent || ''));
+        const portal = portals[0];
+        const button = portal?.querySelector('button.cl-modalCloseButton[aria-label="Close modal"], button[aria-label="Close modal"]')
+          || document.querySelector('button.cl-modalCloseButton[aria-label="Close modal"], button[aria-label="Close modal"]');
+        if (!portal && !button) return;
+        try {
+          if (button) {
+            button.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+            button.click?.();
+            button.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+          }
+          const stillVisiblePortal = [...document.querySelectorAll('[data-floating-ui-portal]')]
+            .find((node) => modalPattern.test(node.innerText || node.textContent || ''));
+          if (stillVisiblePortal) {
+            // Clerk 关闭事件不生效时，直接移除账号弹层 portal，并解除 inert/滚动锁，避免遮挡后续地址/支付流程。
+            stillVisiblePortal.remove();
+            for (const node of [document.documentElement, document.body, ...document.body.children]) {
+              node.removeAttribute?.('aria-hidden');
+              node.removeAttribute?.('data-base-ui-inert');
+              node.inert = false;
+            }
+            document.documentElement.style.overflow = '';
+            document.body.style.overflow = '';
+            remember('clerk_modal_removed', 'removed floating-ui portal');
+          } else if (button) {
+            remember('clerk_modal_close', button.getAttribute('aria-label') || 'Close modal');
+          }
+        } finally {
+          window.clearInterval(window.__orCloseClerkModalInterval);
+          window.__orCloseClerkModalInterval = null;
+        }
+      }, 100);
+    }
   })();`;
   await client.send('Page.enable', {}, 5000).catch(() => {});
   const removeListener = client.on?.('Page.javascriptDialogOpening', (event = {}) => {

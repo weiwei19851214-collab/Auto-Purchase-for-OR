@@ -54,8 +54,8 @@ export function safeFileName(name) {
 const CARD_PROVIDERS = new Set(['EJH', 'PINGPONG', 'LEGACY']);
 
 function normalizeCardProvider(value) {
-  const normalized = String(value || 'LEGACY').trim().toUpperCase().replace(/[\s_-]+/g, '');
-  return CARD_PROVIDERS.has(normalized) ? normalized : 'LEGACY';
+  const normalized = String(value || 'EJH').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'EJH';
 }
 
 export function runnerArgs(options = {}) {

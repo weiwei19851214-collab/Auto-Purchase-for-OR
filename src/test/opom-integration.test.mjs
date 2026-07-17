@@ -819,7 +819,7 @@ test('writeCompletedRow writes only OPOM card binding without CVV value', async 
     assert.deepEqual(result, {cardStatus: 'written', resultStatus: 'skipped'});
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /card-binding$/);
-    assert.equal(calls[0].body.card.provider, 'LEGACY');
+    assert.equal(calls[0].body.card.provider, 'EJH');
     assert.equal(calls[0].body.card.expiresAt, '2028-06');
     assert.equal(calls[0].body.card.expires_at, '2028-06');
     assert.equal(calls[0].body.card.card_type, 'MASTER_B1_3');

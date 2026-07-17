@@ -186,7 +186,7 @@ function optionsPayload() {
     preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
     autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
-    cardProvider: els.cardProvider?.value || 'LEGACY',
+    cardProvider: els.cardProvider?.value || 'EJH',
     ...config,
     opomWriteback: els.opomWriteback.checked && !els.opomWriteback.disabled,
     adspowerStatusMode: els.adspowerStatusMode?.value || 'disabled',

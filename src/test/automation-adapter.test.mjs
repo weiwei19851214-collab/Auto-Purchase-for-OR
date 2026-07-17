@@ -83,9 +83,9 @@ test('runnerArgs clamps concurrency to a safe local range', () => {
 });
 
 test('runnerArgs carries OPOM card provider selection', () => {
-  assert.equal(runnerArgs({}).cardProvider, 'LEGACY');
+  assert.equal(runnerArgs({}).cardProvider, 'EJH');
   assert.equal(runnerArgs({cardProvider: 'PINGPONG'}).cardProvider, 'PINGPONG');
-  assert.equal(runnerArgs({cardProvider: 'bad'}).cardProvider, 'LEGACY');
+  assert.equal(runnerArgs({cardProvider: 'bad'}).cardProvider, 'EJH');
 });
 
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {

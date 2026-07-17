@@ -319,8 +319,8 @@ export function cardExpiryIso(row) {
 }
 
 function normalizeCardProvider(value) {
-  const normalized = String(value || 'LEGACY').trim().toUpperCase().replace(/[\s_-]+/g, '');
-  return CARD_PROVIDERS.has(normalized) ? normalized : 'LEGACY';
+  const normalized = String(value || 'EJH').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'EJH';
 }
 
 function cardType(row) {
@@ -348,7 +348,7 @@ export async function writeCardBinding(args, row, details, context = {}) {
   const bindingBody = {
     idempotencyKey,
     card: {
-      // OPOM 绑卡写回需要明确卡通道；页面默认 LEGACY，避免未选择时丢失来源口径。
+      // OPOM 绑卡写回需要明确卡通道；系统默认 EJH，避免未选择时丢失来源口径。
       provider,
       orderNo,
       cardNo,

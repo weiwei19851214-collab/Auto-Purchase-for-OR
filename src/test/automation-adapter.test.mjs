@@ -315,6 +315,16 @@ test('browser path auto-accepts JavaScript dialogs before navigating Credits', (
   assert.ok(script.indexOf('installJavaScriptDialogAutoAccept(page)') < script.indexOf("runLoggedStep('navigate-credits-page'"));
 });
 
+test('browser path verifies Stripe card fields before saving payment method', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /ensureStripeCardReadyForSubmit/);
+  assert.match(script, /Stripe payment fields are not ready before Save payment method/);
+  assert.match(script, /verify-stripe-card-before-save/);
+  assert.match(script, /verify-stripe-card-before-save-retry/);
+  assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save'") < script.indexOf("runLoggedStep('click-save-payment-method'"));
+  assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save-retry'") < script.indexOf("runLoggedStep('click-save-payment-method-retry'"));
+});
+
 test('dryRunPayload reports row-level missing fields', async () => {
   const result = await dryRunPayload({fileName: 'missing.csv', csvText: MISSING_CSV});
   assert.equal(result.ok, true);

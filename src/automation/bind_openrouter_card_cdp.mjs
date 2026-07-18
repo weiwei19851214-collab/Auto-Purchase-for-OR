@@ -205,7 +205,7 @@ async function installJavaScriptDialogAutoAccept(client) {
           if (stillVisiblePortal) {
             // Clerk 关闭事件不生效时，直接移除账号弹层 portal，并解除 inert/滚动锁，避免遮挡后续地址/支付流程。
             stillVisiblePortal.remove();
-            for (const node of [document.documentElement, document.body, ...document.body.children]) {
+            for (const node of [document.documentElement, document.body, ...document.body?.children || []]) {
               node.removeAttribute?.('aria-hidden');
               node.removeAttribute?.('data-base-ui-inert');
               node.inert = false;
@@ -1315,7 +1315,7 @@ async function navigatePage(client, url, options = {}) {
 async function ensureCreditsPage(page) {
   const state = await evaluate(page, `(() => ({
     href: location.href,
-    hasCreditsUi: /Add Credits|Auto\\s*Top[- ]?Up/i.test(document.body.innerText || ''),
+    hasCreditsUi: /Add Credits|Auto\\s*Top[- ]?Up/i.test(document.body?.innerText || ''),
   }))()`).catch(() => ({href: '', hasCreditsUi: false}));
   if (state.href.startsWith(OPENROUTER_CREDITS_URL) && state.hasCreditsUi) {
     return {navigated: false, state};
@@ -1483,7 +1483,7 @@ async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME
         frame = await cdp(target.webSocketDebuggerUrl, 3000);
         await frame.send('Runtime.enable').catch(() => {});
         const state = await evaluate(frame, `(() => {
-          const text = document.body.innerText || '';
+          const text = document.body?.innerText || '';
           const hasCardNumber = !!document.querySelector('#payment-numberInput');
           const cardTabSelected = /Card\\s+selected/i.test(text) || /Card number/i.test(text);
           return {
@@ -1537,7 +1537,7 @@ async function waitForAddressTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME
           return {
             readyState: document.readyState,
             controlCount: controls.length,
-            text: (document.body.innerText || '').slice(0, 500),
+            text: (document.body?.innerText || '').slice(0, 500),
           };
         })()`, 3000);
         lastStates.push({url: target.url.split('#')[0], ...state});
@@ -1563,7 +1563,7 @@ async function detectSecurityChallenge(debugPort) {
       await frame.send('Runtime.enable');
       const state = await evaluate(frame, `(() => ({
         url: location.href,
-        text: (document.body.innerText || '').slice(0, 500),
+        text: (document.body?.innerText || '').slice(0, 500),
       }))()`, 3000);
       if (/select all|complete the security|hcaptcha|captcha|3D Secure|bank verification|security code|authentication required/i.test(state.text || '')) {
         return state;
@@ -1592,7 +1592,7 @@ async function clickByText(page, pattern, options = {}) {
       const text = (node.innerText || node.textContent || '').trim();
       return rx.test(text) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
     });
-    if (!el) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim()};
@@ -1623,7 +1623,7 @@ async function clickExactText(page, label, options = {}) {
       ));
       el = textNodeOwner?.closest('button,a,[role="button"]') || null;
     }
-    if (!el || !isVisible(el) || isDisabled(el)) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el || !isVisible(el) || isDisabled(el)) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim()};
@@ -1664,7 +1664,7 @@ async function clickAddPaymentMethod(page, options = {}) {
       const owner = textOwner?.node.closest('button,a,[role="button"]');
       if (owner && isVisible(owner) && !isDisabled(owner)) item = {node: owner, text: normalize(owner.innerText || owner.textContent || '')};
     }
-    if (!item && /Purchase Credits/i.test(document.body.innerText || '')) {
+    if (!item && /Purchase Credits/i.test(document.body?.innerText || '')) {
       const modal = [...document.querySelectorAll('body *')]
         .filter((node) => isVisible(node))
         .map((node) => ({node, text: normalize(node.innerText || node.textContent || ''), rect: node.getBoundingClientRect()}))
@@ -1687,7 +1687,7 @@ async function clickAddPaymentMethod(page, options = {}) {
         .sort((a, b) => b.rect.x - a.rect.x || a.rect.y - b.rect.y)[0];
       if (iconItem) item = {node: iconItem.node, text: iconItem.text || 'icon:add-payment-method'};
     }
-    if (!item) return {clicked:false, tail:(document.body.innerText || '').slice(-1800)};
+    if (!item) return {clicked:false, tail:(document.body?.innerText || '').slice(-1800)};
     item.node.scrollIntoView({block:'center', inline:'center'});
     item.node.click();
     return {clicked:true, label:item.text};
@@ -1743,7 +1743,7 @@ async function waitForClickableText(page, pattern, timeoutMs = DEFAULT_DOM_WAIT_
 
 async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '') {
   return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const last4 = ${JSON.stringify(expectedLast4 || '')};
     const expiry = ${JSON.stringify(expectedExpiry || '')};
     const targetCardVisible = (() => {
@@ -1930,7 +1930,7 @@ async function fillStripeBillingAddress(debugPort, billing) {
 }
 
 async function maybeFillBillingAddress(page, billing, debugPort = '') {
-  const text = await evaluate(page, 'document.body.innerText || ""');
+  const text = await evaluate(page, 'document.body?.innerText || ""');
   if (!/Complete address details|Update Address|Billing address|Full name|Address line 1|City|State|Postal/i.test(text)) {
     return {filled: false};
   }
@@ -2130,6 +2130,75 @@ async function focusAndInsertText(client, selector, text, options = {}) {
   throw new Error(`Stripe field did not retain value: ${selector}; state=${JSON.stringify(lastState)}`);
 }
 
+async function readStripePaymentFieldState(payment, card) {
+  const expected = {
+    number: normalizeStripeInputValue(card.number),
+    expiry: normalizeStripeInputValue(normalizeExpiry(card.expiry)),
+    cvc: normalizeStripeInputValue(card.cvc),
+    postalCode: normalizeStripeInputValue(card.postalCode),
+  };
+  return evaluate(payment, `(() => {
+    const valueOf = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return {exists:false, value:'', normalized:''};
+      const value = el.value || '';
+      return {
+        exists: true,
+        visible: (() => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })(),
+        value,
+        normalized: String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase(),
+      };
+    };
+    const fields = {
+      number: valueOf('#payment-numberInput'),
+      expiry: valueOf('#payment-expiryInput'),
+      cvc: valueOf('#payment-cvcInput'),
+      postalCode: valueOf('#payment-postalCodeInput'),
+    };
+    const expected = ${JSON.stringify(expected)};
+    const complete = {
+      number: fields.number.exists && fields.number.normalized === expected.number,
+      expiry: fields.expiry.exists && fields.expiry.normalized === expected.expiry,
+      cvc: fields.cvc.exists && fields.cvc.normalized === expected.cvc,
+      postalCode: !fields.postalCode.exists || fields.postalCode.normalized === expected.postalCode,
+    };
+    return {
+      fields,
+      complete,
+      ready: Object.values(complete).every(Boolean),
+    };
+  })()`);
+}
+
+async function ensureStripeCardReadyForSubmit(payment, card) {
+  let state = await readStripePaymentFieldState(payment, card);
+  if (state.ready) return {ready: true, retried: false, state};
+
+  // 提交 Save payment method 前必须回读 Stripe iframe 字段；若页面重渲染吞值，只重填一次，避免空卡号/有效期/邮编被提交。
+  if (!state.complete.number) {
+    await focusAndInsertText(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+  }
+  if (!state.complete.expiry) {
+    await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+  }
+  if (!state.complete.cvc) {
+    await focusAndInsertText(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
+  }
+  if (!state.complete.postalCode) {
+    if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
+    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
+  }
+
+  state = await readStripePaymentFieldState(payment, card);
+  if (!state.ready) {
+    throw new Error(`Stripe payment fields are not ready before Save payment method: ${JSON.stringify(state)}`);
+  }
+  return {ready: true, retried: true, state};
+}
+
 async function ensureStripeLinkUnchecked(payment) {
   let lastState = null;
   for (let i = 0; i < 6; i += 1) {
@@ -2150,7 +2219,7 @@ async function ensureStripeLinkUnchecked(payment) {
         found: !!checkbox,
         checked: checkbox ? !!checkbox.checked : null,
         phoneVisible,
-        phoneInvalidText: /Please provide a mobile phone number/i.test(document.body.innerText || ''),
+        phoneInvalidText: /Please provide a mobile phone number/i.test(document.body?.innerText || ''),
       };
     })()`);
     if ((lastState.found === false || lastState.checked === false) && !lastState.phoneVisible && !lastState.phoneInvalidText) {
@@ -2275,7 +2344,7 @@ async function dismissSaveCardOverlays(page, debugPort = '') {
   const browserBubble = await dismissBrowserChromeBubbles(page);
 
   const pageState = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -2318,7 +2387,7 @@ async function dismissBrowserChromeBubbles(page) {
 async function waitUntilSaveModalCloses(page) {
   for (let i = 0; i < 60; i += 1) {
     const state = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       return {
         stillSave: /Save payment method/.test(text),
         challenge: /hCaptcha|3D Secure|complete the security|security code|bank verification|SMS|passkey|suspicious/i.test(text),
@@ -2330,7 +2399,7 @@ async function waitUntilSaveModalCloses(page) {
     if (!state.stillSave && state.hasAddCredits) return state;
     await sleep(SLOW_DOM_POLL_MS);
   }
-  const state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2000)}))()`);
+  const state = await evaluate(page, `(() => ({tail:(document.body?.innerText || '').slice(-2000)}))()`);
   throw new Error(`Save modal did not close: ${state.tail}`);
 }
 
@@ -2344,7 +2413,7 @@ async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutM
   let state = null;
   while (Date.now() < deadline) {
     const verified = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
       const expiry = ${JSON.stringify(expectedExpiry)};
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
@@ -2373,7 +2442,7 @@ async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutM
       throw new Error(`Saved card was not visible after ${timeoutMs}ms, refreshed once and retried: ${error.message}`);
     }
   }
-  if (!state) state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2500)}))()`);
+  if (!state) state = await evaluate(page, `(() => ({tail:(document.body?.innerText || '').slice(-2500)}))()`);
   throw new Error(`Saved card was not visible in Purchase Credits modal after ${timeoutMs}ms: ${state.tail}`);
 }
 
@@ -2486,7 +2555,7 @@ const findSwitchByLabel = (labelPattern) => {
 async function getPurchaseModalState(page) {
   return evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const controls = [...document.querySelectorAll('input,button,[role="button"],[role="switch"]')]
       .filter((node) => visible(node))
       .map((node, index) => {
@@ -2527,7 +2596,7 @@ async function getPurchaseModalState(page) {
 
 async function getCurrentCreditBalance(page) {
   const state = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const ariaBalance = [...document.querySelectorAll('[aria-label]')]
       .map((node) => node.getAttribute('aria-label') || '')
       .find((label) => /Remaining credits:\\s*[-+]?\\d/i.test(label));
@@ -2687,7 +2756,7 @@ async function setPurchaseAmountInput(page, amount) {
         updated:false,
         reason:'amount_input_not_found',
         inputs:inputs.map((item) => ({index:item.index, type:item.input.type || '', value:item.input.value || '', text:item.text.slice(0, 300)})),
-        tail:(document.body.innerText || '').slice(-1800),
+        tail:(document.body?.innerText || '').slice(-1800),
       };
     }
     const input = candidate.input;
@@ -2724,7 +2793,7 @@ async function setPurchaseAmountInput(page, amount) {
 
 async function ensureOneTimePaymentMethodsOff(page) {
   const result = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Use one-time payment methods/i.test(text)) {
       return {found:false, checked:null, clicked:false};
     }
@@ -2769,7 +2838,7 @@ async function ensureOneTimePaymentMethodsOff(page) {
   })()`);
   await sleep(result.clicked ? 900 : 200);
   const verified = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Use one-time payment methods/i.test(text)) return {found:false, checked:null};
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
@@ -2806,7 +2875,7 @@ async function ensureOneTimePaymentMethodsOff(page) {
 async function ensurePurchaseInvoiceChecked(page) {
   const result = await evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Send me invoices/i.test(text)) {
       return {found:false, checked:null, clicked:false};
     }
@@ -2885,7 +2954,7 @@ async function clickPurchaseButton(page) {
     const button = [...document.querySelectorAll('button,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
       .find((node) => /^Purchase$/i.test((node.innerText || node.textContent || '').trim()));
-    if (!button) return {clicked:false, tail:(document.body.innerText || '').slice(-1600)};
+    if (!button) return {clicked:false, tail:(document.body?.innerText || '').slice(-1600)};
     button.scrollIntoView({block:'center', inline:'center'});
     button.click();
     return {clicked:true, label:(button.innerText || button.textContent || '').trim()};
@@ -2950,7 +3019,7 @@ async function waitForPurchaseResult(page, debugPort = '', timeoutMs = DEFAULT_D
   let lastState = null;
 	  while (Date.now() < deadline) {
 	    lastState = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -3098,7 +3167,7 @@ async function findRecentTransactionAmount(page, expectedAmount) {
   const target = Number(expectedAmount);
   if (!Number.isFinite(target) || target <= 0) return {found: false, reason: 'missing_expected_amount'};
   return evaluate(page, `((expectedAmount) => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const recentIndex = text.search(/Recent Transactions|History/i);
     const scope = recentIndex >= 0 ? text.slice(recentIndex, recentIndex + 2500) : text.slice(0, 2500);
     const escaped = String(expectedAmount).replace(/\\./g, '\\\\.');
@@ -3114,7 +3183,7 @@ async function findRecentTransactionAmount(page, expectedAmount) {
 
 async function detectPaymentIssue(page) {
   return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -3234,7 +3303,7 @@ async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
         && !node.disabled
         && node.getAttribute('aria-disabled') !== 'true';
     });
-    if (!el) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ')};
@@ -3284,8 +3353,8 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         return {
           clicked: false,
           done: true,
-          hasSave: /Save payment method/.test(document.body.innerText || ''),
-          tail: (document.body.innerText || '').slice(-1800),
+          hasSave: /Save payment method/.test(document.body?.innerText || ''),
+          tail: (document.body?.innerText || '').slice(-1800),
         };
       }
 
@@ -3336,7 +3405,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
           done: false,
           card: {text: card.text, rect: card.rect},
           buttons: buttons.map(({node, ...item}) => item).slice(-35),
-          tail: (document.body.innerText || '').slice(-1800),
+          tail: (document.body?.innerText || '').slice(-1800),
         };
       }
 
@@ -3371,7 +3440,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
     })()`);
     for (let wait = 0; wait < 10; wait += 1) {
       const state = await evaluate(page, `(() => {
-        const text = document.body.innerText || '';
+        const text = document.body?.innerText || '';
         const removedCard = ${JSON.stringify(result.card)};
         return {
           cardStillVisible: removedCard ? text.includes(removedCard) : false,
@@ -3396,7 +3465,7 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
   const deadline = Date.now() + DEFAULT_DOM_WAIT_MS;
   while (Date.now() < deadline) {
     const state = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
       const expiry = ${JSON.stringify(expectedExpiry)};
       const visible = (node) => {
@@ -3699,7 +3768,7 @@ function normalizeMoneyForCompare(value) {
 
 async function getAutoTopupState(page) {
   return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const enabledMatch = text.match(/Auto\\s*top[- ]?up\\s+is\\s+enabled\\s+and\\s+will\\s+add\\s+\\$?([\\d,.]+)\\s+credits\\s+automatically\\s+when\\s+your\\s+balance\\s+drops\\s+below\\s+\\$?([\\d,.]+)/i);
     const enabled = !!enabledMatch
       || /Auto\\s*Top[- ]?Up\\s+is\\s+enabled/i.test(text)
@@ -3824,7 +3893,7 @@ async function findAndClickAutoTopupAction(page, action) {
           clicked:false,
           buttonTexts:buttons.map((button) => button.label),
           scored: scored.map((item) => ({text:item.text, label:item.label, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
-          tail:(document.body.innerText || '').slice(-2500),
+          tail:(document.body?.innerText || '').slice(-2500),
         };
       }
       target.node.scrollIntoView({block:'center', inline:'center'});
@@ -3850,7 +3919,7 @@ async function waitForAutoTopupForm(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   let last = null;
   while (Date.now() < deadline) {
     last = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const fieldText = (input) => [
         input.name,
         input.id,
@@ -3923,7 +3992,7 @@ async function getAutoTopupEditorSwitchState(page) {
         selector: direct.id === 'auto-buy' ? '#auto-buy' : '',
         method: 'auto-buy-switch',
         rect: {x:rect.x, y:rect.y, width:rect.width, height:rect.height},
-        tail: (document.body.innerText || '').slice(-1800),
+        tail: (document.body?.innerText || '').slice(-1800),
       };
     }
     const controls = [...document.querySelectorAll('[role="switch"],button[aria-checked],button[data-state],input[type="checkbox"]')]
@@ -3941,13 +4010,13 @@ async function getAutoTopupEditorSwitchState(page) {
         if (item.type !== 'checkbox' && !visible(item.node)) return false;
         const text = (item.text || '') + ' ' + (item.label || '');
         return /Enable\\s+auto\\s+top\\s+up/i.test(text)
-          || /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(document.body.innerText || '');
+          || /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(document.body?.innerText || '');
       });
     const target = controls[0] || null;
     return {
       found: !!target,
       wasEnabled: target ? target.checked : null,
-      tail: (document.body.innerText || '').slice(-1800),
+      tail: (document.body?.innerText || '').slice(-1800),
     };
   })()`);
 }
@@ -4236,7 +4305,7 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
         return rect.width > 0 && rect.height > 0 && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || '');
       });
     if (!target || target.score < -1000) {
-      return {found:false, inputCount:visibleInputs.length, tail:(document.body.innerText || '').slice(-1800)};
+      return {found:false, inputCount:visibleInputs.length, tail:(document.body?.innerText || '').slice(-1800)};
     }
     const clickRect = visible(target.node)
       ? target.rect
@@ -4319,7 +4388,7 @@ async function saveAutoTopup(page) {
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score);
     const button = candidates[0] || null;
-    if (!button) return {clicked:false, buttons:[...document.querySelectorAll('button,a,[role="button"]')].filter(visible).map((node) => textOf(node)).slice(-30), tail:(document.body.innerText || '').slice(-2500)};
+    if (!button) return {clicked:false, buttons:[...document.querySelectorAll('button,a,[role="button"]')].filter(visible).map((node) => textOf(node)).slice(-30), tail:(document.body?.innerText || '').slice(-2500)};
     button.node.scrollIntoView({block:'center', inline:'center'});
     button.node.click();
     return {clicked:true, label:button.text, score:button.score, containerText:button.containerText};
@@ -4428,7 +4497,7 @@ async function waitForAccountState(page, options = {}) {
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -4785,6 +4854,7 @@ async function run() {
 
     let saveClick;
     try {
+      stripeState.preSubmit = await runLoggedStep('verify-stripe-card-before-save', debugDir, () => ensureStripeCardReadyForSubmit(payment, input.card), payment);
       saveClick = await runLoggedStep('click-save-payment-method', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
     } catch (error) {
       if (!isRetryablePageLoadError(error)) throw error;
@@ -4805,6 +4875,7 @@ async function run() {
       await installNetworkDiagnostics(payment);
       await payment.send('Runtime.enable');
       stripeState = await runLoggedStep('fill-stripe-card-after-save-refresh', debugDir, () => fillStripeCard(payment, input.card), payment);
+      stripeState.preSubmit = await runLoggedStep('verify-stripe-card-before-save-retry', debugDir, () => ensureStripeCardReadyForSubmit(payment, input.card), payment);
       saveClick = await runLoggedStep('click-save-payment-method-retry', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
     }
     if (!saveClick.clicked) {

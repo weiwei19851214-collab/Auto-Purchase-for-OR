@@ -362,17 +362,15 @@ async function dismissOpenRouterServerErrorToast(page) {
 async function commandRefreshCreditsPage(page) {
   if (!page) return {refreshed: false};
   await page.send('Page.bringToFront').catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91}).catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 4}).catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 4}).catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91}).catch(() => {});
+  // 新号弹框恢复只需要刷新 Credits 页；使用 Page.reload 避免 macOS ⌘R 焦点异常触发系统菜单。
+  await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
   const ready = await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
   if (!ready) {
     await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
     await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
   }
   await sleep(PAGE_SETTLE_MS);
-  return {refreshed: true, method: 'command_r', ready};
+  return {refreshed: true, method: 'page_reload', ready};
 }
 
 async function detectNewAccountOverlay(page) {
@@ -4021,8 +4019,8 @@ async function getAutoTopupEditorSwitchState(page) {
   })()`);
 }
 
-async function openAutoTopupEditor(page, state) {
-  const action = state.enabled || state.hasManage ? 'Manage' : 'Enable';
+async function openAutoTopupEditor(page, state, forcedAction = '') {
+  const action = forcedAction || (state.enabled || state.hasManage ? 'Manage' : 'Enable');
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await findAndClickAutoTopupAction(page, action);
@@ -4041,186 +4039,70 @@ async function openAutoTopupEditor(page, state) {
   throw new Error(`Auto top-up ${action} did not open the settings form: ${lastError?.message || 'unknown error'}`);
 }
 
-async function replaceInputByRect(page, rect, value) {
-  const x = rect.x + rect.width / 2;
-  const y = rect.y + rect.height / 2;
+async function replaceAutoTopupInputById(page, selector, value) {
+  const target = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const input = document.querySelector(${JSON.stringify(selector)});
+    if (!visible(input)) return {found:false, selector:${JSON.stringify(selector)}};
+    // 不直接改 value。这里只负责把输入框滚到可见区，后面用 CDP 键盘事件模拟真人清空和输入。
+    input.scrollIntoView({block:'center', inline:'center'});
+    const rect = input.getBoundingClientRect();
+    return {found:true, before: input.value || '', rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height}};
+  })()`);
+  if (!target?.found) return {updated: false, reason: 'auto_topup_input_not_found', selector};
+  const x = target.rect.x + Math.max(8, target.rect.width - 16);
+  const y = target.rect.y + target.rect.height / 2;
   await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
   await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
   await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
-  await sleep(120);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 4});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 4});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91});
   await sleep(80);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-  await sleep(80);
-  await evaluate(page, `(() => {
-    const targetRect = ${JSON.stringify(rect)};
-    const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => {
-        const item = input.getBoundingClientRect();
-        return item.width > 0 && item.height > 0 && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden';
-      })
-      .map((input) => {
-        const item = input.getBoundingClientRect();
-        const distance = Math.abs((item.x + item.width / 2) - (targetRect.x + targetRect.width / 2))
-          + Math.abs((item.y + item.height / 2) - (targetRect.y + targetRect.height / 2));
-        return {input, distance};
-      })
-      .sort((a, b) => a.distance - b.distance);
-    const input = inputs[0]?.input;
-    if (!input || inputs[0].distance > 120) return false;
-    input.focus();
-    const nativeValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
-    if (nativeValue) nativeValue.call(input, '');
-    else input.value = '';
-    try {
-      input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'deleteContentBackward', data:null}));
-    } catch {
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    }
-    input.dispatchEvent(new Event('change', {bubbles:true}));
-    return true;
-  })()`).catch(() => false);
-  await sleep(120);
+  // Auto Top-Up 必须让前端收到真实键盘输入事件；连续 Backspace 比 DOM 清空更接近人工操作。
+  for (let i = 0; i < 12; i += 1) {
+    await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
+    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
+    await sleep(20);
+  }
   await page.send('Input.insertText', {text: String(value)});
-  await sleep(180);
+  await sleep(120);
+  return evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    const expected = Number(${JSON.stringify(String(value))});
+    const actual = Number(String(input?.value || '').replace(/[$,\\s]/g, ''));
+    return {
+      updated: Number.isFinite(actual) && actual === expected,
+      selector:${JSON.stringify(selector)},
+      before:${JSON.stringify(target.before || '')},
+      value: input?.value || '',
+    };
+  })()`);
 }
 
-async function fillAutoTopupForm(page, threshold, amount) {
-  const fields = await evaluate(page, `(() => {
-    const visible = (node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+async function fillAutoTopupForm(page, threshold, amount, options = {}) {
+  let last = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const thresholdInput = await replaceAutoTopupInputById(page, 'input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold', threshold);
+    const amountInput = thresholdInput.updated
+      ? await replaceAutoTopupInputById(page, 'input#auto-topup-amount[name="amount"], input#auto-topup-amount', amount)
+      : {updated: false, reason: 'threshold_not_ready'};
+    last = {
+      updated: thresholdInput.updated && amountInput.updated,
+      thresholdSet: thresholdInput.updated,
+      amountSet: amountInput.updated,
+      thresholdInput,
+      amountInput,
+      source: 'auto_topup_real_text_input',
+      clearFirst: options.clearFirst === true,
     };
-    const labelText = (input) => [
-      input.name,
-      input.id,
-      input.placeholder,
-      input.getAttribute('aria-label'),
-      input.labels?.[0]?.innerText,
-      input.closest('label')?.innerText,
-      input.parentElement?.innerText,
-      input.closest('[role="group"]')?.innerText,
-    ].filter(Boolean).join(' ');
-      const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => visible(input) && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test((input.placeholder || '') + ' ' + labelText(input)))
-      .map((input, index) => ({input, index, text: labelText(input), rect: input.getBoundingClientRect()}));
-    const sortedAmountInputs = inputs
-      .filter((item) => item.input.type === 'number' || /\\$/.test(item.text))
-      .sort((a, b) => a.rect.y - b.rect.y);
-    const thresholdInput = inputs.find((item) => /when credits are below|balance drops below|below|threshold/i.test(item.text)) || sortedAmountInputs[0];
-    const amountInput = inputs.find((item) => item.input !== thresholdInput?.input && /purchase this amount|add.*credits|amount|purchase/i.test(item.text)) || sortedAmountInputs.find((item) => item.input !== thresholdInput?.input) || inputs.find((item) => item.input !== thresholdInput?.input);
-    if (!thresholdInput || !amountInput) {
-      return {
-        inputCount: inputs.length,
-        inputs: inputs.map((item) => ({index:item.index, text:item.text, value:item.input.value})),
-      };
+    if (last.updated) {
+      return last;
     }
-    const plain = (item) => ({
-      index: item.index,
-      text: item.text,
-      value: item.input.value,
-      rect: {x:item.rect.x, y:item.rect.y, width:item.rect.width, height:item.rect.height},
-    });
-    return {
-      threshold: plain(thresholdInput),
-      amount: plain(amountInput),
-      inputCount: inputs.length,
-    };
-  })()`);
-  if (!fields.threshold || !fields.amount) {
-    throw new Error(`Could not locate Auto top-up fields: ${JSON.stringify(fields)}`);
+    await sleep(100);
   }
-
-  const replaceInput = async (field, value) => {
-    await replaceInputByRect(page, field.rect, String(value));
-    const result = await evaluate(page, `(() => {
-      const field = ${JSON.stringify(field)};
-      const value = ${JSON.stringify(String(value))};
-      const normalizeMoney = (item) => {
-        const number = Number(String(item || '').replace(/[$,\\s]/g, ''));
-        return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
-      };
-      const expected = normalizeMoney(value);
-      const inputs = [...document.querySelectorAll('input')]
-        .filter((input) => {
-          const rect = input.getBoundingClientRect();
-          const label = [input.placeholder, input.labels?.[0]?.innerText, input.parentElement?.innerText].filter(Boolean).join(' ');
-          return rect.width > 0 && rect.height > 0 && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(label);
-        })
-        .map((input, index) => {
-          const rect = input.getBoundingClientRect();
-          const centerX = rect.x + rect.width / 2;
-          const centerY = rect.y + rect.height / 2;
-          const fieldCenterX = field.rect.x + field.rect.width / 2;
-          const fieldCenterY = field.rect.y + field.rect.height / 2;
-          const distance = Math.abs(centerX - fieldCenterX) + Math.abs(centerY - fieldCenterY);
-          return {input, index, rect, distance};
-        })
-        .sort((a, b) => a.distance - b.distance);
-      const target = inputs[0] || null;
-      if (!target || target.distance > 120) {
-        return {
-          updated:false,
-          reason:'target_not_found',
-          inputs:inputs.slice(0, 5).map((item) => ({index:item.index, distance:item.distance, value:item.input.value})),
-        };
-      }
-      const input = target.input;
-      input.blur();
-      return {
-        updated: input.value === value || normalizeMoney(input.value) === expected,
-        index: target.index,
-        distance: target.distance,
-        value: input.value,
-      };
-    })()`);
-    if (!result.updated) {
-      throw new Error(`Auto top-up input did not retain ${value}: ${JSON.stringify(result)}`);
-    }
-    await sleep(350);
-    return result;
-  };
-
-  const thresholdInput = await replaceInput(fields.threshold, threshold);
-  const amountInput = await replaceInput(fields.amount, amount);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9}).catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9}).catch(() => {});
-  await sleep(400);
-  const result = await evaluate(page, `(() => {
-    const visible = (node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const normalizeMoney = (value) => {
-      const number = Number(String(value || '').replace(/[$,\\s]/g, ''));
-      return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
-    };
-    const expectedThreshold = normalizeMoney(${JSON.stringify(threshold)});
-    const expectedAmount = normalizeMoney(${JSON.stringify(amount)});
-    const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
-      .map((input) => ({type:input.type, value:input.value}));
-    const save = [...document.querySelectorAll('button,[role="button"]')]
-      .find((node) => visible(node) && /^Save$/i.test((node.innerText || node.textContent || '').trim()));
-    return {
-      thresholdSet: inputs.some((input) => normalizeMoney(input.value) === expectedThreshold),
-      amountSet: inputs.some((input) => normalizeMoney(input.value) === expectedAmount),
-      saveDisabled: save ? (!!save.disabled || save.getAttribute('aria-disabled') === 'true') : null,
-      inputs,
-    };
-  })()`);
-  if (!result.thresholdSet || !result.amountSet) {
-    throw new Error(`Auto top-up fields did not retain requested values: ${JSON.stringify(result)}`);
-  }
-  if (result.saveDisabled) {
-    return {...result, unchanged: true, fields, thresholdInput, amountInput, dirtyNudge: true};
-  }
-  return {...result, fields, thresholdInput, amountInput, dirtyNudge: true};
+  throw new Error(`Auto top-up form inputs not ready: ${JSON.stringify(last)}`);
 }
 
 async function toggleAutoTopupTo(page, desiredEnabled) {
@@ -4358,41 +4240,78 @@ async function toggleAutoTopupIfNeeded(page) {
 }
 
 async function saveAutoTopup(page) {
-  const result = await evaluate(page, `(() => {
+  const readAndClickSave = () => evaluate(page, `(() => {
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
-    const candidates = [...document.querySelectorAll('button,a,[role="button"]')]
+    const submitButtons = [...document.querySelectorAll('form button[type="submit"], button[type="submit"]')]
+      .filter((node) => visible(node) && /^Save$/i.test(textOf(node)));
+    const submitSave = submitButtons.find((node) => !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+    if (submitSave) {
+      submitSave.scrollIntoView({block:'center', inline:'center'});
+      submitSave.click();
+      return {clicked:true, label:textOf(submitSave), method:'submit-save-button'};
+    }
+    const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
       .map((node) => {
         const text = textOf(node);
-        let container = node.parentElement;
-        let score = /^(Save|Update|Enable Auto Top[- ]?Up|Confirm|Apply)$/i.test(text) ? 1000 : (/Save|Update|Enable Auto Top[- ]?Up|Apply/i.test(text) ? 500 : -1000);
-        let containerText = '';
+        const isSave = /^(Save|Update|Enable Auto Top[- ]?Up|Confirm|Apply)$/i.test(text);
+        let container = node;
+        let containerText = text;
+        let inAutoTopupForm = false;
         for (let depth = 0; container && depth < 10; depth += 1, container = container.parentElement) {
           if (!visible(container)) continue;
           const candidateText = textOf(container);
-          const hasForm = /Auto\\s*Top[- ]?Up|When credits are below|Purchase this amount|Payment Methods/i.test(candidateText);
-          if (!hasForm) continue;
-          const rect = container.getBoundingClientRect();
-          const area = rect.width * rect.height;
-          const isBody = container === document.body;
-          score += 1000 - (isBody ? 500 : 0) - area / 2000;
           containerText = candidateText.slice(0, 800);
-          break;
+          if (/When credits are below|Purchase this amount|Payment Methods/i.test(candidateText)) {
+            inAutoTopupForm = true;
+            break;
+          }
+          if (/Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(candidateText)) {
+            inAutoTopupForm = true;
+          }
+          if (container === document.body) break;
         }
-        return {node, text, score, containerText};
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score);
-    const button = candidates[0] || null;
-    if (!button) return {clicked:false, buttons:[...document.querySelectorAll('button,a,[role="button"]')].filter(visible).map((node) => textOf(node)).slice(-30), tail:(document.body?.innerText || '').slice(-2500)};
+        return {node, text, isSave, inAutoTopupForm, containerText};
+      });
+    // Auto Top-Up 弹窗里的 Save 是唯一要点的目标；不要再用面积/层级打分，避免页面结构轻微变化时误过滤。
+    const scoped = buttons.filter((item) => item.isSave && item.inAutoTopupForm);
+    const plainSave = buttons.filter((item) => item.isSave && /^Save$/i.test(item.text));
+    const button = scoped[0] || (plainSave.length === 1 ? plainSave[0] : null);
+    if (!button) {
+      const disabledSaves = submitButtons.map((node) => ({
+        text: textOf(node),
+        disabled: !!node.disabled,
+        ariaDisabled: node.getAttribute('aria-disabled') || '',
+      }));
+      return {
+        clicked:false,
+        buttons:buttons.map((item) => item.text).slice(-30),
+        disabledSaves,
+        scopedSaveCount: scoped.length,
+        plainSaveCount: plainSave.length,
+        tail:(document.body?.innerText || '').slice(-2500),
+      };
+    }
     button.node.scrollIntoView({block:'center', inline:'center'});
     button.node.click();
-    return {clicked:true, label:button.text, score:button.score, containerText:button.containerText};
+    return {
+      clicked:true,
+      label:button.text,
+      scoped:button.inAutoTopupForm,
+      containerText:button.containerText,
+    };
   })()`);
+  let result = null;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    result = await readAndClickSave();
+    if (result.clicked) break;
+    // OpenRouter 表单写值后 Save 可能短暂 disabled；等它真正可点再提交，避免把“保存中/解锁中”误判成失败。
+    await sleep(100);
+  }
   if (!result.clicked) throw new Error(`Auto top-up save button not found: ${JSON.stringify(result)}`);
   await sleep(1800);
   return result;
@@ -4413,6 +4332,48 @@ async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = D
     await sleep(800);
   }
   throw new Error(`Auto top-up did not reach requested values: ${JSON.stringify(state)}`);
+}
+
+async function readAutoTopupConfiguredNow(page, threshold, amount) {
+  const state = await getAutoTopupState(page);
+  const currentThreshold = normalizeMoneyForCompare(state.threshold);
+  const currentAmount = normalizeMoneyForCompare(state.amount);
+  const expectedThreshold = normalizeMoneyForCompare(threshold);
+  const expectedAmount = normalizeMoneyForCompare(amount);
+  return {
+    configured: state.enabled && currentThreshold === expectedThreshold && currentAmount === expectedAmount,
+    state,
+  };
+}
+
+async function retryAutoTopupSaveAfterOverviewMismatch(page, requested, firstError) {
+  const current = await readAutoTopupConfiguredNow(page, requested.threshold, requested.amount).catch(() => null);
+  if (current?.configured) {
+    return {
+      attempted: false,
+      skipped: true,
+      reason: 'overview_already_matched_before_retry',
+      firstError: firstError?.message || String(firstError || ''),
+      state: current.state,
+    };
+  }
+  const stateBeforeRetry = await waitForAutoTopupOverview(page, 3000).catch((error) => ({enabled: true, hasManage: true, error: error.message}));
+  const opened = await openAutoTopupEditor(page, {...stateBeforeRetry, enabled: true, hasManage: true}, 'Manage');
+  const formAfterToggle = opened.formReady
+    ? opened.form
+    : await waitForAutoTopupForm(page, 5000);
+  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
+  const saved = await saveAutoTopup(page);
+  return {
+    attempted: true,
+    reason: 'overview_text_mismatch_after_first_save',
+    firstError: firstError?.message || String(firstError || ''),
+    stateBeforeRetry,
+    opened,
+    formAfterToggle,
+    fields,
+    saved,
+  };
 }
 
 async function configureAutoTopup(page, autoTopup, debugPort = '') {
@@ -4437,21 +4398,16 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   const formAfterToggle = opened.formReady
     ? opened.form
     : await waitForAutoTopupForm(page, 5000);
-  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount);
-  if (fields.unchanged && toggled.wasEnabled === true && toggled.verified?.wasEnabled === true) {
-    // 弹窗中开关已开启且两个金额字段已经是目标值时，按页面字段确认即可，避免等待外层 overview 文案刷新。
-    state = {
-      enabled: true,
-      amount: requested.amount,
-      threshold: requested.threshold,
-      configured: true,
-      source: 'auto_topup_editor_fields',
-    };
-    return {configured: true, changed: false, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved: {clicked: false, skipped: true, reason: 'values_already_set'}, state};
-  }
+  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
   const saved = await saveAutoTopup(page);
-  state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
-  return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, state};
+  let retryAfterOverviewMismatch = {attempted: false};
+  try {
+    state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
+  } catch (error) {
+    retryAfterOverviewMismatch = await retryAutoTopupSaveAfterOverviewMismatch(page, requested, error);
+    state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
+  }
+  return {configured: true, changed: true, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, retryAfterOverviewMismatch, state};
 }
 
 function purchaseVerifiedForOpomCardBinding(purchaseResult) {

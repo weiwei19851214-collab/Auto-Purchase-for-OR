@@ -52,7 +52,7 @@ Options:
   --auto-topup-amount N      fallback Auto top-up amount when row column is empty
   --stop-profiles            stop each profile after non-security completion/failure; default true
   --keep-profiles-open       do not stop profiles automatically
-  --row-timeout-ms N         max runtime per child row; default 120000
+  --row-timeout-ms N         max runtime per child row; default 180000
   --verbose                  include child stdout/stderr tails in redacted summary
 
 This runner is one closed-loop business action. It does not expose a separate
@@ -70,7 +70,7 @@ function parseArgs(argv) {
     autoTopupThreshold: '',
     autoTopupAmount: '',
     stopProfiles: true,
-    rowTimeoutMs: 120000,
+    rowTimeoutMs: 180000,
     verbose: false,
     ...defaults,
   };

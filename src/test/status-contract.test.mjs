@@ -10,7 +10,7 @@ test('Stripe Link save-info state is not classified as manual security blocker',
   assert.equal(result.stopProfile, true);
 });
 
-test('security challenge text is classified as ordinary row failure', () => {
+test('security challenge text is classified as an ordinary row failure after the window closes', () => {
   const result = classifyError('Security challenge visible: hCaptcha');
   assert.equal(result.status, STATUSES.FAILED);
   assert.equal(result.stage, 'automation');

@@ -100,6 +100,7 @@ try {
     && html.indexOf('<h2>任务详情</h2>') > html.indexOf('aria-label="预检和启动执行"'), 'after_preview');
   add('manual Dry-run action hidden', !/id=["']dryRunBtn["']/.test(html), 'hidden');
   add('resume row action wired in UI', /从本行继续/.test(appJs), 'present');
+  add('retry row action wired in UI', /重试本行/.test(appJs) && /data-only-row="1"/.test(appJs), 'present');
   add('resume API wired in UI', /resume-preview/.test(appJs) && /resumeFromRow/.test(appJs), 'present');
   add('OPOM resolve failure is row-visible', /opom_resolve_failed/.test(appJs), 'present');
   add('auto preflight copy present', /自动预检/.test(html), 'present');

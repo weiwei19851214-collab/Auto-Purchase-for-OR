@@ -1479,8 +1479,10 @@ function renderJobDetail(job, rows, events = []) {
   const canResumeRows = !['queued', 'running'].includes(job.status);
   const rowActionHtml = (row) => {
     if (row.status === 'completed') return '';
-    const label = row.status === 'failed' ? '重试本行' : '从本行继续';
-    return `<button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="${row.status === 'failed' ? '1' : '0'}" ${canResumeRows ? '' : 'disabled'}>${label}</button>`;
+    return `
+      <button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="0" ${canResumeRows ? '' : 'disabled'}>从本行继续</button>
+      <button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="1" ${canResumeRows ? '' : 'disabled'}>重试本行</button>
+    `;
   };
   els.jobMeta.innerHTML = `
     ${statusBadge(job.status)}

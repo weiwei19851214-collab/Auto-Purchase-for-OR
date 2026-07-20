@@ -33,6 +33,10 @@ const BALANCE_VERIFY_REFRESH_INTERVAL_MS = 15000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let diagnosticCounter = 0;
 
+function refreshErrorResult(error) {
+  return {refreshed: false, error: error?.message || String(error || '')};
+}
+
 function diagnosticName(label, ext) {
   const count = String(++diagnosticCounter).padStart(3, '0');
   const safeLabel = String(label || 'step').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'step';
@@ -359,8 +363,47 @@ async function dismissOpenRouterServerErrorToast(page) {
   })()`).catch((error) => ({attempted: true, error: error.message}));
 }
 
+async function waitForVisibleSecurityChallengeToClear(page) {
+  let waited = false;
+  while (true) {
+    const challenge = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const text = document.body?.innerText || '';
+    const textMatch = /hcaptcha|captcha|turnstile|verify you are human|human verification|complete the security|security check|authentication required/i.test(text);
+    const frame = [...document.querySelectorAll('iframe, [data-sitekey], [data-hcaptcha-widget-id], [data-turnstile]')]
+      .find((node) => visible(node) && /hcaptcha|captcha|turnstile|challenge|security/i.test([
+        node.src || '',
+        node.title || '',
+        node.name || '',
+        node.className || '',
+        node.getAttribute('data-sitekey') || '',
+      ].join(' ')));
+    return {
+      found: textMatch || !!frame,
+      source: textMatch ? 'visible_text' : (frame ? 'visible_challenge_frame' : ''),
+      tail: text.slice(-800),
+    };
+    })()`).catch((error) => ({found: false, pageUnavailable: true, error: error.message || String(error)}));
+    if (challenge.pageUnavailable) {
+      throw new Error(`Security challenge window was closed manually or is unavailable: ${challenge.error}`);
+    }
+    if (!challenge.found) return {waited, ...challenge};
+    if (!waited) {
+      console.warn('[security challenge] waiting for manual completion before continuing; browser page will not be refreshed');
+      waited = true;
+    }
+    await sleep(3000);
+  }
+}
+
 async function commandRefreshCreditsPage(page) {
   if (!page) return {refreshed: false};
+  await waitForVisibleSecurityChallengeToClear(page);
   await page.send('Page.bringToFront').catch(() => {});
   // 新号弹框恢复只需要刷新 Credits 页；使用 Page.reload 避免 macOS ⌘R 焦点异常触发系统菜单。
   await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
@@ -401,7 +444,7 @@ async function recoverNewAccountBlockerIfPresent(page, reason = 'new_account_blo
   if (nativeDialog.handled) {
     await sleep(250);
     // 新号首次点击支付入口会弹验证邮箱提示，强刷可清掉一次性弹层并回到 Credits 主流程。
-    const refreshed = await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}));
+    const refreshed = await commandRefreshCreditsPage(page).catch(refreshErrorResult);
     return {
       recovered: true,
       reason: `${reason}:native_dialog`,
@@ -412,7 +455,7 @@ async function recoverNewAccountBlockerIfPresent(page, reason = 'new_account_blo
   }
   const pageOverlay = await detectNewAccountOverlay(page);
   if (pageOverlay.found) {
-    const refreshed = await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}));
+    const refreshed = await commandRefreshCreditsPage(page).catch(refreshErrorResult);
     return {
       recovered: true,
       reason: `${reason}:page_overlay`,
@@ -549,7 +592,7 @@ async function recoverInterferingUi(page) {
     return activeDialogs.some((text) => /Save payment method|Card number|Expiration date|CVC|Add a Billing Address|Purchase Credits[\\s\\S]*Total due|Auto\\s*Top[- ]?Up/i.test(text));
   })()`).catch(() => false);
   const refreshed = state.hasServerErrorRaw && !state.hasPaymentIssue && !paymentSurface
-    ? await commandRefreshCreditsPage(page).catch((error) => ({refreshed: false, error: error.message}))
+    ? await commandRefreshCreditsPage(page).catch(refreshErrorResult)
     : {refreshed: false};
   return {attempted: true, dismissedOverlay, dismissedServerError, paymentSurface, refreshed};
 }
@@ -1283,6 +1326,7 @@ async function navigatePage(client, url, options = {}) {
   const retries = Math.max(1, Number(options.retries || DEFAULT_NAVIGATION_RETRIES));
   let lastError = null;
 
+  await waitForVisibleSecurityChallengeToClear(client);
   await client.send('Page.enable', {}, 5000).catch(() => {});
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -3806,6 +3850,7 @@ function isRetryablePageLoadError(error) {
 }
 
 async function refreshCreditsPageForRetry(page) {
+  await waitForVisibleSecurityChallengeToClear(page);
   await dismissInterferingOverlays(page).catch(() => null);
   await navigatePage(page, OPENROUTER_CREDITS_URL, {
     commandTimeoutMs: DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS,
@@ -4570,10 +4615,7 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
       }
       // The OpenRouter editor occasionally leaves Save disabled after values are entered.
       // Reload the Credits page and rebuild the editor state before trying again.
-      const refresh = await commandRefreshCreditsPage(page).catch((refreshError) => ({
-        refreshed: false,
-        error: refreshError.message || String(refreshError),
-      }));
+      const refresh = await commandRefreshCreditsPage(page);
       attempts.push({
         attempt,
         reason: 'auto_topup_save_button_unavailable',

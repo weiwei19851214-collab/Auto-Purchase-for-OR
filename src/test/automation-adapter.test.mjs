@@ -296,6 +296,15 @@ test('Auto top-up reloads Credits and retries up to three times when Save stays 
   assert.match(configureBody, /configureAutoTopupAttempt\(page, autoTopup, debugPort\)/);
 });
 
+test('Auto top-up refresh waits for a visible security challenge to clear', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const refreshBody = script.slice(script.indexOf('async function commandRefreshCreditsPage'), script.indexOf('async function detectNewAccountOverlay'));
+  assert.match(script, /async function waitForVisibleSecurityChallengeToClear/);
+  assert.match(script, /waiting for manual completion before continuing/);
+  assert.match(refreshBody, /await waitForVisibleSecurityChallengeToClear\(page\)/);
+  assert.match(script, /await waitForVisibleSecurityChallengeToClear\(client\)/);
+});
+
 test('balance target purchase amount rounds up to the next whole dollar', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);

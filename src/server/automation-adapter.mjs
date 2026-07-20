@@ -60,7 +60,7 @@ function normalizeCardProvider(value) {
 
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
-  const concurrency = Math.min(5, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
+  const concurrency = Math.min(10, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
   return {
     removeExisting: options.removeExisting !== false,
     stopProfiles: options.stopProfiles !== false,

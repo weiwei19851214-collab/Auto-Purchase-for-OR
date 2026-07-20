@@ -78,7 +78,7 @@ test('runnerArgs supports no-purchase test mode', () => {
 test('runnerArgs clamps concurrency to a safe local range', () => {
   assert.equal(runnerArgs({concurrency: 2}).concurrency, 2);
   assert.equal(runnerArgs({concurrency: 0}).concurrency, 1);
-  assert.equal(runnerArgs({concurrency: 99}).concurrency, 5);
+  assert.equal(runnerArgs({concurrency: 99}).concurrency, 10);
   assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
 });
 

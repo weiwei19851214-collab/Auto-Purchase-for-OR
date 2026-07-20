@@ -1463,7 +1463,7 @@ async function ensureOpenRouterPage(input) {
 async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastStripeTargets = [];
-  let lastCandidateState = null;
+  let lastCandidateStates = [];
   while (Date.now() < deadline) {
     const targets = getTargets(debugPort);
     lastStripeTargets = targets
@@ -1475,6 +1475,7 @@ async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME
       && /elements-inner/.test(item.url)
       && /componentName=payment/.test(item.url)
     ));
+    lastCandidateStates = [];
     for (const target of candidates) {
       let frame;
       try {
@@ -1487,20 +1488,32 @@ async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME
           return {
             hasCardNumber,
             cardTabSelected,
+            visibilityState: document.visibilityState,
             tail: text.slice(-500),
           };
         })()`, 3000);
-        lastCandidateState = state;
-        if (state.hasCardNumber || state.cardTabSelected) return target.webSocketDebuggerUrl;
+        const focusState = state.hasCardNumber
+          ? await focusStripeFieldWithCdp(frame, '#payment-numberInput')
+          : {found: false, active: false, method: 'DOM.focus'};
+        lastCandidateStates.push({
+          targetId: target.id || '',
+          ...state,
+          focusState,
+        });
+        // Stripe may leave hidden/preloaded Payment Element targets alive. DOM value and text are
+        // insufficient; only the target whose real card input accepts DOM.focus can receive key events.
+        if (state.hasCardNumber && focusState.active && !focusState.disabled && !focusState.readOnly) {
+          return target.webSocketDebuggerUrl;
+        }
       } catch (error) {
-        lastCandidateState = {error: error.message};
+        lastCandidateStates.push({targetId: target.id || '', error: error.message});
       } finally {
         if (frame) frame.close();
       }
     }
     await sleep(DEFAULT_DOM_POLL_MS);
   }
-  throw new Error(`Stripe card payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}; lastCandidateState=${JSON.stringify(lastCandidateState || {})}`);
+  throw new Error(`Stripe card payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}; lastCandidateStates=${JSON.stringify(lastCandidateStates).slice(0, 1800)}`);
 }
 
 async function waitForAddressTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
@@ -2029,40 +2042,157 @@ function normalizeStripeInputValue(value) {
   return String(value || '').replace(/[^\dA-Za-z]/g, '').toLowerCase();
 }
 
+function stripeFieldErrorPattern(selector) {
+  if (/numberInput/.test(selector)) return 'card number[^\\n]*(?:incomplete|invalid|incorrect)';
+  if (/expiryInput/.test(selector)) return 'expiration date[^\\n]*(?:incomplete|invalid|incorrect|expired)';
+  if (/cvcInput/.test(selector)) return '(?:security code|cvc)[^\\n]*(?:incomplete|invalid|incorrect)';
+  if (/postalCodeInput/.test(selector)) return '(?:zip|postal)[^\\n]*(?:incomplete|invalid|incorrect)';
+  return '(?:incomplete|invalid|incorrect)';
+}
+
+function keyDescriptor(character) {
+  const value = String(character || '');
+  if (/^\d$/.test(value)) {
+    const keyCode = value.charCodeAt(0);
+    return {key: value, code: `Digit${value}`, keyCode};
+  }
+  if (/^[a-z]$/i.test(value)) {
+    const upper = value.toUpperCase();
+    return {key: value, code: `Key${upper}`, keyCode: upper.charCodeAt(0)};
+  }
+  if (value === ' ') return {key: ' ', code: 'Space', keyCode: 32};
+  const keyCode = value.charCodeAt(0) || 0;
+  return {key: value, code: '', keyCode};
+}
+
+async function clearFocusedFieldWithKeys(client) {
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'a',
+    code: 'KeyA',
+    modifiers: 4,
+    windowsVirtualKeyCode: 65,
+    nativeVirtualKeyCode: 65,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'a',
+    code: 'KeyA',
+    modifiers: 4,
+    windowsVirtualKeyCode: 65,
+    nativeVirtualKeyCode: 65,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Backspace',
+    code: 'Backspace',
+    windowsVirtualKeyCode: 8,
+    nativeVirtualKeyCode: 8,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'Backspace',
+    code: 'Backspace',
+    windowsVirtualKeyCode: 8,
+    nativeVirtualKeyCode: 8,
+  });
+}
+
+async function typeFocusedFieldWithKeyEvents(client, text) {
+  for (const character of String(text || '')) {
+    const descriptor = keyDescriptor(character);
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: descriptor.key,
+      code: descriptor.code,
+      text: character,
+      unmodifiedText: character,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: descriptor.key,
+      code: descriptor.code,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await sleep(24);
+  }
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
+}
+
+async function focusStripeFieldWithCdp(client, selector) {
+  await client.send('DOM.enable').catch(() => {});
+  const remote = await client.send('Runtime.evaluate', {
+    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    returnByValue: false,
+    awaitPromise: false,
+  });
+  const objectId = remote?.result?.objectId || '';
+  if (!objectId) return {found: false, active: false, method: 'DOM.focus'};
+  try {
+    try {
+      await client.send('DOM.focus', {objectId});
+    } catch (error) {
+      return {
+        found: true,
+        active: false,
+        focusError: error.message || String(error),
+        method: 'DOM.focus',
+      };
+    }
+  } finally {
+    await client.send('Runtime.releaseObject', {objectId}).catch(() => {});
+  }
+  return evaluate(client, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return {found:false, active:false, method:'DOM.focus'};
+    return {
+      found: true,
+      active: document.activeElement === el,
+      disabled: !!el.disabled,
+      readOnly: !!el.readOnly,
+      connected: !!el.isConnected,
+      method: 'DOM.focus',
+    };
+  })()`);
+}
+
 async function focusAndInsertText(client, selector, text, options = {}) {
   const expected = normalizeStripeInputValue(options.expectedValue || text);
+  const errorPattern = stripeFieldErrorPattern(selector);
   let lastState = null;
 
   const readValueState = async () => evaluate(client, `(() => {
     const el = document.querySelector(${JSON.stringify(selector)});
     if (!el) return {found:false};
+    const value = el.value || '';
+    const normalized = String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase();
+    const errorMatch = (document.body?.innerText || '').match(new RegExp(${JSON.stringify(errorPattern)}, 'i'));
+    const ariaInvalid = el.getAttribute('aria-invalid') === 'true';
     return {
       found: true,
-      value: el.value || '',
+      valueLength: normalized.length,
+      matchesExpected: normalized === ${JSON.stringify(expected)},
       active: document.activeElement === el,
-    };
-  })()`);
-
-  const forceSetValue = async () => evaluate(client, `(() => {
-    const el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return {found:false};
-    const value = ${JSON.stringify(String(text || ''))};
-    el.focus();
-    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
-      || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    if (setter) setter.call(el, value);
-    else el.value = value;
-    try {
-      el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
-    } catch {
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-    }
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-    return {
-      found: true,
-      value: el.value || '',
-      active: document.activeElement === el,
-      method: 'native_value_setter',
+      ariaInvalid,
+      invalidByText: !!errorMatch,
+      errorText: errorMatch?.[0] || '',
+      accepted: !ariaInvalid && !errorMatch,
     };
   })()`);
 
@@ -2096,36 +2226,27 @@ async function focusAndInsertText(client, selector, text, options = {}) {
     }
 
     await sleep(120);
-    await evaluate(client, `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return false;
-      el.focus();
-      if (el.select) el.select();
-      if (el.setSelectionRange) {
-        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
-      }
-      return true;
-    })()`).catch(() => false);
-    await client.send('Input.insertText', {text});
-    await sleep(260);
+    const focusState = await focusStripeFieldWithCdp(client, selector);
+    if (!focusState.found || !focusState.active) {
+      lastState = {...focusState, phase: 'focus_before_key_events'};
+      await sleep(350);
+      continue;
+    }
+    await clearFocusedFieldWithKeys(client);
+    await sleep(80);
+    await typeFocusedFieldWithKeyEvents(client, text);
+    await sleep(320);
 
-    let state = await readValueState();
+    const state = await readValueState();
     lastState = state;
-    // Stripe 字段偶发重渲染会吞掉 CDP 输入；必须以页面真实保留值为准，不能只看输入动作成功。
-    let actual = normalizeStripeInputValue(state.value);
-    if (expected && actual === expected) return state;
-    if (!expected && actual) return state;
-
-    // 有些 AdsPower/Stripe 组合里 CDP 键盘焦点会丢失，表现为 active=false 且 value 为空；此时用原生 setter 补一次。
-    state = await forceSetValue();
-    lastState = state;
-    actual = normalizeStripeInputValue(state.value);
-    if (expected && actual === expected) return state;
-    if (!expected && actual) return state;
+    // Stripe 必须同时保留值并清除字段级 incomplete/invalid 状态；DOM value 不能单独证明 Stripe 已接收输入。
+    if (state.matchesExpected && state.accepted) {
+      return {...state, method: 'dispatch_key_events', attempt: attempt + 1};
+    }
     await sleep(350);
   }
 
-  throw new Error(`Stripe field did not retain value: ${selector}; state=${JSON.stringify(lastState)}`);
+  throw new Error(`Stripe payment field was not accepted: ${selector}; state=${JSON.stringify(lastState)}`);
 }
 
 async function readStripePaymentFieldState(payment, card) {
@@ -2136,32 +2257,45 @@ async function readStripePaymentFieldState(payment, card) {
     postalCode: normalizeStripeInputValue(card.postalCode),
   };
   return evaluate(payment, `(() => {
-    const valueOf = (selector) => {
+    const valueOf = (selector, expectedValue, errorPattern, mask) => {
       const el = document.querySelector(selector);
-      if (!el) return {exists:false, value:'', normalized:''};
+      if (!el) return {exists:false, valueLength:0, matchesExpected:false, accepted:false};
       const value = el.value || '';
+      const normalized = String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase();
+      const errorMatch = (document.body?.innerText || '').match(new RegExp(errorPattern, 'i'));
+      const ariaInvalid = el.getAttribute('aria-invalid') === 'true';
       return {
         exists: true,
         visible: (() => {
           const rect = el.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0;
         })(),
-        value,
-        normalized: String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase(),
+        valueLength: normalized.length,
+        masked: mask === 'number' ? ('****' + normalized.slice(-4)) : (mask === 'secret' ? '***' : value),
+        matchesExpected: normalized === expectedValue,
+        ariaInvalid,
+        invalidByText: !!errorMatch,
+        errorText: errorMatch?.[0] || '',
+        accepted: !ariaInvalid && !errorMatch,
       };
     };
-    const fields = {
-      number: valueOf('#payment-numberInput'),
-      expiry: valueOf('#payment-expiryInput'),
-      cvc: valueOf('#payment-cvcInput'),
-      postalCode: valueOf('#payment-postalCodeInput'),
+    const patterns = {
+      number: ${JSON.stringify(stripeFieldErrorPattern('#payment-numberInput'))},
+      expiry: ${JSON.stringify(stripeFieldErrorPattern('#payment-expiryInput'))},
+      cvc: ${JSON.stringify(stripeFieldErrorPattern('#payment-cvcInput'))},
+      postalCode: ${JSON.stringify(stripeFieldErrorPattern('#payment-postalCodeInput'))},
     };
-    const expected = ${JSON.stringify(expected)};
+    const fields = {
+      number: valueOf('#payment-numberInput', ${JSON.stringify(expected.number)}, patterns.number, 'number'),
+      expiry: valueOf('#payment-expiryInput', ${JSON.stringify(expected.expiry)}, patterns.expiry, 'plain'),
+      cvc: valueOf('#payment-cvcInput', ${JSON.stringify(expected.cvc)}, patterns.cvc, 'secret'),
+      postalCode: valueOf('#payment-postalCodeInput', ${JSON.stringify(expected.postalCode)}, patterns.postalCode, 'plain'),
+    };
     const complete = {
-      number: fields.number.exists && fields.number.normalized === expected.number,
-      expiry: fields.expiry.exists && fields.expiry.normalized === expected.expiry,
-      cvc: fields.cvc.exists && fields.cvc.normalized === expected.cvc,
-      postalCode: !fields.postalCode.exists || fields.postalCode.normalized === expected.postalCode,
+      number: fields.number.exists && fields.number.matchesExpected && fields.number.accepted,
+      expiry: fields.expiry.exists && fields.expiry.matchesExpected && fields.expiry.accepted,
+      cvc: fields.cvc.exists && fields.cvc.matchesExpected && fields.cvc.accepted,
+      postalCode: !fields.postalCode.exists || (fields.postalCode.matchesExpected && fields.postalCode.accepted),
     };
     return {
       fields,

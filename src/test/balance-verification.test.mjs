@@ -37,9 +37,10 @@ test('Stripe card entry skips Link checkbox cleanup after switching a non-US cou
 
 test('Stripe card entry verifies fields keep the inserted card values', () => {
   const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
-  assert.match(source, /Stripe 字段偶发重渲染会吞掉 CDP 输入/);
-  assert.match(source, /native_value_setter/);
-  assert.match(source, /Stripe field did not retain value/);
+  assert.match(source, /Stripe 必须同时保留值并清除字段级 incomplete\/invalid 状态/);
+  assert.match(source, /dispatch_key_events/);
+  assert.doesNotMatch(source, /native_value_setter/);
+  assert.match(source, /Stripe payment field was not accepted/);
   assert.match(source, /expectedValue: card\.number/);
   assert.match(source, /expectedValue: card\.postalCode/);
 });

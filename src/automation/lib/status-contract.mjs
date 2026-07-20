@@ -67,6 +67,15 @@ export function classifyError(message) {
       message: text,
     });
   }
+  if (/Stripe payment field was not accepted|Stripe payment fields are not ready before Save payment method|Stripe field did not retain value/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'payment_method.input',
+      terminal: true,
+      safeToContinueBatch: true,
+      stopProfile: false,
+      message: text,
+    });
+  }
   if (/OpenRouter account mismatch|account mismatch|expected .* got/i.test(text)) {
     return statusRecord(STATUSES.IDENTITY_MISMATCH, {
       stage: 'identity.account',

@@ -366,6 +366,18 @@ test('browser path verifies Stripe card fields before saving payment method', ()
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /ensureStripeCardReadyForSubmit/);
   assert.match(script, /Stripe payment fields are not ready before Save payment method/);
+  assert.match(script, /typeFocusedFieldWithKeyEvents/);
+  assert.match(script, /Input\.dispatchKeyEvent/);
+  assert.match(script, /focusStripeFieldWithCdp/);
+  assert.match(script, /client\.send\('DOM\.focus', \{objectId\}\)/);
+  assert.match(script, /only the target whose real card input accepts DOM\.focus/);
+  assert.match(script, /focusState\.active && !focusState\.disabled && !focusState\.readOnly/);
+  assert.match(script, /lastCandidateStates/);
+  assert.match(script, /phase: 'focus_before_key_events'/);
+  assert.match(script, /document\.activeElement === el/);
+  assert.match(script, /invalidByText/);
+  assert.match(script, /ariaInvalid/);
+  assert.doesNotMatch(script, /native_value_setter/);
   assert.match(script, /verify-stripe-card-before-save/);
   assert.match(script, /verify-stripe-card-before-save-retry/);
   assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save'") < script.indexOf("runLoggedStep('click-save-payment-method'"));

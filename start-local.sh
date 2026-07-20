@@ -92,7 +92,7 @@ echo "数据库: $OR_RUNNER_DB"
 if [[ -n "${OPOM_BASE_URL:-${OPOM_API_BASE:-}}" ]]; then
   echo "OPOM 地址: ${OPOM_BASE_URL:-$OPOM_API_BASE}"
 else
-  echo "OPOM 地址: 未配置，如需上线对接请在 .recharge.local.env 设置 OPOM_BASE_URL=http://20.2.209.2:3000"
+  echo "OPOM 地址: 未配置，如需上线对接请在 .recharge.local.env 设置 OPOM_BASE_URL=http://20.2.209.2"
 fi
 
 if [[ -n "${OPOM_RECHARGE_TOKEN:-}" ]]; then

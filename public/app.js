@@ -62,6 +62,9 @@ const els = {
   rowsBody: document.querySelector('#rowsBody'),
   eventsBody: document.querySelector('#eventsBody'),
   worker: document.querySelector('#worker'),
+  repoInfo: document.querySelector('#repoInfo'),
+  repoBranch: document.querySelector('#repoBranch'),
+  repoUpdatedAt: document.querySelector('#repoUpdatedAt'),
   jobMeta: document.querySelector('#jobMeta'),
   cancel: document.querySelector('#cancelBtn'),
   download: document.querySelector('#downloadLink'),
@@ -255,7 +258,7 @@ function loadRuntimeConfig() {
   setInputValue(els.configAdspowerApiBase, config.adspowerApiBase || 'http://127.0.0.1:50325');
   setInputValue(els.configAdspowerApiKey, config.adspowerApiKey || '');
   setInputValue(els.configAdspowerStartTimeoutMs, config.adspowerStartTimeoutMs || '');
-  setInputValue(els.configOpomBaseUrl, config.opomBaseUrl || 'http://20.2.209.2:3000');
+  setInputValue(els.configOpomBaseUrl, config.opomBaseUrl || 'http://20.2.209.2');
   setInputValue(els.configOpomRechargeToken, config.opomRechargeToken || '');
   setInputValue(els.configOpomSecondaryBaseUrl, config.opomSecondaryBaseUrl || '');
   setInputValue(els.configOpomSecondaryRechargeToken, config.opomSecondaryRechargeToken || '');
@@ -624,6 +627,23 @@ function sanitizeMessage(value) {
     .replace(/\b((?:cvv|cvc|security\s*code)\s*[:=]?\s*)\d{3,4}\b/gi, '$1***')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+\b/gi, '$1***')
     .replace(/([A-Z0-9._%+-]{2})[A-Z0-9._%+-]*(@[A-Z0-9.-]+\.[A-Z]{2,})/gi, '$1***$2');
+}
+
+async function loadRepoInfo() {
+  try {
+    const data = await api('/api/repo-info');
+    const repo = data.repo || {};
+    const branch = repo.branch || 'unknown';
+    const updatedAt = repo.updatedAt ? formatChinaTime(repo.updatedAt) : 'unknown';
+    const shortSha = repo.shortSha ? ` ${repo.shortSha}` : '';
+    if (els.repoBranch) els.repoBranch.textContent = `分支 ${branch}${shortSha}`;
+    if (els.repoUpdatedAt) els.repoUpdatedAt.textContent = `更新 ${updatedAt}`;
+    if (els.repoInfo) els.repoInfo.title = `Git 分支：${branch}${shortSha}\n最新提交时间：${updatedAt}`;
+  } catch (error) {
+    if (els.repoBranch) els.repoBranch.textContent = '分支 unknown';
+    if (els.repoUpdatedAt) els.repoUpdatedAt.textContent = '更新 unknown';
+    if (els.repoInfo) els.repoInfo.title = sanitizeMessage(error.message || 'Git 信息读取失败');
+  }
 }
 
 function formatChinaTime(value) {
@@ -1773,6 +1793,7 @@ els.cancel.addEventListener('click', () => cancelSelectedJob().catch(showError))
 els.download.addEventListener('click', (event) => downloadSelectedResult(event).catch(showError));
 
 loadRuntimeConfig();
+loadRepoInfo();
 syncRechargeRuleMode();
 renderGeneratedAddressList();
 syncActionButtons();

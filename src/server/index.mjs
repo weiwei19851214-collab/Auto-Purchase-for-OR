@@ -1,8 +1,9 @@
 import {createServer} from 'node:http';
+import {execFile} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
-import {DEFAULT_SERVER_PORT, PUBLIC_DIR} from './config.mjs';
+import {DEFAULT_SERVER_PORT, PUBLIC_DIR, ROOT_DIR} from './config.mjs';
 import {openDatabase, getJob, recoverInterruptedWork} from './db.mjs';
 import {httpError, readJsonBody, route, sendFile, sendJson, sendText} from './http-utils.mjs';
 import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList, repairOpomWriteback, resumeJob, resumePreview} from './jobs.mjs';
@@ -50,6 +51,11 @@ async function handle(req, res) {
 
   if (pathname === '/api/session') {
     sendJson(res, 200, {ok: true, ...sessionPayload()});
+    return;
+  }
+
+  if (pathname === '/api/repo-info') {
+    sendJson(res, 200, {ok: true, repo: await repoInfo()});
     return;
   }
 
@@ -174,6 +180,45 @@ async function handle(req, res) {
   }
 
   throw httpError(404, 'Not found');
+}
+
+function gitOutput(args) {
+  return new Promise((resolveOutput, reject) => {
+    execFile('git', args, {
+      cwd: ROOT_DIR,
+      timeout: 2000,
+      maxBuffer: 1024 * 64,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolveOutput(String(stdout || '').trim());
+    });
+  });
+}
+
+async function repoInfo() {
+  try {
+    const [branch, updatedAt, shortSha] = await Promise.all([
+      gitOutput(['rev-parse', '--abbrev-ref', 'HEAD']),
+      gitOutput(['log', '-1', '--format=%cI']),
+      gitOutput(['rev-parse', '--short', 'HEAD']),
+    ]);
+    return {
+      branch,
+      updatedAt,
+      shortSha,
+    };
+  } catch (error) {
+    // Git 信息只用于页面展示；读取失败不能影响充值执行器主体功能。
+    return {
+      branch: 'unknown',
+      updatedAt: '',
+      shortSha: '',
+      error: redact(error.message || 'git info unavailable'),
+    };
+  }
 }
 
 async function serveStatic(res, pathname) {

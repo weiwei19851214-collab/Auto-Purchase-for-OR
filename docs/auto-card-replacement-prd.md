@@ -77,7 +77,7 @@
 - 接口基础地址通过配置读取：
 
 ```text
-OPOM_BASE_URL=http://20.2.209.2:3000
+OPOM_BASE_URL=http://20.2.209.2
 ```
 
 - 认证使用固定机器 token，但 token 必须由用户安全配置，不能硬编码：
@@ -481,7 +481,7 @@ amount = clamp(ceil(max(avg_daily_spend_3d * 5, max_daily_spend_3d * 2)), 150, 1
 
 公共参数用于手动充值、自动充值、自动换卡共用：
 
-- OPOM 地址，对应 `OPOM_BASE_URL`，默认 `http://20.2.209.2:3000`。
+- OPOM 地址，对应 `OPOM_BASE_URL`，默认 `http://20.2.209.2`。
 - OPOM 机器 token，对应 `OPOM_RECHARGE_TOKEN`。
 - AdsPower API 地址，对应 `ADSPOWER_API_BASE`。
 - AdsPower API Key，对应 `ADSPOWER_API_KEY`。

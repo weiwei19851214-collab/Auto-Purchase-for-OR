@@ -81,6 +81,21 @@ h3 {
   gap: 2px;
 }
 
+.repo-info {
+  min-width: 168px;
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.repo-info span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .eyebrow {
   color: var(--muted);
   font-size: 11px;
@@ -803,6 +818,12 @@ tr[role="button"]:focus-visible td {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .repo-info {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .topbar-right {

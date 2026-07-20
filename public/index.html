@@ -9,6 +9,10 @@
   <body>
     <div id="app" class="app-shell">
       <header class="topbar">
+        <div id="repoInfo" class="repo-info" aria-live="polite" title="Git 分支和最新提交时间">
+          <span id="repoBranch">分支 -</span>
+          <span id="repoUpdatedAt">更新 -</span>
+        </div>
         <div class="brand-block">
           <div class="eyebrow">Recharge Runner</div>
           <h1>OpenRouter 充值执行器</h1>
@@ -46,7 +50,7 @@
             </label>
             <label class="field">
               <span>OPOM_BASE_URL</span>
-              <input id="configOpomBaseUrl" type="url" placeholder="http://20.2.209.2:3000" />
+              <input id="configOpomBaseUrl" type="url" placeholder="http://20.2.209.2" />
             </label>
             <label class="field">
               <span>RECHARGE_API_TOKEN</span>

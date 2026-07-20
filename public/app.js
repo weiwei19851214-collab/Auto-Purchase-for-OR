@@ -255,7 +255,7 @@ function loadRuntimeConfig() {
   setInputValue(els.configAdspowerApiBase, config.adspowerApiBase || 'http://127.0.0.1:50325');
   setInputValue(els.configAdspowerApiKey, config.adspowerApiKey || '');
   setInputValue(els.configAdspowerStartTimeoutMs, config.adspowerStartTimeoutMs || '');
-  setInputValue(els.configOpomBaseUrl, config.opomBaseUrl || 'http://20.2.209.2:3000');
+  setInputValue(els.configOpomBaseUrl, config.opomBaseUrl || 'http://20.2.209.2');
   setInputValue(els.configOpomRechargeToken, config.opomRechargeToken || '');
   setInputValue(els.configOpomSecondaryBaseUrl, config.opomSecondaryBaseUrl || '');
   setInputValue(els.configOpomSecondaryRechargeToken, config.opomSecondaryRechargeToken || '');

@@ -2175,6 +2175,12 @@ async function ensureStripeCardReadyForSubmit(payment, card) {
   let state = await readStripePaymentFieldState(payment, card);
   if (state.ready) return {ready: true, retried: false, state};
 
+  // Stripe DOM 偶发延迟回写，第一次读到空值时先短等再读一次；仍不完整才认为输入被吞，需要重填。
+  await sleep(800);
+  const delayedState = await readStripePaymentFieldState(payment, card);
+  if (delayedState.ready) return {ready: true, retried: false, delayed: true, state: delayedState, initialState: state};
+  state = delayedState;
+
   // 提交 Save payment method 前必须回读 Stripe iframe 字段；若页面重渲染吞值，只重填一次，避免空卡号/有效期/邮编被提交。
   if (!state.complete.number) {
     await focusAndInsertText(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
@@ -2194,7 +2200,7 @@ async function ensureStripeCardReadyForSubmit(payment, card) {
   if (!state.ready) {
     throw new Error(`Stripe payment fields are not ready before Save payment method: ${JSON.stringify(state)}`);
   }
-  return {ready: true, retried: true, state};
+  return {ready: true, retried: true, state, initialState: delayedState};
 }
 
 async function ensureStripeLinkUnchecked(payment) {

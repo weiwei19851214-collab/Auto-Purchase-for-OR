@@ -354,6 +354,8 @@ test('browser path auto-accepts JavaScript dialogs before navigating Credits', (
 test('browser path verifies Stripe card fields before saving payment method', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /ensureStripeCardReadyForSubmit/);
+  assert.match(script, /Stripe DOM 偶发延迟回写/);
+  assert.match(script, /await sleep\(800\)/);
   assert.match(script, /Stripe payment fields are not ready before Save payment method/);
   assert.match(script, /verify-stripe-card-before-save/);
   assert.match(script, /verify-stripe-card-before-save-retry/);

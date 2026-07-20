@@ -4376,7 +4376,11 @@ async function retryAutoTopupSaveAfterOverviewMismatch(page, requested, firstErr
   };
 }
 
-async function configureAutoTopup(page, autoTopup, debugPort = '') {
+function isAutoTopupSaveButtonUnavailable(error) {
+  return /Auto top-up save button not found:/.test(error?.message || String(error || ''));
+}
+
+async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
   if (!autoTopup?.enabled) return {configured: false, skipped: true};
   const navigation = await ensureCreditsPage(page);
   const dismissedOverlays = await dismissSaveCardOverlays(page, debugPort);
@@ -4408,6 +4412,43 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
     state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
   }
   return {configured: true, changed: true, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, retryAfterOverviewMismatch, state};
+}
+
+async function configureAutoTopup(page, autoTopup, debugPort = '') {
+  const attempts = [];
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await configureAutoTopupAttempt(page, autoTopup, debugPort);
+      return {
+        ...result,
+        saveButtonRecovery: {
+          attempted: attempts.length > 0,
+          attempts,
+        },
+      };
+    } catch (error) {
+      if (!isAutoTopupSaveButtonUnavailable(error) || attempt === maxAttempts) {
+        if (attempts.length > 0) {
+          error.message = `Auto top-up save stayed unavailable after ${attempt} attempts: ${error.message}`;
+        }
+        throw error;
+      }
+      // The OpenRouter editor occasionally leaves Save disabled after values are entered.
+      // Reload the Credits page and rebuild the editor state before trying again.
+      const refresh = await commandRefreshCreditsPage(page).catch((refreshError) => ({
+        refreshed: false,
+        error: refreshError.message || String(refreshError),
+      }));
+      attempts.push({
+        attempt,
+        reason: 'auto_topup_save_button_unavailable',
+        error: error.message || String(error),
+        refresh,
+      });
+    }
+  }
+  throw new Error('Auto top-up retry loop ended unexpectedly');
 }
 
 function purchaseVerifiedForOpomCardBinding(purchaseResult) {

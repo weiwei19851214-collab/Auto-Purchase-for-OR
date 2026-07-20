@@ -265,7 +265,7 @@ test('Auto top-up refresh and input fill do not use macOS Command shortcuts', ()
 
 test('Auto top-up retries one save when overview text does not match requested values', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  const configureBody = script.slice(script.indexOf('async function configureAutoTopup'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopupAttempt'), script.indexOf('async function configureAutoTopup(page'));
   assert.match(script, /retryAutoTopupSaveAfterOverviewMismatch/);
   assert.match(script, /overview_text_mismatch_after_first_save/);
   assert.ok(script.includes('input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold'));
@@ -283,6 +283,17 @@ test('Auto top-up retries one save when overview text does not match requested v
   assert.match(script, /openAutoTopupEditor\(page, \{\.\.\.stateBeforeRetry, enabled: true, hasManage: true\}, 'Manage'\)/);
   assert.ok(configureBody.indexOf('const saved = await saveAutoTopup(page)') < configureBody.indexOf('retryAutoTopupSaveAfterOverviewMismatch(page, requested, error)'));
   assert.ok(configureBody.indexOf('retryAutoTopupSaveAfterOverviewMismatch(page, requested, error)') < configureBody.lastIndexOf('state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);'));
+});
+
+test('Auto top-up reloads Credits and retries up to three times when Save stays disabled', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(script, /function isAutoTopupSaveButtonUnavailable/);
+  assert.match(configureBody, /const maxAttempts = 3/);
+  assert.match(configureBody, /isAutoTopupSaveButtonUnavailable\(error\)/);
+  assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
+  assert.match(configureBody, /auto_topup_save_button_unavailable/);
+  assert.match(configureBody, /configureAutoTopupAttempt\(page, autoTopup, debugPort\)/);
 });
 
 test('balance target purchase amount rounds up to the next whole dollar', () => {

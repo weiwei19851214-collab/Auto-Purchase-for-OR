@@ -15,7 +15,9 @@ import {writeCardBinding} from '../server/opom-client.mjs';
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
-const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 15000;
+// AdsPower can take longer to create a browser profile when several profiles
+// start together; keep the startup request alive for 30 seconds.
+const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000;
 const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
 const DEFAULT_CREDITS_ENTRY_WAIT_MS = 60000;
 const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
@@ -1387,9 +1389,73 @@ async function fetchStripeData(page) {
   })()`);
 }
 
+async function verifySavedPaymentMethodFromCreditsUi(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  await ensureCreditsPage(page);
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const cardPattern = /\\b(VISA|MASTERCARD|MASTER CARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\b[\\s\\S]{0,80}?(?:ending in\\s*)?(?:[•*·xX()\\s-])*(\\d{4})\\b/i;
+      const maskedPattern = /(?:[•*·xX]\\s*){4,}(\\d{4})\\b/;
+      const candidates = [...document.querySelectorAll('button, [role="button"], [role="radio"], label, section, article, div, span, p')]
+        .filter(visible)
+        .map((node) => String(node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
+        .filter((text) => text && text.length <= 500);
+      const match = candidates
+        .map((text) => ({text, match: text.match(cardPattern) || text.match(maskedPattern)}))
+        .find((item) => item.match);
+      const last4 = match?.match?.[2] || match?.match?.[1] || '';
+      return {
+        verified: /^\\d{4}$/.test(last4),
+        paymentMethodCount: /^\\d{4}$/.test(last4) ? 1 : 0,
+        paymentMethods: /^\\d{4}$/.test(last4) ? [{type:'card', brand:'', last4}] : [],
+        source: 'credits_ui',
+      };
+    })()`);
+    if (state.verified) return state;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  return state || {verified: false, paymentMethodCount: 0, paymentMethods: [], source: 'credits_ui'};
+}
+
+async function openPurchaseCreditsModal(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const initial = await getPurchaseModalState(page);
+  if (initial.purchase) {
+    return {opened: false, alreadyOpen: true, state: initial};
+  }
+
+  const clicked = await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getPurchaseModalState(page);
+    if (state.purchase) {
+      return {opened: true, clicked, state};
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Add Credits was clicked but Purchase Credits amount modal did not open after ${timeoutMs}ms: ${state?.tail || ''}`);
+}
+
 async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
   const stripe = await fetchStripeData(page);
   if (!stripe.ok) {
+    if (stripe.status === 404) {
+      const uiFallback = await verifySavedPaymentMethodFromCreditsUi(page);
+      if (uiFallback.verified) {
+        return {
+          ...uiFallback,
+          source: 'stripe_data_404_ui_fallback',
+        };
+      }
+      throw new Error(`Could not verify saved payment method before Auto top-up: ${stripe.status} ${stripe.text}; Credits UI fallback found no saved payment method`);
+    }
     throw new Error(`Could not verify saved payment method before Auto top-up: ${stripe.status} ${stripe.text}`);
   }
   const expected = String(expectedAccount || '').trim().toLowerCase();
@@ -2732,6 +2798,10 @@ async function getPurchaseModalState(page) {
   return evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
     const text = document.body?.innerText || '';
+    const purchaseHeading = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && /^Purchase Credits$/i.test(textOf(node)))
+      .map((node) => ({node, rect: node.getBoundingClientRect()}))
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0] || null;
     const controls = [...document.querySelectorAll('input,button,[role="button"],[role="switch"]')]
       .filter((node) => visible(node))
       .map((node, index) => {
@@ -2756,7 +2826,8 @@ async function getPurchaseModalState(page) {
     const invoiceSwitchRaw = findSwitchByLabel(/\\bSend me invoices\\b/i);
     const {node: _invoiceSwitchNode, ...invoiceSwitch} = invoiceSwitchRaw;
     return {
-      purchase: /Purchase Credits/i.test(text),
+      purchase: !!purchaseHeading,
+      purchaseHeadingVisible: !!purchaseHeading,
       amountValue: amountControl?.value || '',
       sendInvoicesText: invoiceSwitch.found || /Send me invoices/i.test(text),
       sendInvoicesChecked: invoiceSwitch.found && !invoiceSwitch.ambiguous ? invoiceSwitch.checked === true : false,
@@ -4651,6 +4722,35 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
         },
       };
     } catch (error) {
+      // A successful save can close the editor just before our click/readback path
+      // observes it. Treat the requested overview values as authoritative instead
+      // of retrying an already-configured rule or returning a false failure.
+      const recoveredState = await waitForAutoTopupConfigured(
+        page,
+        autoTopup.threshold,
+        autoTopup.amount,
+        4000,
+      ).catch(() => null);
+      if (recoveredState?.configured) {
+        return {
+          configured: true,
+          changed: true,
+          requested: {
+            threshold: autoTopup.threshold,
+            amount: autoTopup.amount,
+          },
+          state: recoveredState,
+          recoveredAfterError: {
+            attempt,
+            reason: 'overview_matched_after_recovery_error',
+            error: error.message || String(error),
+          },
+          saveButtonRecovery: {
+            attempted: attempts.length > 0,
+            attempts,
+          },
+        };
+      }
       if (!isAutoTopupSaveButtonUnavailable(error) || attempt === maxAttempts) {
         if (attempts.length > 0) {
           error.message = `Auto top-up save stayed unavailable after ${attempt} attempts: ${error.message}`;
@@ -4681,6 +4781,11 @@ function purchaseVerifiedForOpomCardBinding(purchaseResult) {
 async function writeOpomCardBindingAfterPurchase(input, purchaseResult, cardSummary, debugDir) {
   if (!input.opom?.enabled || !purchaseVerifiedForOpomCardBinding(purchaseResult)) {
     return {cardStatus: 'skipped', resultStatus: 'skipped', reason: input.opom?.enabled ? 'purchase_not_verified' : 'opom_writeback_disabled'};
+  }
+  // 不换卡充值没有新的卡资料，不能调用绑卡接口。完整流程成功后由 server worker
+  // 使用 writeCompletedRow(scopePaymentMethod=false) 写充值结果，避免提前阻断 Auto Top-Up。
+  if (input.purchaseOnly) {
+    return {cardStatus: 'skipped', resultStatus: 'skipped', reason: 'card_binding_out_of_scope'};
   }
   const {row: opomRow = {}, ...opomArgs} = input.opom;
   const row = {
@@ -4847,7 +4952,10 @@ async function run() {
       input.preparePurchaseOnly = false;
     }
     if (input.autoTopupOnly) {
+      await runLoggedStep('open-add-credits-auto-topup-only', debugDir, () => openPurchaseCreditsModal(page), page);
+      await sleep(PAGE_SETTLE_MS);
       const paymentMethod = await runLoggedStep('verify-saved-payment-method-auto-topup', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
+      await runLoggedStep('close-purchase-modal-auto-topup-only', debugDir, () => closePurchaseModal(page), page);
       const autoTopupResult = await runLoggedStep('configure-auto-topup', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
@@ -4860,9 +4968,9 @@ async function run() {
       };
     }
     if (input.purchaseOnly) {
-      const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
-      await runLoggedStep('wait-add-credits-purchase-only', debugDir, () => waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true}), page);
+      await runLoggedStep('open-add-credits-purchase-only', debugDir, () => openPurchaseCreditsModal(page), page);
       await sleep(PAGE_SETTLE_MS);
+      const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
       const purchaseResult = input.purchase.confirmed
         ? await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
         : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);

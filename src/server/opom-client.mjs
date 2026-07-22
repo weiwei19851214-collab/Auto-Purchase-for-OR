@@ -383,7 +383,15 @@ export async function writeCardBinding(args, row, details, context = {}) {
 }
 
 export async function writeCompletedRow(args, row, details, context = {}) {
-  // 当前 OPOM 合同只需要在充值成功后写回绑卡信息；充值结果接口不再调用，避免重复改变 OPOM 充值状态。
+  if (args.scopePaymentMethod === false) {
+    const result = await writeRowResult(args, row, details, {
+      ...context,
+      status: 'completed',
+      stage: 'closed_loop.complete',
+    });
+    return {cardStatus: 'skipped', resultStatus: result.resultStatus};
+  }
+  // 换卡范围保留现有绑卡写回合同，避免重复改变 OPOM 充值状态。
   return writeCardBinding(args, row, details, context);
 }
 

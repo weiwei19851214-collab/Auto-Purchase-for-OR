@@ -60,6 +60,16 @@ export function opomHealthStatus(row) {
   return String(row.opom_health_status || '').trim().toLowerCase();
 }
 
+const HEALTHY_OPOM_STATUSES = new Set(['ok', 'local_selector', 'completed']);
+
+export function isHealthyOpomStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  // Some compatible OPOM deployments report an eligible account as
+  // "completed". The queue filter has already selected it for recharge;
+  // do not turn that healthy status into a local preflight blocker.
+  return !status || HEALTHY_OPOM_STATUSES.has(status);
+}
+
 export function requiredColumns() {
   return [
     'status',
@@ -244,7 +254,7 @@ export function validateRow(row, args) {
   const scope = executionScope(args);
   if (!adsPowerSerialNumber(row) && !adsPowerUserId(row)) missing.push('ads_power_user_id_or_serial_number');
   if (adsMatchStatus(row) && adsMatchStatus(row) !== 'matched') missing.push(`ads_match_status:${adsMatchStatus(row)}`);
-  if (opomHealthStatus(row) && !['ok', 'local_selector'].includes(opomHealthStatus(row))) missing.push(`opom_health_status:${opomHealthStatus(row)}`);
+  if (!isHealthyOpomStatus(opomHealthStatus(row))) missing.push(`opom_health_status:${opomHealthStatus(row)}`);
   if (!loginEmail(row)) missing.push('login_email');
   if (scope.paymentMethod) {
     if (!cardNumber(row)) missing.push('card_number');
@@ -261,7 +271,7 @@ export function validateRow(row, args) {
   if (opomAccountId(row) && scope.purchase && args.confirmPurchase !== false && !args.opomWriteback) {
     missing.push('opom_writeback');
   }
-  if (args.opomWriteback && scope.purchase && args.confirmPurchase !== false) {
+  if (args.opomWriteback && scope.purchase && scope.paymentMethod && args.confirmPurchase !== false) {
     if (!ejhOrderNo(row)) missing.push('order_no');
     if (!cardNumber(row)) missing.push('card_number');
     if (!row.exp_month) missing.push('exp_month');
@@ -446,8 +456,12 @@ export function completionEvidence(status, details = {}) {
 
   if (detailValue(details, 'opomAccountId')) {
     if (detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
-    missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
-    if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
+    if (detailValue(details, 'opomWritebackMode') === 'result') {
+      if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
+    } else {
+      missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
+      if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
+    }
   }
 
   return {
@@ -464,6 +478,8 @@ export function successDetails(row, result, args) {
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
     ...rowMetadata(row),
+    executionScope: scopeSummary(args),
+    opomWritebackMode: scope.paymentMethod ? 'card_binding' : 'result',
     purchaseStatus: scope.purchase
       ? (purchase.skippedByRule ? 'skipped_by_balance_rule' : (verification.verified ? 'verified' : 'purchase_unverified'))
       : 'skipped',

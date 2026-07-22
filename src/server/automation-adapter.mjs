@@ -491,7 +491,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
     let completed = purchaseOk && autoTopupOk;
-    if (completed && args.opomWriteback && args.confirmPurchase && details.opomCardWritebackStatus !== 'written') {
+    const opomWritebackComplete = args.scopePaymentMethod
+      ? details.opomCardWritebackStatus === 'written'
+      : details.opomResultWritebackStatus === 'written';
+    if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
       try {
         const writeback = await opomAdapter.writeCompletedRow(args, row, details, {rowNumber: rawIndex + 2});
         details.opomCardWritebackStatus = writeback.cardStatus;

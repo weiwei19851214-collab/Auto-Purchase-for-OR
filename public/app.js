@@ -482,6 +482,9 @@ function syncScopeControls() {
   els.noPurchaseMode.disabled = !purchaseEnabled;
   if (!purchaseEnabled) els.noPurchaseMode.checked = false;
   els.removeExisting.disabled = !els.scopePaymentMethod.checked;
+  if (!els.scopePaymentMethod.checked && (els.scopePurchase.checked || els.scopeAutoTopup.checked)) {
+    els.scopeBillingAddress.checked = false;
+  }
   syncExecutionCopy();
   syncActionButtons();
 }
@@ -731,7 +734,7 @@ function rowBadgeState(value, okValue = 'ready') {
 
 function opomHealthOk(row) {
   const status = String(row.opom_health_status || 'ok').trim().toLowerCase();
-  return !status || status === 'ok' || status === 'local_selector';
+  return !status || status === 'ok' || status === 'local_selector' || status === 'completed';
 }
 
 function effectiveMatchStatus(row) {

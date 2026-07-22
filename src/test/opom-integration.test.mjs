@@ -233,6 +233,16 @@ test('parsePlan blocks OPOM rows marked unhealthy by OPOM', async () => {
   assert.ok(blocked.rows[0].missing.includes('opom_health_status:credits_401_blocked'));
 });
 
+test('parsePlan accepts completed as a healthy legacy OPOM status', async () => {
+  const completedCsv = `status,opom_account_id,login_email,ads_power_user_id,ads_power_serial_number,opom_health_status,ads_match_status,order_no,card_no,exp_month,exp_year,cvv,amount,postal_code,auto_topup_threshold,auto_topup_amount
+,acct_1,user@example.com,profile_ok,1415,completed,matched,ejh_order_1,5257970000000001,06,28,456,10,97001,2,25
+`;
+  const parsed = await parsePlan(completedCsv, {opomWriteback: true});
+
+  assert.equal(parsed.rows[0].status, 'ready');
+  assert.ok(!parsed.rows[0].missing.some((item) => item.startsWith('opom_health_status:')));
+});
+
 test('parsePlan blocks selector rows until AdsPower match is confirmed', async () => {
   const selectorCsv = `status,login_email,ads_power_serial_number,opom_health_status,ads_match_status,order_no,card_no,exp_month,exp_year,cvv,amount,postal_code,holder_name,country,address_line1,city,state,auto_topup_threshold,auto_topup_amount
 ,selector@example.com,1415,local_selector,not_verified,ejh_order_1,5257970000000001,06,28,456,10,97001,Selector,US,1 Selector St,Portland,OR,2,25
@@ -766,20 +776,50 @@ test('parsePlan requires card number before confirmed OPOM writeback purchase', 
   assert.ok(blocked.rows[0].missing.includes('card_number'));
 });
 
-test('parsePlan requires card expiration before confirmed OPOM writeback even without card replacement scope', async () => {
+test('parsePlan allows card-free confirmed OPOM purchases when card replacement is out of scope', async () => {
   const missingExpiryCsv = `status,opom_account_id,login_email,ads_power_user_id,ads_power_serial_number,ads_match_status,order_no,card_no,amount,auto_topup_threshold,auto_topup_amount
 ,acct_1,user@example.com,profile_ok,1415,matched,ejh_order_1,5257970000000001,10,2,25
 `;
-  const blocked = await parsePlan(missingExpiryCsv, {
+  const cardlessPurchase = await parsePlan(missingExpiryCsv, {
     opomWriteback: true,
     confirmPurchase: true,
     scopeBillingAddress: false,
     scopePaymentMethod: false,
   });
 
-  assert.equal(blocked.rows[0].status, 'missing_fields');
-  assert.ok(blocked.rows[0].missing.includes('exp_month'));
-  assert.ok(blocked.rows[0].missing.includes('exp_year'));
+  assert.equal(cardlessPurchase.rows[0].status, 'ready');
+});
+
+test('writeCompletedRow writes an OPOM result without binding a card for card-free purchases', async () => {
+  const calls = [];
+  await withFetch(async (url, options) => {
+    calls.push({url: String(url), body: JSON.parse(options.body)});
+    return Response.json({data: {ok: true}});
+  }, async () => {
+    const result = await writeCompletedRow({
+      opomWriteback: true,
+      scopePaymentMethod: false,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      runId: 'run_1',
+      opomWritebackRetries: 1,
+    }, {
+      opom_account_id: 'acct_1',
+      login_email: 'user@example.com',
+      ads_power_user_id: 'profile_ok',
+      ads_power_serial_number: '1415',
+    }, {
+      purchaseStatus: 'verified',
+      purchaseAmount: '10',
+      balanceBefore: '20',
+      balanceAfter: '30',
+    }, {rowNumber: 2});
+
+    assert.deepEqual(result, {cardStatus: 'skipped', resultStatus: 'written'});
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/results$/);
+    assert.equal(calls[0].body.card, undefined);
+  });
 });
 
 test('writeCompletedRow writes only OPOM card binding without CVV value', async () => {

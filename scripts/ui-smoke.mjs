@@ -104,6 +104,11 @@ try {
   add('resume API wired in UI', /resume-preview/.test(appJs) && /resumeFromRow/.test(appJs), 'present');
   add('OPOM resolve failure is row-visible', /opom_resolve_failed/.test(appJs), 'present');
   add('auto preflight copy present', /自动预检/.test(html), 'present');
+  add(
+    'card-free purchase or auto top-up clears incompatible billing scope',
+    /if \(!els\.scopePaymentMethod\.checked && \(els\.scopePurchase\.checked \|\| els\.scopeAutoTopup\.checked\)\) \{\s*els\.scopeBillingAddress\.checked = false;/.test(appJs),
+    'scope_normalization_present',
+  );
   add('AdsPower status writeback UI hidden', !/adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'hidden');
   add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');
   add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}`), 'no_sensitive_literals');

@@ -216,6 +216,44 @@ test('browser path skips default payment clearing when Stripe data endpoint is n
   assert.match(script, /shouldTryPickerRemoval/);
   assert.ok(script.includes('stripe_(?:customer|data)_not_found'));
   assert.match(script, /stripeTargets=/);
+  assert.match(script, /verifySavedPaymentMethodFromCreditsUi/);
+  assert.match(script, /stripe_data_404_ui_fallback/);
+  assert.match(script, /Credits UI fallback found no saved payment method/);
+});
+
+test('purchase-only browser path opens Add Credits amount modal before verifying the saved card', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const purchaseOnlyStart = script.indexOf('if (input.purchaseOnly)');
+  const purchaseOnlyEnd = script.indexOf('const removal = input.removeExistingPaymentMethod', purchaseOnlyStart);
+  const purchaseOnlyBody = script.slice(purchaseOnlyStart, purchaseOnlyEnd);
+  assert.match(script, /async function openPurchaseCreditsModal/);
+  assert.match(purchaseOnlyBody, /open-add-credits-purchase-only/);
+  assert.ok(purchaseOnlyBody.indexOf('openPurchaseCreditsModal(page)') < purchaseOnlyBody.indexOf('verifySavedPaymentMethodForAutoTopup(page'));
+  assert.match(script, /Add Credits was clicked but Purchase Credits amount modal did not open/);
+  const purchaseModalStateBody = script.slice(script.indexOf('async function getPurchaseModalState'), script.indexOf('async function getCurrentCreditBalance'));
+  assert.match(purchaseModalStateBody, /\^Purchase Credits\$/);
+  assert.match(purchaseModalStateBody, /purchase:\s*!!purchaseHeading/);
+  assert.doesNotMatch(purchaseModalStateBody, /purchase:\s*\/Purchase Credits\/i\.test\(text\)/);
+});
+
+test('auto-topup-only browser path opens Add Credits to verify a saved card, then closes it before configuration', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.lastIndexOf('if (input.autoTopupOnly)');
+  const end = script.indexOf('if (input.purchaseOnly)', start);
+  const body = script.slice(start, end);
+  assert.ok(body.indexOf('openPurchaseCreditsModal(page)') < body.indexOf('verifySavedPaymentMethodForAutoTopup(page'));
+  assert.ok(body.indexOf('verifySavedPaymentMethodForAutoTopup(page') < body.indexOf('closePurchaseModal(page)'));
+  assert.ok(body.indexOf('closePurchaseModal(page)') < body.indexOf('configureAutoTopup(page'));
+});
+
+test('purchase-only browser path defers OPOM result writeback instead of requiring card binding fields', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.indexOf('async function writeOpomCardBindingAfterPurchase');
+  const end = script.indexOf('async function waitForAccountState', start);
+  const body = script.slice(start, end);
+  assert.match(body, /if \(input\.purchaseOnly\)/);
+  assert.match(body, /reason: 'card_binding_out_of_scope'/);
+  assert.ok(body.indexOf('if (input.purchaseOnly)') < body.indexOf('writeCardBinding({'));
 });
 
 test('browser path can click icon-only add payment method button in Purchase Credits', () => {
@@ -233,6 +271,12 @@ test('browser path no longer disables Auto top-up before opening Add Credits', (
   assert.doesNotMatch(script, /disableExistingAutoTopupBeforeAddCredits/);
   assert.doesNotMatch(script, /disable-existing-auto-topup-before-add-credits/);
   assert.match(script, /auto_topup_pre_disable_removed/);
+});
+
+test('AdsPower browser startup HTTP timeout allows 30 seconds under concurrency', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000/);
+  assert.match(script, /api\/v1\/browser\/start[\s\S]{0,500}DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS/);
 });
 
 test('browser path recognizes updated Auto top-up buttons and scoped inputs', () => {
@@ -301,6 +345,15 @@ test('Auto top-up reloads Credits and retries once when Save stays disabled', ()
   assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
   assert.match(configureBody, /auto_topup_save_button_unavailable/);
   assert.match(configureBody, /configureAutoTopupAttempt\(page, autoTopup, debugPort\)/);
+});
+
+test('Auto top-up accepts matching overview after a save recovery error', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(configureBody, /waitForAutoTopupConfigured\(\s*page,\s*autoTopup\.threshold,\s*autoTopup\.amount,\s*4000,\s*\)/);
+  assert.match(configureBody, /recoveredState\?\.configured/);
+  assert.match(configureBody, /overview_matched_after_recovery_error/);
+  assert.ok(configureBody.indexOf('recoveredState?.configured') < configureBody.indexOf('if (!isAutoTopupSaveButtonUnavailable(error)'));
 });
 
 test('Auto top-up refresh waits for a visible security challenge to clear', () => {

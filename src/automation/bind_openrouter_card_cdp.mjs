@@ -4227,59 +4227,103 @@ async function replaceAutoTopupInputById(page, selector, value) {
     };
     const input = document.querySelector(${JSON.stringify(selector)});
     if (!visible(input)) return {found:false, selector:${JSON.stringify(selector)}};
-    // 不直接改 value。这里只负责把输入框滚到可见区，后面用 CDP 键盘事件模拟真人清空和输入。
+    // 不直接改 value。先聚焦精确输入框，再用 CDP 键盘事件清空和输入，确保 React 收到人工事件序列。
     input.scrollIntoView({block:'center', inline:'center'});
-    const rect = input.getBoundingClientRect();
-    return {found:true, before: input.value || '', rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height}};
+    input.focus({preventScroll:true});
+    return {
+      found:true,
+      before: input.value || '',
+      focused: document.activeElement === input,
+    };
   })()`);
   if (!target?.found) return {updated: false, reason: 'auto_topup_input_not_found', selector};
-  const x = target.rect.x + Math.max(8, target.rect.width - 16);
-  const y = target.rect.y + target.rect.height / 2;
-  await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
-  await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
-  await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
-  await sleep(80);
-  // Auto Top-Up 必须让前端收到真实键盘输入事件；连续 Backspace 比 DOM 清空更接近人工操作。
-  for (let i = 0; i < 12; i += 1) {
-    await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
+  if (!target.focused) return {updated: false, reason: 'auto_topup_input_not_focused', selector};
+
+  // type=number 不支持 select()/setSelectionRange；End + 足量 Backspace 是跨页面实现更稳定的真实清空方式。
+  await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35});
+  for (let index = 0; index < Math.max(8, String(target.before || '').length + 2); index += 1) {
+    await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
     await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-    await sleep(20);
   }
-  await page.send('Input.insertText', {text: String(value)});
-  await sleep(120);
+  for (const character of String(value)) {
+    const isDigit = /^\d$/.test(character);
+    const code = isDigit ? `Digit${character}` : (character === '.' ? 'Period' : '');
+    const windowsVirtualKeyCode = isDigit ? character.charCodeAt(0) : (character === '.' ? 190 : character.charCodeAt(0));
+    await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: character, code, windowsVirtualKeyCode});
+    await page.send('Input.dispatchKeyEvent', {type: 'char', key: character, code, text: character, unmodifiedText: character, windowsVirtualKeyCode});
+    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: character, code, windowsVirtualKeyCode});
+  }
+  // blur/change 是 OpenRouter 表单把 DOM 值同步到提交状态的关键；仅回读 input.value 会产生假成功。
+  await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
+  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
+  await sleep(400);
   return evaluate(page, `(() => {
     const input = document.querySelector(${JSON.stringify(selector)});
     const expected = Number(${JSON.stringify(String(value))});
     const actual = Number(String(input?.value || '').replace(/[$,\\s]/g, ''));
+    const blurred = document.activeElement !== input;
     return {
-      updated: Number.isFinite(actual) && actual === expected,
+      updated: Number.isFinite(actual) && actual === expected && blurred,
       selector:${JSON.stringify(selector)},
       before:${JSON.stringify(target.before || '')},
       value: input?.value || '',
+      blurred,
+    };
+  })()`);
+}
+
+async function readAutoTopupFormValues(page, threshold, amount) {
+  return evaluate(page, `(() => {
+    const thresholdInput = document.querySelector('input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold');
+    const amountInput = document.querySelector('input#auto-topup-amount[name="amount"], input#auto-topup-amount');
+    const normalize = (input) => Number(String(input?.value || '').replace(/[$,\\s]/g, ''));
+    const expectedThreshold = Number(${JSON.stringify(String(threshold))});
+    const expectedAmount = Number(${JSON.stringify(String(amount))});
+    const currentThreshold = normalize(thresholdInput);
+    const currentAmount = normalize(amountInput);
+    const thresholdBlurred = document.activeElement !== thresholdInput;
+    const amountBlurred = document.activeElement !== amountInput;
+    return {
+      updated: Number.isFinite(currentThreshold)
+        && Number.isFinite(currentAmount)
+        && currentThreshold === expectedThreshold
+        && currentAmount === expectedAmount
+        && thresholdBlurred
+        && amountBlurred,
+      threshold: thresholdInput?.value || '',
+      amount: amountInput?.value || '',
+      thresholdBlurred,
+      amountBlurred,
     };
   })()`);
 }
 
 async function fillAutoTopupForm(page, threshold, amount, options = {}) {
   let last = null;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const thresholdInput = await replaceAutoTopupInputById(page, 'input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold', threshold);
     const amountInput = thresholdInput.updated
       ? await replaceAutoTopupInputById(page, 'input#auto-topup-amount[name="amount"], input#auto-topup-amount', amount)
       : {updated: false, reason: 'threshold_not_ready'};
+    const settled = thresholdInput.updated && amountInput.updated
+      ? await readAutoTopupFormValues(page, threshold, amount)
+      : {updated: false};
     last = {
-      updated: thresholdInput.updated && amountInput.updated,
+      updated: thresholdInput.updated && amountInput.updated && settled.updated,
       thresholdSet: thresholdInput.updated,
       amountSet: amountInput.updated,
       thresholdInput,
       amountInput,
-      source: 'auto_topup_real_text_input',
+      settled,
+      source: 'auto_topup_cdp_key_events_with_blur',
       clearFirst: options.clearFirst === true,
+      attempt: attempt + 1,
     };
     if (last.updated) {
       return last;
     }
-    await sleep(100);
+    await sleep(250);
   }
   throw new Error(`Auto top-up form inputs not ready: ${JSON.stringify(last)}`);
 }
@@ -4485,18 +4529,18 @@ async function saveAutoTopup(page) {
     };
   })()`);
   let result = null;
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
     result = await readAndClickSave();
     if (result.clicked) break;
     // OpenRouter 表单写值后 Save 可能短暂 disabled；等它真正可点再提交，避免把“保存中/解锁中”误判成失败。
     await sleep(100);
   }
   if (!result.clicked) throw new Error(`Auto top-up save button not found: ${JSON.stringify(result)}`);
-  await sleep(1800);
+  await sleep(900);
   return result;
 }
 
-async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = 6000) {
   const expectedThreshold = normalizeMoneyForCompare(threshold);
   const expectedAmount = normalizeMoneyForCompare(amount);
   const deadline = Date.now() + timeoutMs;
@@ -4536,11 +4580,11 @@ async function retryAutoTopupSaveAfterOverviewMismatch(page, requested, firstErr
       state: current.state,
     };
   }
-  const stateBeforeRetry = await waitForAutoTopupOverview(page, 3000).catch((error) => ({enabled: true, hasManage: true, error: error.message}));
+  const stateBeforeRetry = await waitForAutoTopupOverview(page, 2000).catch((error) => ({enabled: true, hasManage: true, error: error.message}));
   const opened = await openAutoTopupEditor(page, {...stateBeforeRetry, enabled: true, hasManage: true}, 'Manage');
   const formAfterToggle = opened.formReady
     ? opened.form
-    : await waitForAutoTopupForm(page, 5000);
+    : await waitForAutoTopupForm(page, 3000);
   const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
   const saved = await saveAutoTopup(page);
   return {
@@ -4567,7 +4611,7 @@ async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
     threshold: autoTopup.threshold,
     amount: autoTopup.amount,
   };
-  let state = await waitForAutoTopupOverview(page, 8000);
+  let state = await waitForAutoTopupOverview(page, 5000);
   const currentThreshold = normalizeMoneyForCompare(state.threshold);
   const currentAmount = normalizeMoneyForCompare(state.amount);
   const requestedThreshold = normalizeMoneyForCompare(requested.threshold);
@@ -4580,7 +4624,7 @@ async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
   const toggled = await toggleAutoTopupIfNeeded(page);
   const formAfterToggle = opened.formReady
     ? opened.form
-    : await waitForAutoTopupForm(page, 5000);
+    : await waitForAutoTopupForm(page, 3000);
   const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
   const saved = await saveAutoTopup(page);
   let retryAfterOverviewMismatch = {attempted: false};
@@ -4595,7 +4639,7 @@ async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
 
 async function configureAutoTopup(page, autoTopup, debugPort = '') {
   const attempts = [];
-  const maxAttempts = 3;
+  const maxAttempts = 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const result = await configureAutoTopupAttempt(page, autoTopup, debugPort);

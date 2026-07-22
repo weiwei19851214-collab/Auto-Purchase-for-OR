@@ -257,10 +257,15 @@ test('Auto top-up refresh and input fill do not use macOS Command shortcuts', ()
   assert.match(refreshBody, /Page\.reload/);
   assert.match(refreshBody, /method: 'page_reload'/);
   assert.doesNotMatch(refreshBody, /MetaLeft|KeyR|command_r/);
-  assert.match(fillInputBody, /Input\.insertText/);
+  assert.match(fillInputBody, /input\.focus\(\{preventScroll:true\}\)/);
+  assert.match(fillInputBody, /key: 'End'/);
+  assert.match(fillInputBody, /type: 'char'/);
   assert.match(fillInputBody, /Backspace/);
+  assert.match(fillInputBody, /key: 'Tab'/);
+  assert.match(fillInputBody, /const blurred = document\.activeElement !== input/);
+  assert.match(fillInputBody, /auto_topup_input_not_focused/);
   assert.doesNotMatch(fillInputBody, /MetaLeft|KeyA/);
-  assert.doesNotMatch(fillInputBody, /dispatchEvent|setNativeValue|\\.value\\s*=/);
+  assert.doesNotMatch(fillInputBody, /dispatchEvent|setNativeValue|input\.setSelectionRange|input\.select\(\)|\\.value\\s*=/);
 });
 
 test('Auto top-up retries one save when overview text does not match requested values', () => {
@@ -271,11 +276,13 @@ test('Auto top-up retries one save when overview text does not match requested v
   assert.ok(script.includes('input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold'));
   assert.ok(script.includes('input#auto-topup-amount[name="amount"], input#auto-topup-amount'));
   assert.ok(script.includes("document.querySelectorAll('form button[type=\"submit\"], button[type=\"submit\"]')"));
-  assert.match(script, /auto_topup_real_text_input/);
+  assert.match(script, /auto_topup_cdp_key_events_with_blur/);
   assert.ok(script.includes('fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true})'));
-  assert.match(script, /attempt < 80/);
+  assert.match(script, /attempt < 30/);
   assert.match(script, /await sleep\(100\)/);
-  assert.match(script, /attempt < 50/);
+  assert.match(script, /attempt < 3/);
+  assert.match(script, /readAutoTopupFormValues/);
+  assert.match(script, /waitForAutoTopupConfigured\(page, threshold, amount, timeoutMs = 6000\)/);
   assert.match(script, /Auto top-up form inputs not ready/);
   assert.doesNotMatch(script, /dirtyValueFor/);
   assert.match(script, /readAutoTopupConfiguredNow/);
@@ -285,11 +292,11 @@ test('Auto top-up retries one save when overview text does not match requested v
   assert.ok(configureBody.indexOf('retryAutoTopupSaveAfterOverviewMismatch(page, requested, error)') < configureBody.lastIndexOf('state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);'));
 });
 
-test('Auto top-up reloads Credits and retries up to three times when Save stays disabled', () => {
+test('Auto top-up reloads Credits and retries once when Save stays disabled', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
   assert.match(script, /function isAutoTopupSaveButtonUnavailable/);
-  assert.match(configureBody, /const maxAttempts = 3/);
+  assert.match(configureBody, /const maxAttempts = 2/);
   assert.match(configureBody, /isAutoTopupSaveButtonUnavailable\(error\)/);
   assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
   assert.match(configureBody, /auto_topup_save_button_unavailable/);

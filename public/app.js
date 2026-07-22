@@ -40,6 +40,7 @@ const els = {
   defaultAmountAtOrAbove: document.querySelector('#defaultAmountAtOrAbove'),
   defaultAutoTopupThreshold: document.querySelector('#defaultAutoTopupThreshold'),
   defaultAutoTopupAmount: document.querySelector('#defaultAutoTopupAmount'),
+  autoTopupEnableOnly: document.querySelector('#autoTopupEnableOnly'),
   addressPreset: document.querySelector('#addressPreset'),
   addressMappingCsv: document.querySelector('#addressMappingCsv'),
   generateAddresses: document.querySelector('#generateAddressesBtn'),
@@ -189,6 +190,7 @@ function optionsPayload() {
     preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
     autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
     autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
+    autoTopupEnableOnly: els.autoTopupEnableOnly?.checked || false,
     cardProvider: els.cardProvider?.value || 'EJH',
     ...config,
     opomWriteback: els.opomWriteback.checked && !els.opomWriteback.disabled,
@@ -455,7 +457,7 @@ function syncActionButtons() {
   const hasOpomConfig = opomConfigured();
   const hasCardsCsv = hasUploadedCardCsv();
   const hasCreateInputs = hasCreateCardInputs();
-  setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 RECHARGE_API_TOKEN');
+  setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 RECHARGE_API_TOKEN（或使用 .recharge.local.env 后重新启动）。');
   setButtonAvailability(els.adsPowerMatch, hasRows && hasAdsPowerConfig, hasRows
     ? '请先在本地配置中填写 AdsPower API 地址和 API key'
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
@@ -810,6 +812,21 @@ function syncRechargeRuleMode() {
   if (els.balanceRuleFields) els.balanceRuleFields.hidden = fixed;
   if (els.autoTopupRuleSection) els.autoTopupRuleSection.hidden = fixed;
   if (els.addressRuleSection) els.addressRuleSection.hidden = !fixed;
+  syncAutoTopupMode();
+}
+
+function syncAutoTopupMode() {
+  const enableOnly = els.autoTopupEnableOnly?.checked || false;
+  if (els.scopeAutoTopup) {
+    if (enableOnly) els.scopeAutoTopup.checked = true;
+    els.scopeAutoTopup.disabled = enableOnly;
+    els.scopeAutoTopup.setAttribute('aria-disabled', enableOnly ? 'true' : 'false');
+  }
+  for (const input of [els.defaultAutoTopupThreshold, els.defaultAutoTopupAmount]) {
+    if (!input) continue;
+    input.disabled = enableOnly;
+    input.setAttribute('aria-disabled', enableOnly ? 'true' : 'false');
+  }
 }
 
 async function optionalAddressCsvText() {
@@ -1712,6 +1729,11 @@ for (const input of [
 ]) {
   input?.addEventListener('input', handleRuntimeConfigChanged);
 }
+els.autoTopupEnableOnly?.addEventListener('change', () => {
+  syncAutoTopupMode();
+  syncRowsWithCurrentDefaults();
+  invalidateDryRun('自动充值规则模式已变化，启动执行时会重新预检。');
+});
 els.opomWriteback.addEventListener('change', () => invalidateDryRun());
 els.addressMappingCsv.addEventListener('change', () => {
   generatedAddressMappings = [];

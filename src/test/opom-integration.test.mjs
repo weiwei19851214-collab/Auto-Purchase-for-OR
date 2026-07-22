@@ -178,6 +178,26 @@ test('readyToRechargePayload forwards explicit OPOM queue status', async () => {
   });
 });
 
+test('readyToRechargePayload requests exact VIP operational statuses', async () => {
+  for (const status of ['card_switch', 'overdue']) {
+    await withFetch(async (url) => {
+      const parsed = new URL(String(url));
+      assert.equal(parsed.searchParams.get('group'), 'VIP');
+      assert.equal(parsed.searchParams.get('status'), status);
+      return Response.json({data: [], nextCursor: null});
+    }, async () => {
+      const result = await readyToRechargePayload({
+        group: 'VIP',
+        status,
+        opomBaseUrl: 'http://opom.local',
+        opomRechargeToken: 'test-token',
+      });
+      assert.equal(result.count, 0);
+      assert.equal(result.group, 'VIP');
+    });
+  }
+});
+
 test('readyToRechargePayload forwards cursor and returns nextCursor for pagination', async () => {
   await withFetch(async (url) => {
     assert.match(String(url), /cursor=acct_001/);
@@ -729,11 +749,11 @@ test('parsePlan blocks OPOM rows until AdsPower match status is matched', async 
   assert.equal(ready.rows[0].status, 'ready');
 });
 
-test('parsePlan requires OPOM writeback for confirmed purchase on OPOM rows', async () => {
+test('parsePlan allows confirmed OPOM purchases when writeback is disabled', async () => {
   const matchedCsv = `status,opom_account_id,login_email,ads_power_user_id,ads_power_serial_number,ads_match_status,order_no,card_no,exp_month,exp_year,cvv,amount,postal_code,auto_topup_threshold,auto_topup_amount
 ,acct_1,user@example.com,profile_ok,1415,matched,ejh_order_1,5257970000000001,06,28,456,10,97001,2,25
 `;
-  const blocked = await parsePlan(matchedCsv, {opomWriteback: false, confirmPurchase: true});
+  const readyWithoutWriteback = await parsePlan(matchedCsv, {opomWriteback: false, confirmPurchase: true});
   const readyWithWriteback = await parsePlan(matchedCsv, {opomWriteback: true, confirmPurchase: true});
   const readyNoPurchase = await parsePlan(matchedCsv, {
     opomWriteback: false,
@@ -741,10 +761,36 @@ test('parsePlan requires OPOM writeback for confirmed purchase on OPOM rows', as
     preparePurchaseOnly: true,
   });
 
-  assert.equal(blocked.rows[0].status, 'missing_fields');
-  assert.ok(blocked.rows[0].missing.includes('opom_writeback'));
+  assert.equal(readyWithoutWriteback.rows[0].status, 'ready');
   assert.equal(readyWithWriteback.rows[0].status, 'ready');
   assert.equal(readyNoPurchase.rows[0].status, 'ready');
+});
+
+test('parsePlan allows enabling Auto top-up without changing its existing rule', async () => {
+  const csvWithoutAutoTopupValues = `status,opom_account_id,login_email,ads_power_user_id,ads_power_serial_number,ads_match_status,amount,postal_code
+,acct_1,user@example.com,profile_ok,1415,matched,10,97001
+`;
+  const parsed = await parsePlan(csvWithoutAutoTopupValues, {
+    scopeBillingAddress: false,
+    scopePaymentMethod: false,
+    scopePurchase: true,
+    scopeAutoTopup: true,
+    autoTopupEnableOnly: true,
+    opomWriteback: false,
+    confirmPurchase: true,
+  });
+
+  assert.equal(parsed.rows[0].status, 'ready');
+  assert.equal(parsed.rows[0].autoTopup.preserveRules, true);
+  assert.equal(parsed.rows[0].autoTopup.threshold, '');
+  assert.equal(parsed.rows[0].autoTopup.amount, '');
+  const task = rechargePlan.buildClosedLoopTask({
+    login_email: 'user@example.com',
+    ads_power_user_id: 'profile_ok',
+    ads_power_serial_number: '1415',
+    amount: '10',
+  }, parsed.args);
+  assert.equal(task.autoTopup.preserveRules, true);
 });
 
 test('parsePlan requires EJH card identifiers before confirmed OPOM writeback purchase', async () => {

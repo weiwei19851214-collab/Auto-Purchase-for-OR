@@ -133,6 +133,7 @@ export function isEligible(row) {
 }
 
 export function autoTopupPlan(row, args) {
+  if (args.autoTopupEnableOnly) return {threshold: '', amount: '', missing: [], preserveRules: true};
   const threshold = normalizeMoneyValue(args.autoTopupThreshold || row.auto_topup_threshold || '');
   const amount = normalizeMoneyValue(args.autoTopupAmount || row.auto_topup_amount || '');
   const missing = [];
@@ -268,9 +269,6 @@ export function validateRow(row, args) {
   if (scope.purchase) {
     missing.push(...safePurchasePlan(row).missing);
   }
-  if (opomAccountId(row) && scope.purchase && args.confirmPurchase !== false && !args.opomWriteback) {
-    missing.push('opom_writeback');
-  }
   if (args.opomWriteback && scope.purchase && scope.paymentMethod && args.confirmPurchase !== false) {
     if (!ejhOrderNo(row)) missing.push('order_no');
     if (!cardNumber(row)) missing.push('card_number');
@@ -300,7 +298,12 @@ export function buildClosedLoopTask(row, args) {
     billingAddressOnly,
     autoTopupOnly,
     purchaseOnly,
-    autoTopup: {enabled: scope.autoTopup, threshold: autoTopup.threshold, amount: autoTopup.amount},
+    autoTopup: {
+      enabled: scope.autoTopup,
+      preserveRules: !!args.autoTopupEnableOnly,
+      threshold: autoTopup.threshold,
+      amount: autoTopup.amount,
+    },
     purchase,
     opom: args.opomWriteback ? {
       enabled: true,
@@ -454,7 +457,7 @@ export function completionEvidence(status, details = {}) {
     missing.push('adspower_status_target');
   }
 
-  if (detailValue(details, 'opomAccountId')) {
+  if (detailValue(details, 'opomAccountId') && detailValue(details, 'opomWritebackEnabled') !== 'false') {
     if (detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
     if (detailValue(details, 'opomWritebackMode') === 'result') {
       if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
@@ -479,7 +482,8 @@ export function successDetails(row, result, args) {
   return {
     ...rowMetadata(row),
     executionScope: scopeSummary(args),
-    opomWritebackMode: scope.paymentMethod ? 'card_binding' : 'result',
+    opomWritebackEnabled: String(Boolean(args.opomWriteback)),
+    opomWritebackMode: args.opomWriteback ? (scope.paymentMethod ? 'card_binding' : 'result') : 'disabled',
     purchaseStatus: scope.purchase
       ? (purchase.skippedByRule ? 'skipped_by_balance_rule' : (verification.verified ? 'verified' : 'purchase_unverified'))
       : 'skipped',
@@ -492,8 +496,8 @@ export function successDetails(row, result, args) {
       : 'skipped',
     autoTopupThreshold: requestedAutoTopup.threshold || '',
     autoTopupAmount: requestedAutoTopup.amount || '',
-    opomCardWritebackStatus: result.opomCardWriteback?.cardStatus || result.opomCardWritebackStatus || '',
-    opomResultWritebackStatus: result.opomCardWriteback?.resultStatus || result.opomResultWritebackStatus || '',
+    opomCardWritebackStatus: result.opomCardWriteback?.cardStatus || result.opomCardWritebackStatus || (args.opomWriteback ? '' : 'skipped_user_disabled'),
+    opomResultWritebackStatus: result.opomCardWriteback?.resultStatus || result.opomResultWritebackStatus || (args.opomWriteback ? '' : 'skipped_user_disabled'),
   };
 }
 

@@ -823,6 +823,7 @@ function normalizeInput(args) {
     },
     autoTopup: {
       enabled: !!(args['configure-auto-topup'] || json.configureAutoTopup || autoTopup.enabled || autoTopupThreshold || autoTopupAmount),
+      preserveRules: !!(autoTopup.preserveRules || autoTopup.preserve_rules),
       threshold: normalizeMoneyValue(autoTopupThreshold),
       amount: normalizeMoneyValue(autoTopupAmount),
     },
@@ -873,7 +874,7 @@ function normalizeInput(args) {
   input.billing.postalCode ||= input.card.postalCode;
   if (needsCard && !input.existingBillingAddress && !input.card.postalCode) throw new Error('card postalCode is required');
   if ((needsCard && !input.existingBillingAddress) || input.billingAddressOnly) requireBillingAddress(input.billing);
-  if (input.autoTopup.enabled && !input.creditsStatusOnly && (!input.autoTopup.threshold || !input.autoTopup.amount)) {
+  if (input.autoTopup.enabled && !input.creditsStatusOnly && !input.autoTopup.preserveRules && (!input.autoTopup.threshold || !input.autoTopup.amount)) {
     throw new Error('autoTopup.threshold and autoTopup.amount are required when autoTopup is enabled');
   }
   if (input.autoTopupOnly && !input.autoTopup.enabled) {
@@ -4683,6 +4684,17 @@ async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
     amount: autoTopup.amount,
   };
   let state = await waitForAutoTopupOverview(page, 5000);
+  if (autoTopup.preserveRules) {
+    if (state.enabled) {
+      return {configured: true, changed: false, requested, preserveRules: true, navigation, dismissedOverlays, state};
+    }
+    const dismissedBeforeEditor = await dismissSaveCardOverlays(page, debugPort);
+    const opened = await openAutoTopupEditor(page, state);
+    const toggled = await toggleAutoTopupIfNeeded(page);
+    state = await waitForAutoTopupOverview(page, 5000);
+    if (!state.enabled) throw new Error('Auto top-up switch did not stay enabled');
+    return {configured: true, changed: true, requested, preserveRules: true, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, state};
+  }
   const currentThreshold = normalizeMoneyForCompare(state.threshold);
   const currentAmount = normalizeMoneyForCompare(state.amount);
   const requestedThreshold = normalizeMoneyForCompare(requested.threshold);

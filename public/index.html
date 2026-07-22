@@ -185,9 +185,11 @@
                 <label class="field">
                   <span>队列状态</span>
                   <select id="opomStatus">
-                    <option value="needs_recharge">Needs recharge</option>
-                    <option value="failed_retryable">Failed retryable</option>
-                    <option value="all">All in group</option>
+                    <option value="card_switch">低余额账号（CARD_SWITCH）</option>
+                    <option value="overdue">欠费账号（OVERDUE）</option>
+                    <option value="needs_recharge">按余额阈值待充值（兼容旧队列）</option>
+                    <option value="failed_retryable">失败后可重试</option>
+                    <option value="all">组内全部账号（仅查看）</option>
                   </select>
                 </label>
                 <label class="field">
@@ -352,6 +354,7 @@
                 <label><input id="scopeBillingAddress" type="checkbox" checked /> 添加付款地址</label>
                 <label><input id="scopePaymentMethod" type="checkbox" checked /> 换卡</label>
                 <label><input id="scopePurchase" type="checkbox" checked /> 充值</label>
+                <label><input id="autoTopupEnableOnly" type="checkbox" /> 只开启 Auto Top-Up，不修改现有规则</label>
                 <label><input id="scopeAutoTopup" type="checkbox" checked /> 自动充值规则</label>
               </fieldset>
 
@@ -360,7 +363,7 @@
                 <label><input id="removeExisting" type="checkbox" checked /> 替换旧卡</label>
                 <label><input id="stopProfiles" type="checkbox" checked /> 行结束后关闭 profile</label>
                 <label><input id="noPurchaseMode" type="checkbox" /> No-purchase 测试模式</label>
-                <label><input id="opomWriteback" type="checkbox" checked /> 成功后写回 OPOM</label>
+                <label><input id="opomWriteback" type="checkbox" checked /> 成功后写回 OPOM（可选）</label>
               </fieldset>
 
               <label class="field">

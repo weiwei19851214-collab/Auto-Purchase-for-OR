@@ -10,7 +10,7 @@ AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Aut
 ## 功能
 
 - 上传 CSV 或拉取 OPOM 行，并在任何浏览器自动化开始前运行自动 preflight。
-- 通过机器 API 将 OPOM `recharge` 分组账号拉取成本地 canonical CSV。
+- 通过机器 API 将 OPOM 指定分组（默认 `VIP`）中 `CARD_SWITCH`（低余额）或 `OVERDUE`（欠费）的账号拉取成本地 canonical CSV。
 - 通过 AdsPower Local API 匹配 OPOM 账号和 AdsPower 环境，无需启动浏览器。
 - 使用单个 worker 顺序处理 AdsPower 环境。
 - 绑定或替换 OpenRouter 支付卡。
@@ -41,6 +41,10 @@ npm run check
 npm test
 npm start
 ```
+
+`npm start` 会自动读取项目根目录可选的 `.recharge.local.env`，因此保存过的
+OPOM 本地配置不需要再手动 export。也可以在页面的“本地配置”中填写
+`OPOM_BASE_URL` 和 `RECHARGE_API_TOKEN`；两者均未配置时，读取按钮会保持禁用。
 
 然后打开：
 
@@ -116,13 +120,11 @@ export OPOM_SECONDARY_RECHARGE_TOKEN="..." # 不填时默认复用主 token
 ```
 
 本地控制台的 `Load OPOM group` 按钮会调用 OPOM
-`/api/v1/recharge/accounts`，使用 `group=recharge`，将响应转换为 canonical
+`/api/v1/recharge/accounts`，默认使用 `group=VIP&status=card_switch` 拉取低余额账号；切换为“欠费账号”会请求 `status=overdue`。这两个值对应 OPOM 数据库 `account.status` 的 `CARD_SWITCH` 与 `OVERDUE`，不是旧兼容队列 `needs_recharge`。响应会转换为 canonical
 CSV，并复用现有的自动 preflight/live 确认流程。Live job 只有在 job options
 包含 `opomWriteback` 时才写 OPOM；普通 CSV job 仍只在本地执行。主 OPOM 写回失败会保持当前行未完成，备用 OPOM 写回失败只记录 `secondary writeback failed` 日志，不影响主流程结果。
 
-对于带有 `opom_account_id` 的行，confirmed purchase 模式要求
-`opomWriteback=true`，preflight 才会把该行标记为 ready。No-purchase 模式仍可用于本地验证，但真实 OPOM 来源的充值在没有 OPOM card/result writeback
-时不允许达到 `completed`。OPOM 绑卡写回需要 EJH `order_no`、卡号和卡有效期
+对于带有 `opom_account_id` 的行，OPOM 写回是可选项；未勾选“成功后写回 OPOM”时，预检和 Live Run 仍可执行，但结果 CSV 会将 OPOM card/result writeback 标为 `skipped_user_disabled`。勾选后，OPOM 绑卡写回需要 EJH `order_no`、卡号和卡有效期
 （`exp_month`/`exp_year` 或等价分配输出）；缺少这些字段的行会在发送任何 OPOM
 写请求前失败。
 
@@ -137,7 +139,7 @@ canonical CSV 中。
 
 - 固定 `amount`，或余额规则组合
   `balance_threshold,amount_below_threshold,amount_at_or_above_threshold`
-- `auto_topup_threshold` 和 `auto_topup_amount`
+- `auto_topup_threshold` 和 `auto_topup_amount`；勾选“不修改自动充值规则”时，执行器只开启 Auto Top-Up 开关，不读取、填写或保存这两个规则值
 - 默认 billing address 字段
 
 页面默认余额规则为：余额低于 `145` 时充值 `150`，余额大于等于 `145` 时充值

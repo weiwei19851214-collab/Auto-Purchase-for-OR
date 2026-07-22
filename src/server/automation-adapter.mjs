@@ -71,6 +71,7 @@ export function runnerArgs(options = {}) {
     scopePaymentMethod: options.scopePaymentMethod !== false,
     scopePurchase,
     scopeAutoTopup: options.scopeAutoTopup !== false,
+    autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
     cardProvider: normalizeCardProvider(options.cardProvider),
@@ -103,7 +104,7 @@ function requiredInputColumns(args) {
   const scope = plan.executionScope(args);
   const required = [...BASE_INPUT_COLUMNS];
   if (scope.paymentMethod) required.push('exp_month', 'exp_year', 'cvv', 'postal_code');
-  if (scope.autoTopup) required.push('auto_topup_threshold', 'auto_topup_amount');
+  if (scope.autoTopup && !args.autoTopupEnableOnly) required.push('auto_topup_threshold', 'auto_topup_amount');
   if (scope.billingAddress && !scope.paymentMethod) {
     required.push('holder_name', 'country', 'postal_code', 'address_line1', 'city', 'state');
   }

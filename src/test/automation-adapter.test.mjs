@@ -121,7 +121,7 @@ test('parsePlan validates execution scopes independently', async () => {
     scopeAutoTopup: false,
   });
   assert.equal(balanceRulePurchase.rows[0].status, 'ready');
-  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_top_up_to_target');
+  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_threshold_amounts');
   assert.equal(balanceRulePurchase.rows[0].executionScope, 'purchase');
 
   const balanceRuleWithAtOrAbove = await parsePlan(BALANCE_RULE_WITH_AT_OR_ABOVE_CSV, {
@@ -162,6 +162,22 @@ test('purchasePlan supports fixed recharge amounts by balance threshold', () => 
   assert.equal(plan.purchase.rule.threshold, '145');
   assert.equal(plan.purchase.rule.belowAmount, '150');
   assert.equal(plan.purchase.rule.atOrAboveAmount, '20');
+});
+
+test('purchasePlan skips the high-balance branch when its amount is blank or zero', () => {
+  const blankAmount = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '',
+  });
+  const zeroAmount = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '0',
+  });
+  assert.equal(blankAmount.mode, 'balance_threshold_amounts');
+  assert.equal(blankAmount.purchase.rule.atOrAboveAmount, '');
+  assert.equal(zeroAmount.purchase.rule.atOrAboveAmount, '');
 });
 
 test('parsePlan rejects empty execution scope', async () => {
@@ -365,16 +381,12 @@ test('Auto top-up refresh waits for a visible security challenge to clear', () =
   assert.match(script, /await waitForVisibleSecurityChallengeToClear\(client\)/);
 });
 
-test('balance target purchase amount rounds up to the next whole dollar', () => {
+test('balance threshold purchase always uses fixed branch amounts', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /Math\.ceil\(targetBalance - balanceState\.balance\)/);
-});
-
-test('balance threshold purchase uses fixed branch amounts', () => {
-  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /const atOrAboveAmount = normalizeMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
+  assert.match(script, /const atOrAboveAmount = normalizeOptionalMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
   assert.match(script, /const amount = branch === 'below_threshold' \? belowAmount : atOrAboveAmount/);
-  assert.ok(script.indexOf('if (belowAmount && atOrAboveAmount)') < script.indexOf('const targetBalance = normalizeMoneyForCompare(purchase.rule.targetBalance)'));
+  assert.match(script, /skippedByRule: !amount/);
+  assert.doesNotMatch(script, /targetBalance|top_up_to_target|Math\.ceil\(targetBalance/);
 });
 
 test('credit balance parser preserves negative balances', () => {

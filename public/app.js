@@ -717,11 +717,12 @@ function isFailedJobRow(row = {}) {
 function purchaseRuleLabel(row) {
   if (row.balance_threshold || row.amount_below_threshold || row.amount_at_or_above_threshold) {
     const complete = row.balance_threshold && row.amount_below_threshold;
-    if (complete && row.amount_at_or_above_threshold) {
+    const atOrAboveAmount = Number(String(row.amount_at_or_above_threshold || '').replace(/[$,\s]/g, ''));
+    if (complete && Number.isFinite(atOrAboveAmount) && atOrAboveAmount > 0) {
       return `余额低于 ${row.balance_threshold} 时充值 ${row.amount_below_threshold}，余额大于等于 ${row.balance_threshold} 时充值 ${row.amount_at_or_above_threshold}`;
     }
     return complete
-      ? `余额低于 ${row.balance_threshold} 时补到 ${row.amount_below_threshold}，否则不处理`
+      ? `余额低于 ${row.balance_threshold} 时充值 ${row.amount_below_threshold}，余额大于等于 ${row.balance_threshold} 时不充值`
       : '余额规则不完整';
   }
   return row.amount ? `固定充值 ${row.amount}` : '缺少充值规则';

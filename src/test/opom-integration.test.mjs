@@ -71,7 +71,7 @@ test('readyToRechargePayload converts OPOM accounts into canonical CSV without c
         rechargePolicy: {
           balanceThreshold: '100',
           amountBelowThreshold: '10',
-          amountAtOrAboveThreshold: '5',
+          amountAtOrAboveThreshold: 0,
           autoTopupThreshold: '2',
           autoTopupAmount: '25',
         },
@@ -87,6 +87,7 @@ test('readyToRechargePayload converts OPOM accounts into canonical CSV without c
     assert.equal(result.count, 1);
     assert.equal(result.rows[0].opom_health_status, 'ok');
     assert.equal(result.rows[0].ads_match_status, 'not_verified');
+    assert.equal(result.rows[0].amount_at_or_above_threshold, 0);
     assert.match(result.csvText, /opom_account_id,login_email/);
     assert.match(result.csvText, /acct_1,user@example.com,k1d7abc,1415/);
     assert.match(result.csvText, /not_verified/);

@@ -760,13 +760,6 @@ function normalizeInput(args) {
     || purchase.aboveAmount
     || process.env.PURCHASE_AMOUNT_AT_OR_ABOVE_THRESHOLD
     || '';
-  const purchaseTargetBalance = args['target-balance']
-    || purchaseRule.targetBalance
-    || purchaseRule.target
-    || purchaseRule.topUpToBalance
-    || purchase.targetBalance
-    || process.env.PURCHASE_TARGET_BALANCE
-    || '';
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -798,12 +791,10 @@ function normalizeInput(args) {
       confirmed: !!(args['confirm-purchase'] || json.confirmPurchase || purchase.confirmed),
       amount: normalizeMoneyValue(purchaseAmount),
       rule: {
-        enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold || purchaseTargetBalance),
+        enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold),
         threshold: normalizeMoneyValue(purchaseBalanceThreshold),
         belowAmount: normalizeMoneyValue(purchaseAmountBelowThreshold),
-        atOrAboveAmount: normalizeMoneyValue(purchaseAmountAtOrAboveThreshold),
-        targetBalance: normalizeMoneyValue(purchaseTargetBalance),
-        skipAtOrAbove: !!(purchaseRule.skipAtOrAbove || purchaseRule.skip_at_or_above || purchaseRule.targetBalance || purchaseTargetBalance),
+        atOrAboveAmount: normalizeOptionalMoneyValue(purchaseAmountAtOrAboveThreshold),
       },
     },
     removeExistingPaymentMethod: !!(args['remove-existing'] || json.removeExistingPaymentMethod),
@@ -856,11 +847,8 @@ function normalizeInput(args) {
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
   }
-  if (input.purchase.rule.enabled && input.purchase.rule.targetBalance && !input.purchase.rule.threshold) {
-    throw new Error('purchase.rule.threshold is required when targetBalance is supplied');
-  }
-  if (input.purchase.rule.enabled && !input.purchase.rule.targetBalance && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount || !input.purchase.rule.atOrAboveAmount)) {
-    throw new Error('purchase.rule.threshold, belowAmount, and atOrAboveAmount are required when any purchase rule value is supplied');
+  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount)) {
+    throw new Error('purchase.rule.threshold and belowAmount are required when any purchase rule value is supplied');
   }
   if ((input.purchase.confirmed || input.preparePurchaseOnly) && !input.purchase.amount && !input.purchase.rule.enabled) {
     throw new Error('purchase.amount/--purchase-amount or a complete purchase.rule is required when purchase is confirmed or prepared');
@@ -902,6 +890,14 @@ function normalizeMoneyValue(value) {
   const number = Number(cleaned);
   if (!Number.isFinite(number) || number <= 0) throw new Error(`Invalid money value: ${value}`);
   return Number.isInteger(number) ? String(number) : String(number);
+}
+
+function normalizeOptionalMoneyValue(value) {
+  const cleaned = String(value ?? '').replace(/[$,\s]/g, '');
+  if (!cleaned) return '';
+  const number = Number(cleaned);
+  if (number === 0) return '';
+  return normalizeMoneyValue(cleaned);
 }
 
 function normalizePositiveInteger(value, label) {
@@ -2897,69 +2893,34 @@ async function resolvePurchasePlan(page, purchase) {
   if (purchase.rule?.enabled) {
     const threshold = normalizeMoneyForCompare(purchase.rule.threshold);
     const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
-    const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
-    if (belowAmount && atOrAboveAmount) {
-      if (!Number.isFinite(threshold)) {
-        throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
-      }
-      const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
-      // 业务规则：完整三字段余额规则使用固定充值金额，不能再按“补到目标余额”动态扣减。
-      const amount = branch === 'below_threshold' ? belowAmount : atOrAboveAmount;
-      return {
-        ...purchase,
-        amount,
-        ruleDecision: {
-          mode: 'threshold_fixed_amounts',
-          threshold: purchase.rule.threshold,
-          belowAmount,
-          atOrAboveAmount,
-          balance: balanceState.balance,
-          balanceRaw: balanceState.raw,
-          balanceSource: balanceState.source,
-          branch,
-          selectedAmount: amount,
-        },
-        beforeBalance: {
-          balance: balanceState.balance,
-          raw: balanceState.raw,
-          source: balanceState.source,
-        },
-      };
+    const atOrAboveAmount = normalizeOptionalMoneyValue(purchase.rule.atOrAboveAmount);
+    if (!Number.isFinite(threshold) || !belowAmount) {
+      throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
     }
-    const targetBalance = normalizeMoneyForCompare(purchase.rule.targetBalance);
-    if (Number.isFinite(targetBalance)) {
-      if (!Number.isFinite(threshold)) {
-        throw new Error(`Invalid purchase target rule: ${JSON.stringify(purchase.rule)}`);
-      }
-      const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
-      const rawAmount = Math.ceil(targetBalance - balanceState.balance);
-      const amount = branch === 'below_threshold'
-        ? (rawAmount > 0 ? String(rawAmount) : '')
-        : atOrAboveAmount;
-      return {
-        ...purchase,
-        amount,
-        skippedByRule: !amount,
-        ruleDecision: {
-          mode: 'top_up_to_target',
-          threshold: purchase.rule.threshold,
-          targetBalance: purchase.rule.targetBalance,
-          atOrAboveAmount,
-          balance: balanceState.balance,
-          balanceRaw: balanceState.raw,
-          balanceSource: balanceState.source,
-          branch,
-          selectedAmount: amount,
-          skipped: !amount,
-        },
-        beforeBalance: {
-          balance: balanceState.balance,
-          raw: balanceState.raw,
-          source: balanceState.source,
-        },
-      };
-    }
-    throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
+    const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
+    const amount = branch === 'below_threshold' ? belowAmount : atOrAboveAmount;
+    return {
+      ...purchase,
+      amount,
+      skippedByRule: !amount,
+      ruleDecision: {
+        mode: 'threshold_fixed_amounts',
+        threshold: purchase.rule.threshold,
+        belowAmount,
+        atOrAboveAmount,
+        balance: balanceState.balance,
+        balanceRaw: balanceState.raw,
+        balanceSource: balanceState.source,
+        branch,
+        selectedAmount: amount,
+        skipped: !amount,
+      },
+      beforeBalance: {
+        balance: balanceState.balance,
+        raw: balanceState.raw,
+        source: balanceState.source,
+      },
+    };
   }
   if (!purchase.amount) throw new Error('Purchase amount is required');
   return {

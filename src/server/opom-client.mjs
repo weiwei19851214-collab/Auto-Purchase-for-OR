@@ -288,23 +288,28 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
       exp_month: '',
       exp_year: '',
       cvv: '',
-      amount: policy.amount || policy.amountUsd || defaults.amount || defaults.purchaseAmount || '',
+      amount: firstConfiguredValue(policy.amount, policy.amountUsd, defaults.amount, defaults.purchaseAmount),
       postal_code: defaults.postalCode || '',
       holder_name: defaults.holderName || '',
       country: defaults.country || 'US',
       address_line1: defaults.addressLine1 || '',
       city: defaults.city || '',
       state: defaults.state || '',
-      balance_threshold: policy.balanceThreshold || policy.balanceThresholdUsd || defaults.balanceThreshold || '',
-      amount_below_threshold: policy.amountBelowThreshold || policy.amountBelowThresholdUsd || defaults.amountBelowThreshold || '',
-      amount_at_or_above_threshold: policy.amountAtOrAboveThreshold || policy.amountAtOrAboveThresholdUsd || defaults.amountAtOrAboveThreshold || '',
-      auto_topup_threshold: policy.autoTopupThreshold || defaults.autoTopupThreshold || '',
-      auto_topup_amount: policy.autoTopupAmount || defaults.autoTopupAmount || '',
+      balance_threshold: firstConfiguredValue(policy.balanceThreshold, policy.balanceThresholdUsd, defaults.balanceThreshold),
+      amount_below_threshold: firstConfiguredValue(policy.amountBelowThreshold, policy.amountBelowThresholdUsd, defaults.amountBelowThreshold),
+      // 0 是明确的“不充值”策略，不能被页面默认的高余额金额覆盖。
+      amount_at_or_above_threshold: firstConfiguredValue(policy.amountAtOrAboveThreshold, policy.amountAtOrAboveThresholdUsd, defaults.amountAtOrAboveThreshold),
+      auto_topup_threshold: firstConfiguredValue(policy.autoTopupThreshold, defaults.autoTopupThreshold),
+      auto_topup_amount: firstConfiguredValue(policy.autoTopupAmount, defaults.autoTopupAmount),
       idempotency_key: account.version
         ? `recharge_plan:${account.opomAccountId || account.id}:${account.version}`
         : '',
     };
   });
+}
+
+function firstConfiguredValue(...values) {
+  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') ?? '';
 }
 
 export function cardExpiryIso(row) {

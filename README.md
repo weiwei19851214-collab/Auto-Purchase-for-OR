@@ -144,7 +144,8 @@ canonical CSV 中。
 
 页面默认余额规则为：余额低于 `145` 时充值 `150`，余额大于等于 `145` 时充值
 `20`。其中 `amount_below_threshold` 在页面语义中表示低余额分支的固定充值金额，
-`amount_at_or_above_threshold` 表示高余额分支的固定充值金额。
+`amount_at_or_above_threshold` 表示高余额分支的固定充值金额；该字段留空或填 `0`
+时，高余额分支不执行充值。第二个值始终是“充值多少”，不是“充值到多少”。
 
 可以粘贴 CSV 形式的逐账号 billing address 覆盖值：
 

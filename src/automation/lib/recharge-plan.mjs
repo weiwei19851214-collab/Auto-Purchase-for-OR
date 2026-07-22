@@ -143,38 +143,20 @@ export function autoTopupPlan(row, args) {
 }
 
 export function purchasePlan(row) {
-  const thresholdRaw = row.balance_threshold || '';
-  const belowRaw = row.amount_below_threshold || '';
-  const atOrAboveRaw = row.amount_at_or_above_threshold || '';
+  const thresholdRaw = row.balance_threshold ?? '';
+  const belowRaw = row.amount_below_threshold ?? '';
+  const atOrAboveRaw = row.amount_at_or_above_threshold ?? '';
   const anyRule = !!(thresholdRaw || belowRaw || atOrAboveRaw);
-  const topUpToTargetRule = !!(thresholdRaw && belowRaw && !atOrAboveRaw);
-  const allRule = !!(thresholdRaw && belowRaw && atOrAboveRaw);
-  if (topUpToTargetRule) {
-    const threshold = normalizeMoneyValue(thresholdRaw);
-    const targetBalance = normalizeMoneyValue(belowRaw);
-    return {
-      purchase: {
-        confirmed: true,
-        rule: {
-          threshold,
-          targetBalance,
-          belowAmount: targetBalance,
-          skipAtOrAbove: true,
-        },
-      },
-      missing: [],
-      mode: 'balance_top_up_to_target',
-    };
-  }
-  if (allRule) {
+  const completeRule = !!(thresholdRaw && belowRaw);
+  if (completeRule) {
     const belowAmount = normalizeMoneyValue(belowRaw);
-    const atOrAboveAmount = normalizeMoneyValue(atOrAboveRaw);
+    const atOrAboveAmount = normalizeOptionalPurchaseAmount(atOrAboveRaw);
     return {
       purchase: {
         confirmed: true,
         rule: {
           threshold: normalizeMoneyValue(thresholdRaw),
-          // 三字段余额规则表示两个固定充值金额：低于阈值充值 belowAmount，高于等于阈值充值 atOrAboveAmount。
+          // 第二、三字段均为固定充值金额；第三字段留空或为 0 时，高余额分支跳过充值。
           belowAmount,
           atOrAboveAmount,
         },
@@ -196,6 +178,14 @@ export function purchasePlan(row) {
     missing: amount ? [] : ['amount'],
     mode: 'fixed_amount',
   };
+}
+
+function normalizeOptionalPurchaseAmount(value) {
+  const cleaned = String(value ?? '').replace(/[$,\s]/g, '');
+  if (!cleaned) return '';
+  const amount = Number(cleaned);
+  if (amount === 0) return '';
+  return normalizeMoneyValue(cleaned);
 }
 
 export function safePurchasePlan(row) {

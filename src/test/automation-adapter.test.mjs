@@ -88,6 +88,11 @@ test('runnerArgs carries OPOM card provider selection', () => {
   assert.equal(runnerArgs({cardProvider: 'bad'}).cardProvider, 'EJH');
 });
 
+test('runnerArgs carries the explicit AdsPower match waiver', () => {
+  assert.equal(runnerArgs({skipAdsPowerMatch: true}).skipAdsPowerMatch, true);
+  assert.equal(runnerArgs({}).skipAdsPowerMatch, false);
+});
+
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {
   const args = runnerArgs({scopePurchase: false, confirmPurchase: true, preparePurchaseOnly: true});
   assert.equal(args.scopePurchase, false);

@@ -64,6 +64,7 @@ export function runnerArgs(options = {}) {
   return {
     removeExisting: options.removeExisting !== false,
     stopProfiles: options.stopProfiles !== false,
+    skipAdsPowerMatch: !!options.skipAdsPowerMatch,
     concurrency,
     confirmPurchase: scopePurchase && options.confirmPurchase !== false,
     preparePurchaseOnly: scopePurchase && options.preparePurchaseOnly !== false,
@@ -633,6 +634,7 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
     : {threshold: '', amount: ''};
   return {
     ...planModule.rowMetadata(row),
+    adsMatchWaived: String(Boolean(args.skipAdsPowerMatch)),
     purchaseStatus: !args.scopePurchase
       ? 'skipped'
       : result.purchase?.mode === 'prepared_without_submission'

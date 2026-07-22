@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {readyToRechargePayload, resolveOpomAccountsPayload} from '../server/opom-orchestrator.mjs';
 import {matchAdsPowerPayload} from '../server/adspower-match.mjs';
-import {opomDefaults, writeCompletedRow, writeRowResult} from '../server/opom-client.mjs';
+import {canonicalRowsFromOpomAccounts, opomDefaults, writeCompletedRow, writeRowResult} from '../server/opom-client.mjs';
 import {allocateCardsPayload, allocateCardsToRows, parseSafeCardCsv} from '../server/card-allocation.mjs';
 import * as rechargePlan from '../automation/lib/recharge-plan.mjs';
 
@@ -93,6 +93,25 @@ test('readyToRechargePayload converts OPOM accounts into canonical CSV without c
     assert.match(result.csvText, /not_verified/);
     assert.doesNotMatch(result.csvText, /cvvPassword|encryptedParam|rawResponse|sk-or-v1/);
   });
+});
+
+test('canonical OPOM rows use local recharge rules instead of OPOM recharge policies', () => {
+  const [row] = canonicalRowsFromOpomAccounts([{
+    rechargePolicy: {
+      balanceThreshold: '500',
+      amountBelowThreshold: '150',
+      amountAtOrAboveThreshold: '20',
+    },
+  }], {
+    amount: '',
+    balanceThreshold: '30',
+    amountBelowThreshold: '150',
+    amountAtOrAboveThreshold: '',
+  });
+  assert.equal(row.amount, '');
+  assert.equal(row.balance_threshold, '30');
+  assert.equal(row.amount_below_threshold, '150');
+  assert.equal(row.amount_at_or_above_threshold, '');
 });
 
 test('readyToRechargePayload applies recharge defaults and billing address mapping CSV', async () => {
@@ -743,10 +762,12 @@ test('parsePlan blocks OPOM rows until AdsPower match status is matched', async 
 `;
   const matchedCsv = notVerifiedCsv.replace(',not_verified,', ',matched,');
   const blocked = await parsePlan(notVerifiedCsv, {opomWriteback: true});
+  const manuallyConfirmed = await parsePlan(notVerifiedCsv, {opomWriteback: true, skipAdsPowerMatch: true});
   const ready = await parsePlan(matchedCsv, {opomWriteback: true});
 
   assert.equal(blocked.rows[0].status, 'missing_fields');
   assert.deepEqual(blocked.rows[0].missing, ['ads_match_status:not_verified']);
+  assert.equal(manuallyConfirmed.rows[0].status, 'ready');
   assert.equal(ready.rows[0].status, 'ready');
 });
 
@@ -1556,6 +1577,17 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
   assert.equal(result.summary.allocated, 1);
   assert.equal(result.rows[0].order_no, undefined);
   assert.equal(result.rows[1].order_no, 'order_1');
+});
+
+test('allocateCardsToRows accepts manually confirmed AdsPower mappings', () => {
+  const cardCsv = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
+batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
+`;
+  const result = allocateCardsToRows([
+    {opom_account_id: 'acct_1', login_email: 'user1@example.com', ads_power_user_id: 'profile_1', ads_match_status: 'not_verified'},
+  ], cardCsv, {}, {skipAdsPowerMatch: true});
+  assert.equal(result.summary.allocated, 1);
+  assert.equal(result.rows[0].order_no, 'order_1');
 });
 
 test('parseSafeCardCsv accepts EJH generated CSV while dropping raw diagnostic columns from allocation output', () => {

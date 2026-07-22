@@ -71,6 +71,7 @@ const els = {
   download: document.querySelector('#downloadLink'),
   removeExisting: document.querySelector('#removeExisting'),
   stopProfiles: document.querySelector('#stopProfiles'),
+  skipAdsPowerMatch: document.querySelector('#skipAdsPowerMatch'),
   noPurchaseMode: document.querySelector('#noPurchaseMode'),
   concurrency: document.querySelector('#concurrency'),
   adspowerStatusMode: document.querySelector('#adspowerStatusMode'),
@@ -185,6 +186,7 @@ function optionsPayload() {
     scopeAutoTopup: els.scopeAutoTopup.checked,
     removeExisting: els.removeExisting.checked,
     stopProfiles: els.stopProfiles.checked,
+    skipAdsPowerMatch: els.skipAdsPowerMatch.checked,
     concurrency: els.concurrency.value.trim(),
     confirmPurchase: scopePurchase && !els.noPurchaseMode.checked,
     preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
@@ -425,7 +427,10 @@ function updateRunStats() {
 }
 
 function canAttemptExecution() {
-  return selectedOpomRows().length > 0 && Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0 && matchedRowCount() > 0;
+  return selectedOpomRows().length > 0
+    && Boolean(selectedCsvText.trim())
+    && selectedScopeLabels().length > 0
+    && (els.skipAdsPowerMatch.checked || matchedRowCount() > 0);
 }
 
 function matchedRowCount() {
@@ -454,6 +459,7 @@ function setButtonAvailability(button, enabled, reason = '') {
 function syncActionButtons() {
   const hasRows = opomRows.length > 0;
   const matched = matchedRowCount();
+  const adsMatchApproved = els.skipAdsPowerMatch.checked || matched > 0;
   const hasAdsPowerConfig = Boolean(runtimeConfigPayload().adspowerApiBase && runtimeConfigPayload().adspowerApiKey);
   const hasOpomConfig = opomConfigured();
   const hasCardsCsv = hasUploadedCardCsv();
@@ -463,11 +469,11 @@ function syncActionButtons() {
     ? '请先在本地配置中填写 AdsPower API 地址和 API key'
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
   setButtonAvailability(els.generateAddresses, hasRows, '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
-  setButtonAvailability(els.allocateCards, hasRows && matched > 0 && hasCardsCsv, hasRows
-    ? (matched > 0 ? '请先上传 EJH cards CSV，或使用 Create EJH cards' : '请先 Match AdsPower，至少需要 1 行 matched')
+  setButtonAvailability(els.allocateCards, hasRows && adsMatchApproved && hasCardsCsv, hasRows
+    ? (adsMatchApproved ? '请先上传 EJH cards CSV，或使用 Create EJH cards' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
-  setButtonAvailability(els.createCards, hasRows && matched > 0 && hasCreateInputs, hasRows
-    ? (matched > 0 ? '真实开卡需要填写 amount、active date、cardholder' : '请先 Match AdsPower，至少需要 1 行 matched')
+  setButtonAvailability(els.createCards, hasRows && adsMatchApproved && hasCreateInputs, hasRows
+    ? (adsMatchApproved ? '真实开卡需要填写 amount、active date、cardholder' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
     : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
   setButtonAvailability(els.adspowerDiscoverTargets, hasAdsPowerConfig, '请先在本地配置中填写 AdsPower API 地址和 API key');
   syncExecutionAvailability();
@@ -1096,28 +1102,19 @@ function applyCurrentDefaultsToRows(rows) {
   const defaults = opomDefaultsPayload();
   return rows.map((row) => {
     const next = {...row};
-    const overwriteDefaults = next.source === 'local_selector' || next.opom_health_status === 'local_selector';
-    const hasExistingFixedRule = hasValue(next.amount);
-    const hasExistingBalanceRule = hasValue(next.balance_threshold) || hasValue(next.amount_below_threshold) || hasValue(next.amount_at_or_above_threshold);
-    const shouldApplyRuleDefaults = overwriteDefaults || (!hasExistingFixedRule && !hasExistingBalanceRule);
-    const fill = (key, value) => {
-      if ((overwriteDefaults || !hasValue(next[key])) && hasValue(value)) next[key] = value;
-    };
-    if (shouldApplyRuleDefaults && hasValue(defaults.amount)) {
-      fill('amount', defaults.amount);
-      if (overwriteDefaults) {
-        next.balance_threshold = '';
-        next.amount_below_threshold = '';
-        next.amount_at_or_above_threshold = '';
-      }
-    } else if (shouldApplyRuleDefaults) {
+    if (hasValue(defaults.amount)) {
+      next.amount = defaults.amount;
+      next.balance_threshold = '';
+      next.amount_below_threshold = '';
+      next.amount_at_or_above_threshold = '';
+    } else {
       next.amount = '';
-      fill('balance_threshold', defaults.balanceThreshold);
-      fill('amount_below_threshold', defaults.amountBelowThreshold);
-      fill('amount_at_or_above_threshold', defaults.amountAtOrAboveThreshold);
+      next.balance_threshold = defaults.balanceThreshold;
+      next.amount_below_threshold = defaults.amountBelowThreshold;
+      next.amount_at_or_above_threshold = defaults.amountAtOrAboveThreshold;
     }
-    fill('auto_topup_threshold', defaults.autoTopupThreshold);
-    fill('auto_topup_amount', defaults.autoTopupAmount);
+    if (!hasValue(next.auto_topup_threshold) && hasValue(defaults.autoTopupThreshold)) next.auto_topup_threshold = defaults.autoTopupThreshold;
+    if (!hasValue(next.auto_topup_amount) && hasValue(defaults.autoTopupAmount)) next.auto_topup_amount = defaults.autoTopupAmount;
     return next;
   });
 }
@@ -1334,6 +1331,7 @@ async function allocateCards({createCards = false} = {}) {
   if (!executionRows.length) throw new Error('请至少勾选一行后再分配卡');
   const body = {
     rows: executionRows,
+    skipAdsPowerMatch: els.skipAdsPowerMatch.checked,
     cardCsvText: uploadedCardCsv,
     defaults: opomDefaultsPayload(),
     ...runtimeConfigPayload(),
@@ -1344,8 +1342,10 @@ async function allocateCards({createCards = false} = {}) {
     cardholder: els.ejhCardholder.value.trim(),
   };
   if (createCards) {
-    const count = executionRows.filter((row) => row.ads_match_status === 'matched').length;
-    if (!count) throw new Error('没有 AdsPower matched 行，不能真实 EJH 开卡');
+    const count = els.skipAdsPowerMatch.checked
+      ? executionRows.length
+      : executionRows.filter((row) => row.ads_match_status === 'matched').length;
+    if (!count) throw new Error('没有可开卡行；请先 Match AdsPower，或勾选已人工确认 AdsPower mapping');
     if (!body.amount || !body.activeDate || !body.cardholder) {
       throw new Error('真实 EJH 开卡需要填写 amount、active date、cardholder');
     }
@@ -1808,6 +1808,10 @@ els.allocateCards.addEventListener('click', () => withButtonBusy(els.allocateCar
 els.createCards.addEventListener('click', () => withButtonBusy(els.createCards, 'Creating...', () => allocateCards({createCards: true})).catch(showError));
 els.removeExisting.addEventListener('change', () => invalidateDryRun());
 els.stopProfiles.addEventListener('change', () => invalidateDryRun());
+els.skipAdsPowerMatch.addEventListener('change', () => {
+  syncActionButtons();
+  invalidateDryRun('AdsPower 映射确认方式已变化，启动执行时会重新预检。');
+});
 els.cardProvider?.addEventListener('change', () => invalidateDryRun('卡通道已变化，启动执行时会重新预检。'));
 els.concurrency.addEventListener('input', () => invalidateDryRun('并发数量已变化，启动执行时会重新预检。'));
 els.adspowerStatusMode?.addEventListener('change', () => {

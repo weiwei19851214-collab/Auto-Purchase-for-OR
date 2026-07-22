@@ -111,6 +111,7 @@ export function resultColumns() {
     'opom_health_status',
     'opom_health_reason',
     'ads_match_status',
+    'ads_match_waived',
     'ejh_order_no',
     'cardno',
     'opom_card_writeback_status',
@@ -244,7 +245,7 @@ export function validateRow(row, args) {
   const missing = validateScope(args);
   const scope = executionScope(args);
   if (!adsPowerSerialNumber(row) && !adsPowerUserId(row)) missing.push('ads_power_user_id_or_serial_number');
-  if (adsMatchStatus(row) && adsMatchStatus(row) !== 'matched') missing.push(`ads_match_status:${adsMatchStatus(row)}`);
+  if (!args.skipAdsPowerMatch && adsMatchStatus(row) && adsMatchStatus(row) !== 'matched') missing.push(`ads_match_status:${adsMatchStatus(row)}`);
   if (!isHealthyOpomStatus(opomHealthStatus(row))) missing.push(`opom_health_status:${opomHealthStatus(row)}`);
   if (!loginEmail(row)) missing.push('login_email');
   if (scope.paymentMethod) {
@@ -448,7 +449,8 @@ export function completionEvidence(status, details = {}) {
   }
 
   if (detailValue(details, 'opomAccountId') && detailValue(details, 'opomWritebackEnabled') !== 'false') {
-    if (detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
+    const adsMatchWaived = detailValue(details, 'adsMatchWaived') === 'true';
+    if (!adsMatchWaived && detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
     if (detailValue(details, 'opomWritebackMode') === 'result') {
       if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
     } else {
@@ -471,6 +473,7 @@ export function successDetails(row, result, args) {
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
     ...rowMetadata(row),
+    adsMatchWaived: String(Boolean(args.skipAdsPowerMatch)),
     executionScope: scopeSummary(args),
     opomWritebackEnabled: String(Boolean(args.opomWriteback)),
     opomWritebackMode: args.opomWriteback ? (scope.paymentMethod ? 'card_binding' : 'result') : 'disabled',
@@ -514,6 +517,7 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'opom_health_status', details.opomHealthStatus || '');
   setCell(header, row, 'opom_health_reason', details.opomHealthReason || '');
   setCell(header, row, 'ads_match_status', details.adsMatchStatus || '');
+  setCell(header, row, 'ads_match_waived', details.adsMatchWaived || 'false');
   setCell(header, row, 'ejh_order_no', details.ejhOrderNo || '');
   setCell(header, row, 'cardno', details.cardNo || '');
   setCell(header, row, 'opom_card_writeback_status', details.opomCardWritebackStatus || '');

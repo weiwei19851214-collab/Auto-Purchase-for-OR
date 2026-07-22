@@ -411,28 +411,29 @@ function syncExecutionCopy() {
 function updateRunStats() {
   if (!els.statQueue) return;
   const total = opomRows.length;
+  const selected = selectedOpomRows().length;
   const matched = matchedRowCount();
   const billing = readyAddressCount();
-  const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
-  els.statQueue.textContent = total ? `${total} 行` : (selectedFile ? 'CSV' : '未拉取');
-  els.statMatch.textContent = total ? `${matched}/${total}` : '0/0';
-  els.statBilling.textContent = total ? `${billing}/${total}` : '0/0';
-  els.statCards.textContent = total ? `${cards}/${total}` : '0/0';
+  const cards = selectedOpomRows().filter((row) => row.card_no || row.order_no).length;
+  els.statQueue.textContent = total ? `${selected}/${total} 行已选` : (selectedFile ? 'CSV' : '未拉取');
+  els.statMatch.textContent = total ? `${matched}/${selected}` : '0/0';
+  els.statBilling.textContent = total ? `${billing}/${selected}` : '0/0';
+  els.statCards.textContent = total ? `${cards}/${selected}` : '0/0';
   els.statDryRun.textContent = lastDryRun
     ? `${lastDryRun.ready || 0} ready / ${lastDryRun.blocked || 0} blocked`
     : '未执行';
 }
 
 function canAttemptExecution() {
-  return Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0 && matchedRowCount() > 0;
+  return selectedOpomRows().length > 0 && Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0 && matchedRowCount() > 0;
 }
 
 function matchedRowCount() {
-  return opomRows.filter((row) => effectiveMatchStatus(row) === 'matched').length;
+  return selectedOpomRows().filter((row) => effectiveMatchStatus(row) === 'matched').length;
 }
 
 function readyAddressCount() {
-  return opomRows.filter((row) => isAddressReady(row)).length;
+  return selectedOpomRows().filter((row) => isAddressReady(row)).length;
 }
 
 function hasUploadedCardCsv() {
@@ -627,6 +628,35 @@ function canonicalCsvFromRows(rows) {
     .join('\r\n')}\r\n`;
 }
 
+function isRowSelected(row) {
+  return row?.execute !== false;
+}
+
+function selectedOpomRows() {
+  return opomRows.filter(isRowSelected);
+}
+
+function syncSelectedCsv() {
+  selectedCsvText = canonicalCsvFromRows(selectedOpomRows());
+}
+
+function rowIdentityKeys(row) {
+  return [row?.opom_account_id, row?.login_email, row?.ads_power_user_id, row?.ads_power_serial_number]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function mergeUpdatedRows(existing, updated) {
+  const updatedByKey = new Map();
+  for (const row of updated) {
+    for (const key of rowIdentityKeys(row)) updatedByKey.set(key, row);
+  }
+  return existing.map((row) => {
+    const replacement = rowIdentityKeys(row).map((key) => updatedByKey.get(key)).find(Boolean);
+    return replacement ? {...replacement, execute: isRowSelected(row)} : row;
+  });
+}
+
 function sanitizeMessage(value) {
   return String(value || '')
     .replace(/\b((?:cvv|cvc|security\s*code)\s*[:=]?\s*)\d{3,4}\b/gi, '$1***')
@@ -764,10 +794,11 @@ function renderOpomPreview(stage = '') {
     return;
   }
   const matched = matchedRowCount();
-  const adsMatched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
-  const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
-  els.opomPreviewMeta.textContent = `${stage || 'snapshot'} rows=${opomRows.length} matched=${matched}${adsMatched !== matched ? ` ads=${adsMatched}` : ''} cards=${cards}`;
-  els.opomPreviewBody.innerHTML = opomRows.map((row) => {
+  const selected = selectedOpomRows().length;
+  const adsMatched = selectedOpomRows().filter((row) => row.ads_match_status === 'matched').length;
+  const cards = selectedOpomRows().filter((row) => row.card_no || row.order_no).length;
+  els.opomPreviewMeta.textContent = `${stage || 'snapshot'} selected=${selected}/${opomRows.length} matched=${matched}${adsMatched !== matched ? ` ads=${adsMatched}` : ''} cards=${cards}`;
+  els.opomPreviewBody.innerHTML = opomRows.map((row, index) => {
     const adsPowerId = row.ads_power_user_id || '';
     const adspower = row.ads_power_serial_number || '';
     const matchStatus = effectiveMatchStatus(row);
@@ -775,6 +806,7 @@ function renderOpomPreview(stage = '') {
     const cardReady = row.order_no && row.card_no && row.exp_month && row.exp_year && row.cvv;
     return `
       <tr>
+        <td><input class="row-execute" type="checkbox" data-row-index="${index}" aria-label="执行第 ${index + 1} 行"${isRowSelected(row) ? ' checked' : ''} /></td>
         <td>${escapeHtml(row.opom_account_id || '-')}</td>
         <td>${escapeHtml(maskEmail(row.login_email || ''))}</td>
         <td>${opomHealthBadge(row)}</td>
@@ -910,7 +942,7 @@ function applyGeneratedAddressesToRows() {
   if (!opomRows.length) throw new Error('请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
   generatedAddressMappings = generateAddressMappings(opomRows.length, els.addressPreset?.value || 'oregon');
   opomRows = applyAddressMappings(opomRows, generatedAddressMappings);
-  selectedCsvText = canonicalCsvFromRows(opomRows);
+  syncSelectedCsv();
   renderGeneratedAddressList();
   renderOpomPreview('address_generated');
   syncActionButtons();
@@ -1051,7 +1083,7 @@ async function applyUploadedAddressCsvToRows() {
   const mappings = addressCsvText ? addressMappingsFromCsv(addressCsvText) : generatedAddressMappings;
   if (!mappings.length) return;
   opomRows = applyAddressMappings(opomRows, mappings);
-  selectedCsvText = canonicalCsvFromRows(opomRows);
+  syncSelectedCsv();
   renderOpomPreview('address_applied');
   syncActionButtons();
 }
@@ -1093,7 +1125,7 @@ function applyCurrentDefaultsToRows(rows) {
 function syncRowsWithCurrentDefaults() {
   if (!opomRows.length) return;
   opomRows = applyCurrentDefaultsToRows(opomRows);
-  selectedCsvText = canonicalCsvFromRows(opomRows);
+  syncSelectedCsv();
   renderOpomPreview('defaults_applied');
 }
 
@@ -1147,7 +1179,7 @@ async function loadOpomPage({append = false} = {}) {
   opomRows = append ? mergeOpomRows(opomRows, incomingRows) : incomingRows;
   generatedAddressMappings = [];
   opomNextCursor = data.nextCursor || '';
-  selectedCsvText = canonicalCsvFromRows(opomRows);
+  syncSelectedCsv();
   renderGeneratedAddressList();
   renderOpomPreview(append ? 'opom_page_appended' : 'opom_ready');
   syncActionButtons();
@@ -1179,8 +1211,8 @@ async function matchAdsPower() {
           ...runtimeConfigPayload(),
         }),
       });
-      opomRows = opomResolved.rows || opomRows;
-      selectedCsvText = opomResolved.csvText || canonicalCsvFromRows(opomRows);
+      opomRows = opomResolved.rows ? mergeUpdatedRows(opomRows, opomResolved.rows) : opomRows;
+      syncSelectedCsv();
       renderOpomPreview('opom_resolve');
     } catch (error) {
       const reason = sanitizeMessage(error.message || 'OPOM resolve failed');
@@ -1193,7 +1225,7 @@ async function matchAdsPower() {
           opom_health_reason: reason,
         };
       });
-      selectedCsvText = canonicalCsvFromRows(opomRows);
+      syncSelectedCsv();
       renderOpomPreview('opom_resolve_failed');
     }
   }
@@ -1216,7 +1248,7 @@ async function matchAdsPower() {
     opomRows[item.index].ads_power_serial_number = item.profile?.serialNumber || opomRows[item.index].ads_power_serial_number || '';
     opomRows[item.index].ads_power_group_name = item.profile?.groupName || opomRows[item.index].ads_power_group_name || '';
   }
-  selectedCsvText = canonicalCsvFromRows(opomRows);
+  syncSelectedCsv();
   renderOpomPreview('adspower_match');
   syncActionButtons();
   const executableMatched = matchedRowCount();
@@ -1298,8 +1330,10 @@ async function allocateCards({createCards = false} = {}) {
   await applyUploadedAddressCsvToRows();
   syncRowsWithCurrentDefaults();
   const uploadedCardCsv = els.ejhSafeCsv.files?.[0] ? await els.ejhSafeCsv.files[0].text() : '';
+  const executionRows = selectedOpomRows();
+  if (!executionRows.length) throw new Error('请至少勾选一行后再分配卡');
   const body = {
-    rows: opomRows,
+    rows: executionRows,
     cardCsvText: uploadedCardCsv,
     defaults: opomDefaultsPayload(),
     ...runtimeConfigPayload(),
@@ -1310,7 +1344,7 @@ async function allocateCards({createCards = false} = {}) {
     cardholder: els.ejhCardholder.value.trim(),
   };
   if (createCards) {
-    const count = opomRows.filter((row) => row.ads_match_status === 'matched').length;
+    const count = executionRows.filter((row) => row.ads_match_status === 'matched').length;
     if (!count) throw new Error('没有 AdsPower matched 行，不能真实 EJH 开卡');
     if (!body.amount || !body.activeDate || !body.cardholder) {
       throw new Error('真实 EJH 开卡需要填写 amount、active date、cardholder');
@@ -1325,8 +1359,8 @@ async function allocateCards({createCards = false} = {}) {
     method: 'POST',
     body: JSON.stringify(body),
   });
-  opomRows = data.rows || [];
-  selectedCsvText = data.csvText || canonicalCsvFromRows(opomRows);
+  opomRows = data.rows ? mergeUpdatedRows(opomRows, data.rows) : opomRows;
+  syncSelectedCsv();
   renderOpomPreview('card_allocated');
   syncActionButtons();
   if (!selectedFile) selectedFile = {name: 'opom-recharge.csv'};
@@ -1351,7 +1385,7 @@ async function readSelectedFile() {
       throw new Error('账号选择 CSV 至少需要 login_email/email/username、ads_power_serial_number/ID 或 ads_power_user_id');
     }
     selectedFile = {name: file.name};
-    selectedCsvText = canonicalCsvFromRows(opomRows);
+    syncSelectedCsv();
     els.opomSummary.textContent = `local selector rows=${opomRows.length} source=${selectedFile.name} addressMaps=${addressMappingCount}`;
   } else {
     selectedFile = null;
@@ -1383,6 +1417,7 @@ async function runDryRun() {
   if (!selectedFile) await readSelectedFile();
   await applyUploadedAddressCsvToRows();
   syncRowsWithCurrentDefaults();
+  if (!selectedOpomRows().length) throw new Error('请至少勾选一行后再预检');
   if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
   if (selectedScopeLabels().length === 0) throw new Error('请至少选择一个执行范围');
   syncExecutionCopy();
@@ -1415,6 +1450,7 @@ async function runDryRun() {
 }
 
 async function createLiveJob() {
+  if (!selectedOpomRows().length) throw new Error('请至少勾选一行后再启动执行');
   if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
   const mode = executionMode();
   if (!els.confirmLive.checked) throw new Error(mode.requireText);
@@ -1706,6 +1742,16 @@ async function downloadSelectedResult(event) {
 }
 
 els.file.addEventListener('change', () => readSelectedFile().catch(showError));
+els.opomPreviewBody.addEventListener('change', (event) => {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || !input.matches('.row-execute')) return;
+  const index = Number(input.dataset.rowIndex);
+  if (!Number.isInteger(index) || !opomRows[index]) return;
+  opomRows[index].execute = input.checked;
+  syncSelectedCsv();
+  renderOpomPreview('selection_changed');
+  invalidateDryRun('执行清单已变化，启动执行时会重新预检。');
+});
 els.opomReady.addEventListener('click', () => withButtonBusy(els.opomReady, 'Loading...', loadOpomReady).catch(showError));
 els.opomLoadMore.addEventListener('click', () => withButtonBusy(els.opomLoadMore, 'Loading...', loadMoreOpomRows).catch(showError));
 els.adsPowerMatch.addEventListener('click', () => withButtonBusy(els.adsPowerMatch, 'Matching...', matchAdsPower).catch(showError));

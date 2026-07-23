@@ -169,6 +169,54 @@ test('purchasePlan supports fixed recharge amounts by balance threshold', () => 
   assert.equal(plan.purchase.rule.atOrAboveAmount, '20');
 });
 
+test('purchasePlan accepts zero on either balance-rule branch as skip purchase', () => {
+  const zeroBelow = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '20',
+  });
+  const bothZero = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '0',
+  });
+  assert.equal(zeroBelow.mode, 'balance_threshold_amounts');
+  assert.equal(zeroBelow.purchase.rule.belowAmountConfigured, true);
+  assert.equal(zeroBelow.purchase.rule.belowAmount, '');
+  assert.equal(zeroBelow.purchase.rule.atOrAboveAmount, '20');
+  assert.equal(bothZero.purchase.rule.belowAmountConfigured, true);
+  assert.equal(bothZero.purchase.rule.belowAmount, '');
+  assert.equal(bothZero.purchase.rule.atOrAboveAmount, '');
+});
+
+test('buildClosedLoopTask preserves explicit zero below-threshold branch for child runner', () => {
+  const task = rechargePlan.buildClosedLoopTask({
+    ID: '1415',
+    username: 'user@example.com',
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '20',
+  }, {
+    scopeBillingAddress: false,
+    scopePaymentMethod: false,
+    scopePurchase: true,
+    scopeAutoTopup: false,
+  });
+  assert.equal(task.purchase.rule.belowAmountConfigured, true);
+  assert.equal(task.purchase.rule.belowAmount, '');
+  assert.equal(task.purchase.rule.atOrAboveAmount, '20');
+});
+
+test('purchasePlan still rejects missing below-threshold amount when balance rule is incomplete', () => {
+  const plan = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '',
+    amount_at_or_above_threshold: '20',
+  });
+  assert.equal(plan.mode, 'incomplete_balance_rule');
+  assert.deepEqual(plan.missing, ['amount_below_threshold']);
+});
+
 test('purchasePlan skips the high-balance branch when its amount is blank or zero', () => {
   const blankAmount = rechargePlan.purchasePlan({
     balance_threshold: '145',
@@ -389,6 +437,8 @@ test('Auto top-up refresh waits for a visible security challenge to clear', () =
 test('balance threshold purchase always uses fixed branch amounts', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /const atOrAboveAmount = normalizeOptionalMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
+  assert.match(script, /belowAmountConfigured: hasMoneyInput\(purchaseAmountBelowThreshold\) \|\| !!purchaseRule\.belowAmountConfigured/);
+  assert.match(script, /const belowAmount = normalizeOptionalMoneyValue\(purchase\.rule\.belowAmount\)/);
   assert.match(script, /const amount = branch === 'below_threshold' \? belowAmount : atOrAboveAmount/);
   assert.match(script, /skippedByRule: !amount/);
   assert.doesNotMatch(script, /targetBalance|top_up_to_target|Math\.ceil\(targetBalance/);

@@ -245,7 +245,11 @@ async function serveStatic(res, pathname) {
     sendText(res, 404, 'Not found');
     return;
   }
-  await sendFile(res, filePath);
+  await sendFile(res, filePath, {
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+  });
 }
 
 server.listen(DEFAULT_SERVER_PORT, '127.0.0.1', () => {

@@ -793,7 +793,8 @@ function normalizeInput(args) {
       rule: {
         enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold),
         threshold: normalizeMoneyValue(purchaseBalanceThreshold),
-        belowAmount: normalizeMoneyValue(purchaseAmountBelowThreshold),
+        belowAmountConfigured: hasMoneyInput(purchaseAmountBelowThreshold) || !!purchaseRule.belowAmountConfigured || !!purchase.belowAmountConfigured,
+        belowAmount: normalizeOptionalMoneyValue(purchaseAmountBelowThreshold),
         atOrAboveAmount: normalizeOptionalMoneyValue(purchaseAmountAtOrAboveThreshold),
       },
     },
@@ -847,7 +848,7 @@ function normalizeInput(args) {
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
   }
-  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount)) {
+  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmountConfigured)) {
     throw new Error('purchase.rule.threshold and belowAmount are required when any purchase rule value is supplied');
   }
   if ((input.purchase.confirmed || input.preparePurchaseOnly) && !input.purchase.amount && !input.purchase.rule.enabled) {
@@ -898,6 +899,10 @@ function normalizeOptionalMoneyValue(value) {
   const number = Number(cleaned);
   if (number === 0) return '';
   return normalizeMoneyValue(cleaned);
+}
+
+function hasMoneyInput(value) {
+  return String(value ?? '').replace(/[$,\s]/g, '') !== '';
 }
 
 function normalizePositiveInteger(value, label) {
@@ -2892,9 +2897,9 @@ async function resolvePurchasePlan(page, purchase) {
   const balanceState = await getCurrentCreditBalance(page);
   if (purchase.rule?.enabled) {
     const threshold = normalizeMoneyForCompare(purchase.rule.threshold);
-    const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
+    const belowAmount = normalizeOptionalMoneyValue(purchase.rule.belowAmount);
     const atOrAboveAmount = normalizeOptionalMoneyValue(purchase.rule.atOrAboveAmount);
-    if (!Number.isFinite(threshold) || !belowAmount) {
+    if (!Number.isFinite(threshold) || (!belowAmount && !purchase.rule.belowAmountConfigured)) {
       throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
     }
     const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';

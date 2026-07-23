@@ -163,14 +163,15 @@ export function purchasePlan(row) {
   const anyRule = !!(thresholdRaw || belowRaw || atOrAboveRaw);
   const completeRule = !!(thresholdRaw && belowRaw);
   if (completeRule) {
-    const belowAmount = normalizeMoneyValue(belowRaw);
+    const belowAmount = normalizeOptionalPurchaseAmount(belowRaw);
     const atOrAboveAmount = normalizeOptionalPurchaseAmount(atOrAboveRaw);
     return {
       purchase: {
         confirmed: true,
         rule: {
           threshold: normalizeMoneyValue(thresholdRaw),
-          // 第二、三字段均为固定充值金额；第三字段留空或为 0 时，高余额分支跳过充值。
+          // 第二、三字段均为固定充值金额；任一分支显式为 0 时，该分支跳过充值。
+          belowAmountConfigured: true,
           belowAmount,
           atOrAboveAmount,
         },

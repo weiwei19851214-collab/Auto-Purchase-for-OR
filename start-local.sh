@@ -23,6 +23,39 @@ export OR_RUNNER_DB="${OR_RUNNER_DB:-$ROOT_DIR/data/runner.sqlite}"
 
 mkdir -p "$ROOT_DIR/data/uploads" "$ROOT_DIR/data/results" "$ROOT_DIR/data/logs"
 
+restart_managed_launch_agent() {
+  local label="${OPENROUTER_RECHARGE_LAUNCH_AGENT:-com.weiwei.openrouter-recharge}"
+  local domain="gui/$(id -u)"
+  if ! command -v launchctl >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! launchctl print "$domain/$label" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  echo "检测到 macOS 持久服务，正在通过 launchd 重启: $label"
+  launchctl kickstart -k "$domain/$label"
+  for _ in {1..40}; do
+    if curl --fail --silent --show-error --max-time 1 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+      echo "服务已恢复: http://127.0.0.1:$PORT"
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "ERROR: 持久服务重启后未通过健康检查。" >&2
+  return 2
+}
+
+if restart_managed_launch_agent; then
+  exit 0
+else
+  managed_status=$?
+  if [[ "$managed_status" -eq 2 ]]; then
+    exit 1
+  fi
+fi
+
 if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: 未找到 node，请先安装 Node.js 22 或更高版本。" >&2
   exit 1

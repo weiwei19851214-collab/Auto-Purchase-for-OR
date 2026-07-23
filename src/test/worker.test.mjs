@@ -240,7 +240,8 @@ test('worker writes OPOM failure result when an unexpected row exception occurs'
     assert.equal(calls[0].body.status, 'failed');
     assert.equal(calls[0].body.errorCode, 'failed');
     assert.match(calls[0].body.idempotencyKey, new RegExp(`^recharge_result:${created.job.id}:2:1:failed:worker\\.exception$`));
-    assert.doesNotMatch(JSON.stringify(calls[0].body), /5257970000000001|cvv=456|token=secret/);
+    assert.equal(calls[0].body.card.cardNo, '5257970000000001');
+    assert.doesNotMatch(JSON.stringify(calls[0].body), /cvv=456|token=secret/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

@@ -1,165 +1,199 @@
 #!/usr/bin/env node
-import {existsSync, writeFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {existsSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {redact} from '../src/server/redact.mjs';
 
 const DEFAULT_PLAYWRIGHT_PATH = '/Users/weiwei/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
-
 const FAKE_SAFE_CARD_CSV = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
 batch-ui,1,EJH,completed,order-ui-1,5257970000000001,06,2028,456,0001
 batch-ui,2,EJH,completed,order-ui-2,5257970000000002,07,2029,789,0002
 `;
 
-const FAKE_ADDRESS_CSV = `LastName,FirstName,Street,City,State,Zip,PhoneNumber
-Ignored,UI Flow,1 Main St,Portland,OR,97001,5551112222
-Ignored,UI Flow 2,2 Main St,Portland,OR,97002,5551113333
-`;
-
 const args = parseArgs(process.argv.slice(2));
 const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
+let browser;
+let tempDir = '';
+let readyPayload = null;
+const popups = [];
 
 function add(label, ok, status = '') {
   checks.push({label, ok: Boolean(ok), status: String(status || (ok ? 'ok' : 'failed'))});
 }
 
-let browser;
-
 try {
   const playwright = await loadPlaywright();
   const chromium = playwright.chromium || playwright.default?.chromium;
   if (!chromium) throw new Error('Loaded Playwright package does not expose chromium');
+  tempDir = mkdtempSync(join(tmpdir(), 'recharge-ui-opom-'));
+  const cardCsvPath = join(tempDir, 'cards.csv');
+  writeFileSync(cardCsvPath, FAKE_SAFE_CARD_CSV, 'utf8');
 
-  browser = await chromium.launch({headless: true});
-  const page = await browser.newPage({viewport: {width: 1440, height: 1400}});
+  browser = await launchChromium(chromium, {headless: true});
+  const page = await browser.newPage({viewport: {width: 1440, height: 1200}});
   const consoleErrors = [];
   const pageErrors = [];
+  page.on('popup', async (popup) => {
+    popups.push(popup);
+  });
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
 
   await page.route('**/api/opom/ready', async (route) => {
-    const request = route.request();
-    const payload = request.postDataJSON?.() || {};
-    const cursor = String(payload.cursor || '');
-    const firstRow = {
+    readyPayload = route.request().postDataJSON?.() || {};
+    const baseRow = {
       status: '',
       opom_account_id: 'acct-ui-1',
       login_email: 'ui-flow@example.com',
       ads_power_user_id: 'ads-ui-1',
       ads_power_serial_number: '1415',
-      ads_power_group_name: 'recharge',
+      ads_power_group_name: 'VIP',
+      opom_account_status: 'card_switch',
       opom_health_status: 'ok',
       opom_health_reason: '',
+      opom_card_status: 'ACTIVE',
       ads_match_status: '',
-      order_no: '',
-      card_no: '',
-      exp_month: '',
-      exp_year: '',
-      cvv: '',
-      amount: '',
-      postal_code: '97001',
-      holder_name: 'UI Flow',
-      country: 'US',
-      address_line1: '1 Main St',
-      city: 'Portland',
-      state: 'OR',
-      auto_topup_threshold: '',
-      auto_topup_amount: '',
       idempotency_key: 'recharge_plan:acct-ui-1:v1',
     };
-    const secondRow = {
-      ...firstRow,
-      opom_account_id: 'acct-ui-2',
-      login_email: 'ui-flow-2@example.com',
-      ads_power_user_id: 'ads-ui-2',
-      ads_power_serial_number: '1416',
-      postal_code: '97002',
-      holder_name: 'UI Flow 2',
-      address_line1: '2 Main St',
-      idempotency_key: 'recharge_plan:acct-ui-2:v1',
-    };
-    const rows = cursor ? [firstRow, secondRow] : [firstRow];
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         ok: true,
-        count: rows.length,
-        nextCursor: cursor ? '' : 'cursor-page-2',
-        addressMappingCount: 0,
-        csvText: '',
-        rows,
+        count: 2,
+        nextCursor: '',
+        rows: [
+          baseRow,
+          {
+            ...baseRow,
+            opom_account_id: 'acct-ui-2',
+            login_email: 'ui-flow-2@example.com',
+            ads_power_user_id: 'ads-ui-2',
+            ads_power_serial_number: '1416',
+            opom_account_status: 'overdue',
+            idempotency_key: 'recharge_plan:acct-ui-2:v1',
+          },
+        ],
       }),
     });
   });
 
-  await page.route('**/api/adspower/match', async (route) => {
-    const request = route.request();
-    const payload = request.postDataJSON?.() || {};
+  await page.route('**/api/cards/allocate', async (route) => {
+    const payload = route.request().postDataJSON?.() || {};
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         ok: true,
-        matched: rows.length,
-        failed: 0,
-        results: rows.map((row, index) => ({
-          index,
-          status: 'matched',
-          profile: {
-            userId: row.ads_power_user_id,
-            serialNumber: row.ads_power_serial_number,
-            groupName: 'recharge',
-          },
+        rows: rows.map((row, index) => ({
+          ...row,
+          order_no: `order-ui-${index + 1}`,
+          card_no: `525797000000000${index + 1}`,
+          exp_month: index === 0 ? '06' : '07',
+          exp_year: index === 0 ? '2028' : '2029',
+          cvv: index === 0 ? '456' : '789',
         })),
+        allocated: rows.length,
+      }),
+    });
+  });
+
+  await page.route('**/api/jobs/dry-run', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        ready: 2,
+        blocked: 0,
+        liveConfirmationToken: 'ui-live-confirmation-token',
+        rows: [],
+      }),
+    });
+  });
+
+  await page.route('**/api/jobs', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        job: {id: 'job-ui-confirmed'},
       }),
     });
   });
 
   await page.goto(baseUrl, {waitUntil: 'networkidle'});
-  await page.fill('#defaultAmount', '10');
-  await page.fill('#defaultAutoTopupThreshold', '2');
-  await page.fill('#defaultAutoTopupAmount', '25');
-  const addressCsvPath = join(tmpdir(), `recharge-ui-addresses-${Date.now()}.csv`);
-  writeFileSync(addressCsvPath, FAKE_ADDRESS_CSV, 'utf8');
-  await page.setInputFiles('#addressMappingCsv', addressCsvPath);
-  await page.check('#noPurchaseMode');
+  await page.click('[data-source="opom"]');
+  add('OPOM switch enables Auto Top-Up only', await page.locator('#autoTopupEnableOnly').isChecked(), 'checked');
+  add('OPOM switch skips Ads match', await page.locator('#skipMatch').isChecked(), 'checked');
+  add('match button disabled when skipped', await page.locator('#matchButton').isDisabled(), 'disabled');
 
-  await page.click('#opomReadyBtn');
-  await page.waitForFunction(() => /rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Load OPOM group renders OPOM row', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
-  add('OPOM pagination indicates more rows', await page.locator('#opomLoadMoreBtn').isEnabled(), 'hasMore=true');
+  await page.click('#loadOpomButton');
+  await page.waitForFunction(() => /已获取 2/.test(document.querySelector('#opomLoadState')?.textContent || ''));
+  add('combined OPOM status maps to needs_recharge API', readyPayload?.group === 'VIP' && readyPayload?.status === 'needs_recharge', `${readyPayload?.group}/${readyPayload?.status}`);
+  add('Load OPOM renders rows', await page.locator('#matchBody tr').count() === 2, 'rows=2');
 
-  await page.click('#opomLoadMoreBtn');
-  await page.waitForFunction(() => /rows=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Load next page appends OPOM rows with de-duplication', await page.locator('#opomPreviewBody tr').count() === 2, 'rows=2');
+  await page.setInputFiles('#cardFile', cardCsvPath);
+  await page.waitForFunction(() => /••••0001/.test(document.querySelector('#matchBody')?.textContent || ''));
+  add('card CSV allocation is reflected without showing full card', /••••0001|待分配/.test(await page.locator('#matchBody').textContent() || ''), 'card_ui');
 
-  await page.click('#adsPowerMatchBtn');
-  await page.waitForFunction(() => /matched=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Match AdsPower updates OPOM rows', /matched=2/.test(await page.locator('#opomSummary').textContent() || ''), 'matched=2');
+  await page.click('#startButton');
+  await page.waitForFunction(() => document.querySelector('#confirmDialog')?.open === true);
+  const confirmReadiness = await page.locator('#confirmReadiness').textContent();
+  add('OPOM flow auto dry-run has two ready rows', /2 可执行 \/ 0 阻塞/.test(confirmReadiness || ''), redact(confirmReadiness || 'missing'));
+  add('live confirmation dialog opens after passing dry-run', await page.locator('#confirmDialog').evaluate((node) => node.open), 'visible');
+  add('execution page does not open before confirmation', popups.length === 0, `popups=${popups.length}`);
 
-  const cardCsvPath = join(tmpdir(), `recharge-ui-cards-${Date.now()}.csv`);
-  writeFileSync(cardCsvPath, FAKE_SAFE_CARD_CSV, 'utf8');
-  await page.setInputFiles('#ejhSafeCsv', cardCsvPath);
-  await page.click('#allocateCardsBtn');
-  await page.waitForFunction(() => /allocated=2/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Allocate cards updates OPOM rows', /allocated=2/.test(await page.locator('#opomSummary').textContent() || ''), 'allocated=2');
-
-  await page.check('#confirmLive');
-  await page.click('#liveRunBtn');
-  await page.waitForFunction(() => {
-    const summary = document.querySelector('#dryRunSummary')?.textContent || '';
-    return /ready\s*[:=]\s*2/.test(summary) && /blocked\s*[:=]\s*0/.test(summary);
+  const popupPromise = page.waitForEvent('popup');
+  await page.click('#createJobButton');
+  const executionPopup = await popupPromise;
+  await executionPopup.waitForURL('**/execution.html?job=job-ui-confirmed');
+  add('execution page opens only after confirmation', /\/execution\.html\?job=job-ui-confirmed$/.test(executionPopup.url()), executionPopup.url());
+  add('confirmation dialog closes after job creation', !(await page.locator('#confirmDialog').evaluate((node) => node.open)), 'closed');
+  await executionPopup.locator('#executionBody').evaluate((node) => {
+    node.innerHTML = `
+      <tr>
+        <td data-label="状态"><span class="pill running">执行中</span></td>
+        <td data-label="行">2</td>
+        <td data-label="账号"><span class="account-cell"><strong>layout@example.com</strong><small>acct-layout</small></span></td>
+        <td data-label="AdsPower">1415<br><span class="muted">ads-layout</span></td>
+        <td data-label="阶段">configure.auto_topup</td>
+        <td data-label="充值">verified / 150</td>
+        <td data-label="余额">10 → 160</td>
+        <td data-label="Auto Top-Up">configured 100/150</td>
+        <td data-label="卡 / OPOM">结果 completed</td>
+        <td class="message" data-label="消息">正在验证保存后的 Auto Top-Up 设置</td>
+        <td data-label="操作"><div class="row-actions"><button type="button">从本行继续</button><button type="button">重试本行</button></div></td>
+      </tr>
+    `;
   });
-  const dryRunSummary = await page.locator('#dryRunSummary').textContent();
-  add('OPOM flow auto preflight has two ready rows', /ready\s*[:=]\s*2/.test(dryRunSummary || '') && /blocked\s*[:=]\s*0/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('No-purchase confirmation stays enabled after ready preflight', await page.locator('#confirmLive').isEnabled(), 'enabled');
+  const layoutChecks = [];
+  for (const width of [1440, 1024, 760, 375]) {
+    await executionPopup.setViewportSize({width, height: 1000});
+    const layout = await executionPopup.evaluate(() => {
+      const wrap = document.querySelector('.execution-table-wrap');
+      return {
+        bodyOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        tableOverflow: wrap.scrollWidth > wrap.clientWidth,
+      };
+    });
+    layoutChecks.push({width, ...layout});
+  }
+  add(
+    'execution task status has no horizontal scroll',
+    layoutChecks.every((item) => !item.bodyOverflow && !item.tableOverflow),
+    layoutChecks.map((item) => `${item.width}:${item.bodyOverflow || item.tableOverflow ? 'overflow' : 'fit'}`).join(','),
+  );
 
   const bodyText = await page.locator('body').textContent();
   add('OPOM flow UI redaction', !containsSensitive(bodyText), 'no_sensitive_values');
@@ -168,28 +202,22 @@ try {
 } catch (error) {
   add('ui OPOM flow smoke exception', false, redact(error.message || 'unknown error'));
 } finally {
+  for (const popup of popups) await popup.close().catch(() => {});
   if (browser) await browser.close();
+  if (tempDir) rmSync(tempDir, {recursive: true, force: true});
 }
 
 const failed = checks.filter((check) => !check.ok);
 const result = {ok: failed.length === 0, failed: failed.length, baseUrl, checks};
-if (args.json) {
-  console.log(JSON.stringify(result, null, 2));
-} else {
-  for (const check of checks) {
-    console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
-  }
-  console.log(result.ok ? 'ui OPOM flow smoke passed' : `ui OPOM flow smoke failed: ${failed.length} check(s)`);
+if (args.json) console.log(JSON.stringify(result, null, 2));
+else {
+  for (const check of checks) console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
+  console.log(result.ok ? 'ui OPOM flow smoke passed' : `ui OPOM flow failed: ${failed.length} check(s)`);
 }
 process.exitCode = result.ok ? 0 : 1;
 
 async function loadPlaywright() {
-  const candidates = [
-    process.env.PLAYWRIGHT_IMPORT_PATH || '',
-    DEFAULT_PLAYWRIGHT_PATH,
-    'playwright',
-  ].filter(Boolean);
-
+  const candidates = [process.env.PLAYWRIGHT_IMPORT_PATH || '', DEFAULT_PLAYWRIGHT_PATH, 'playwright'].filter(Boolean);
   const errors = [];
   for (const candidate of candidates) {
     try {
@@ -206,18 +234,26 @@ async function loadPlaywright() {
   throw new Error(`Unable to load Playwright. Set PLAYWRIGHT_IMPORT_PATH. ${errors.join(' | ')}`);
 }
 
+async function launchChromium(chromium, options) {
+  const executablePath = String(process.env.PLAYWRIGHT_EXECUTABLE_PATH || '').trim();
+  if (executablePath) return chromium.launch({...options, executablePath});
+  try {
+    return await chromium.launch(options);
+  } catch (error) {
+    if (!/Executable doesn't exist|browser executable/i.test(error.message || '')) throw error;
+    return chromium.launch({...options, channel: 'chrome'});
+  }
+}
+
 function parseArgs(argv) {
   const parsed = {base: '', json: false};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--json') {
-      parsed.json = true;
-    } else if (arg === '--base') {
+    if (arg === '--json') parsed.json = true;
+    else if (arg === '--base') {
       parsed.base = argv[index + 1] || '';
       index += 1;
-    } else if (arg.startsWith('--base=')) {
-      parsed.base = arg.split('=').slice(1).join('=');
-    }
+    } else if (arg.startsWith('--base=')) parsed.base = arg.split('=').slice(1).join('=');
   }
   return parsed;
 }
@@ -229,5 +265,5 @@ function normalizeBase(value) {
 }
 
 function containsSensitive(value) {
-  return /,456,|,789,|cvv/i.test(String(value || ''));
+  return /525797\d{10}|(?:^|[^0-9])456(?:[^0-9]|$)/i.test(String(value || ''));
 }

@@ -13,106 +13,42 @@ function add(label, ok, status = '') {
 }
 
 try {
-  const html = baseUrl
-    ? await fetchText(`${baseUrl}/`)
-    : readFileSync(join(ROOT_DIR, 'public/index.html'), 'utf8');
-  const appJs = baseUrl
-    ? await fetchText(`${baseUrl}/app.js`)
-    : readFileSync(join(ROOT_DIR, 'public/app.js'), 'utf8');
-  const css = baseUrl
-    ? await fetchText(`${baseUrl}/styles.css`)
-    : readFileSync(join(ROOT_DIR, 'public/styles.css'), 'utf8');
+  const html = baseUrl ? await fetchText(`${baseUrl}/`) : readFileSync(join(ROOT_DIR, 'public/index.html'), 'utf8');
+  const appJs = baseUrl ? await fetchText(`${baseUrl}/app.js`) : readFileSync(join(ROOT_DIR, 'public/app.js'), 'utf8');
+  const css = baseUrl ? await fetchText(`${baseUrl}/styles.css`) : readFileSync(join(ROOT_DIR, 'public/styles.css'), 'utf8');
+  const executionHtml = baseUrl ? await fetchText(`${baseUrl}/execution.html`) : readFileSync(join(ROOT_DIR, 'public/execution.html'), 'utf8');
+  const executionJs = baseUrl ? await fetchText(`${baseUrl}/execution.js`) : readFileSync(join(ROOT_DIR, 'public/execution.js'), 'utf8');
 
-  add('operator console HTML served', /<title>OpenRouter 充值执行器<\/title>/.test(html), 'title_present');
+  add('operator console HTML served', /<title>OpenRouter 充值准备<\/title>/.test(html), 'title_present');
   add('operator console JS served', /function optionsPayload/.test(appJs), 'app_script_present');
-  add('operator console CSS served', /\.topbar|\.layout|\.panel/.test(css), 'style_present');
+  add('operator console CSS served', /\.toolbar|\.control-grid|\.match-table/.test(css), 'style_present');
+  add('execution page served', /执行工作/.test(executionHtml) && /execution\.js/.test(executionHtml), 'execution_present');
 
-  const idsInHtml = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
-  const queriedIds = [...new Set([...appJs.matchAll(/document\.querySelector\(['"]#([A-Za-z0-9_-]+)['"]\)/g)].map((match) => match[1]))];
-  const optionalHiddenIds = new Set([
-    'adspowerStatusMode',
-    'adspowerSuccessGroupId',
-    'adspowerFailureGroupId',
-    'adspowerBlockerGroupId',
-    'adspowerDiscoverTargetsBtn',
-    'adspowerUseDiscoveredTargetsBtn',
-    'adspowerTargetsSummary',
-  ]);
-  const missingIds = queriedIds.filter((id) => !idsInHtml.has(id) && !optionalHiddenIds.has(id));
-  add('app.js selector contract', missingIds.length === 0, missingIds.length ? `missing:${missingIds.join(',')}` : `ids=${queriedIds.length}`);
-  add(
-    'OPOM health fields retained in browser CSV contract',
-    /'opom_health_status'/.test(appJs) && /'opom_health_reason'/.test(appJs),
-    'present',
-  );
-  add(
-    'default recharge rule values',
-    /id=["']defaultAmount["'][^>]*value=["']5["']/.test(html)
-      && /id=["']defaultBalanceThreshold["'][^>]*value=["']145["']/.test(html)
-      && /id=["']defaultAmountBelow["'][^>]*value=["']150["']/.test(html)
-      && /id=["']defaultAmountAtOrAbove["'][^>]*value=["']20["']/.test(html)
-      && /id=["']defaultAutoTopupThreshold["'][^>]*value=["']100["']/.test(html)
-      && /id=["']defaultAutoTopupAmount["'][^>]*value=["']150["']/.test(html),
-    'fixed=5 balance=145 below=150 at_or_above=20 auto=100/150',
-  );
-  add(
-    'OPOM writeback default checked in UI',
-    /id=["']opomWriteback["'][^>]*checked/.test(html),
-    'checked',
-  );
-  add(
-    'OPOM group default is VIP',
-    /id=["']opomGroup["'][^>]*value=["']VIP["']/.test(html),
-    'VIP',
-  );
-  add(
-    'sticky summary cards reflect current workflow',
-    />清单<\/span>/.test(html)
-      && />AdsPower<\/span>/.test(html)
-      && />Billing<\/span>/.test(html)
-      && />卡<\/span>/.test(html)
-      && />预检<\/span>/.test(html)
-      && /id=["']statBilling["']/.test(html)
-      && /\.status-strip\s*{[\s\S]*position:\s*sticky/.test(css),
-    'list/adspower/billing/card/preflight',
-  );
+  const idsInHtml = new Set([...`${html}\n${executionHtml}`.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]));
+  const queriedIds = [...new Set([...`${appJs}\n${executionJs}`.matchAll(/document\.querySelector\(['"]#([A-Za-z0-9_-]+)['"]\)/g)].map((match) => match[1]))];
+  const missingIds = queriedIds.filter((id) => !idsInHtml.has(id));
+  add('JS selector contract', missingIds.length === 0, missingIds.length ? `missing:${missingIds.join(',')}` : `ids=${queriedIds.length}`);
 
-  for (const item of [
-    ['Load OPOM group action', /id=["']opomReadyBtn["'][\s\S]*?>Load OPOM group</],
-    ['OPOM pagination action', /id=["']opomLoadMoreBtn["'][\s\S]*?>Load next page</],
-    ['Match AdsPower action', /id=["']adsPowerMatchBtn["'][\s\S]*?>Match AdsPower</],
-    ['EJH card creation action', /id=["']createCardsBtn["'][\s\S]*?>Create EJH cards</],
-    ['EJH safe CSV input', /id=["']ejhSafeCsv["']/],
-    ['Concurrency input default', /id=["']concurrency["'][^>]*value=["']1["']/],
-    ['Live execution action', /id=["']liveRunBtn["']/],
-    ['Result CSV download action', /id=["']downloadLink["'][\s\S]*?>下载 result CSV</],
-    ['Jobs pagination controls', /id=["']jobsPrevPageBtn["'][\s\S]*id=["']jobsPageInfo["'][\s\S]*id=["']jobsNextPageBtn["']/],
-    ['OPOM writeback control', /id=["']opomWriteback["']/],
-    ['Auto recharge scheduler switch', /id=["']autoRechargeEnabled["']/],
-    ['OPOM health table column', />OPOM health</],
-  ]) {
-    add(item[0], item[1].test(html), item[1].test(html) ? 'present' : 'missing');
-  }
-
-  add('job detail appears before job records', html.indexOf('<h2>任务详情</h2>') >= 0
-    && html.indexOf('<h2>任务记录</h2>') > html.indexOf('<h2>任务详情</h2>'), 'detail_first');
-  add('execution bar follows recharge preview', html.indexOf('<h2>待充值清单</h2>') >= 0
-    && html.indexOf('aria-label="预检和启动执行"') > html.indexOf('<h2>待充值清单</h2>')
-    && html.indexOf('<h2>任务详情</h2>') > html.indexOf('aria-label="预检和启动执行"'), 'after_preview');
-  add('manual Dry-run action hidden', !/id=["']dryRunBtn["']/.test(html), 'hidden');
-  add('resume row action wired in UI', /从本行继续/.test(appJs), 'present');
-  add('retry row action wired in UI', /重试本行/.test(appJs) && /data-only-row="1"/.test(appJs), 'present');
-  add('resume API wired in UI', /resume-preview/.test(appJs) && /resumeFromRow/.test(appJs), 'present');
-  add('OPOM resolve failure is row-visible', /opom_resolve_failed/.test(appJs), 'present');
-  add('auto preflight copy present', /自动预检/.test(html), 'present');
-  add(
-    'card-free purchase or auto top-up clears incompatible billing scope',
-    /if \(!els\.scopePaymentMethod\.checked && \(els\.scopePurchase\.checked \|\| els\.scopeAutoTopup\.checked\)\) \{\s*els\.scopeBillingAddress\.checked = false;/.test(appJs),
-    'scope_normalization_present',
-  );
-  add('AdsPower status writeback UI present', /adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'present');
-  add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');
-  add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}`), 'no_sensitive_literals');
+  add('CSV and OPOM source switch present', /data-source=["']csv["']/.test(html) && /data-source=["']opom["']/.test(html), 'dual_source');
+  add('OPOM combined status maps in UI', /card_switch\s*&amp;\s*overdue/.test(html), 'combined_status');
+  add('default rule values', /id=["']balanceThreshold["'][^>]*value=["']145["']/.test(html)
+    && /id=["']amountBelow["'][^>]*value=["']150["']/.test(html)
+    && /id=["']amountAtOrAbove["'][^>]*value=["']20["']/.test(html)
+    && /id=["']autoTopupThreshold["'][^>]*value=["']100["']/.test(html)
+    && /id=["']autoTopupAmount["'][^>]*value=["']150["']/.test(html), '145/150/20 auto=100/150');
+  add('auto top-up enable-only switch present', /id=["']autoTopupEnableOnly["'][^>]*role=["']switch["']/.test(html), 'present');
+  add('auto recharge scheduler switch present', /id=["']autoRechargeEnabled["'][^>]*role=["']switch["']/.test(html)
+    && /\/api\/scheduler/.test(appJs), 'present');
+  add('mapping and concurrency controls present', /id=["']matchButton["']/.test(html) && /id=["']skipMatch["']/.test(html) && /id=["']concurrency["'][^>]*max=["']10["']/.test(html), 'present');
+  add('automatic dry-run and job creation wired', /\/api\/jobs\/dry-run/.test(appJs) && /\/api\/jobs/.test(appJs) && /liveConfirmationToken/.test(appJs), 'wired');
+  add('execution page job recovery wired', /URLSearchParams\(location\.search\)\.get\(['"]job/.test(executionJs) && /resume-preview/.test(executionJs) && /opom-writeback-repair/.test(executionJs), 'wired');
+  add('result CSV download uses session header', /X-Runner-Session/.test(executionJs), 'session_header');
+  add('deprecated UI controls removed from main page', !/createCardsBtn|noPurchaseMode|adspowerStatusMode|adspowerDiscoverTargetsBtn|addressMappingCsv|EJH_APP_KEY|EJH_APP_SECRET|Python/.test(html), 'removed');
+  add('OPOM writeback is backend default, not a page checkbox', !/id=["']opomWriteback["']/.test(html) && /opomWriteback:\s*true/.test(appJs), 'backend_default');
+  add('AdsPower status writeback forced disabled', /adspowerStatusMode:\s*['"]disabled['"]/.test(appJs) && !/group_move|remark_append|Discover groups/.test(html), 'disabled');
+  add('light/dark/high-contrast tokens present', /color-scheme:\s*light dark/.test(css) && /body\.high-contrast/.test(css), 'themes');
+  add('44px controls retained', /--control:\s*44px/.test(css), '44px');
+  add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}\n${executionHtml}\n${executionJs}`), 'no_sensitive_literals');
 } catch (error) {
   add('ui smoke exception', false, redact(error.message || 'unknown error'));
 }
@@ -122,9 +58,7 @@ const result = {ok: failed.length === 0, failed: failed.length, baseUrl: baseUrl
 if (args.json) {
   console.log(JSON.stringify(result, null, 2));
 } else {
-  for (const check of checks) {
-    console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
-  }
+  for (const check of checks) console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
   console.log(result.ok ? 'ui smoke passed' : `ui smoke failed: ${failed.length} check(s)`);
 }
 process.exitCode = result.ok ? 0 : 1;
@@ -133,14 +67,11 @@ function parseArgs(argv) {
   const parsed = {base: '', json: false};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--json') {
-      parsed.json = true;
-    } else if (arg === '--base') {
+    if (arg === '--json') parsed.json = true;
+    else if (arg === '--base') {
       parsed.base = argv[index + 1] || '';
       index += 1;
-    } else if (arg.startsWith('--base=')) {
-      parsed.base = arg.split('=').slice(1).join('=');
-    }
+    } else if (arg.startsWith('--base=')) parsed.base = arg.split('=').slice(1).join('=');
   }
   return parsed;
 }

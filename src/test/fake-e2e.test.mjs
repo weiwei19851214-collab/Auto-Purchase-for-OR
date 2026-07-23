@@ -75,6 +75,10 @@ test('fake E2E closes OPOM to AdsPower to EJH allocation to writeback loop witho
         opomCalls.push({type: 'card-binding', url: String(url), body: JSON.parse(options.body)});
         return Response.json({data: {cardBinding: {panLast4: '0001'}, idempotent: false}});
       }
+      if (/\/api\/v1\/recharge\/runs\/[^/]+\/results$/.test(target.pathname)) {
+        opomCalls.push({type: 'run-result', url: String(url), body: JSON.parse(options.body)});
+        return Response.json({data: {status: 'recorded'}, idempotent: false});
+      }
       throw new Error(`unexpected fetch ${url}`);
     }, async () => {
       const ready = await readyToRechargePayload({
@@ -167,7 +171,7 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
       assert.equal(details.job.status, 'completed');
       assert.equal(details.rows[0].status, 'completed');
       assert.equal(details.rows[0].opomCardWritebackStatus, 'written');
-      assert.equal(details.rows[0].opomResultWritebackStatus, 'skipped');
+      assert.equal(details.rows[0].opomResultWritebackStatus, 'written');
       assert.equal(details.rows[0].adspowerTagStatus, 'completed');
       assert.equal(details.rows[0].adspowerStatusMode, 'group_move');
 
@@ -179,7 +183,10 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
       assert.equal(cardBinding.body.card.cvv, undefined);
       assert.doesNotMatch(JSON.stringify(cardBinding.body), /"cvv"\s*:/i);
 
-      assert.equal(opomCalls.some((call) => call.type === 'run-result'), false);
+      const runResult = opomCalls.find((call) => call.type === 'run-result');
+      assert.ok(runResult);
+      assert.equal(runResult.body.opomAccountId, 'acct_1');
+      assert.equal(runResult.body.status, 'completed');
 
       assert.equal(adsPowerMatchCalls.length, 1);
       assert.equal(adsPowerStatusCalls.length, 1);

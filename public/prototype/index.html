@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenRouter 充值准备原型</title>
+    <link rel="stylesheet" href="./prototype.css" />
+  </head>
+  <body data-page="prepare">
+    <div class="app-shell">
+      <header class="toolbar" aria-label="页面顶部工具栏">
+        <div class="toolbar-title">
+          <p class="caption">OpenRouter 充值</p>
+          <h1>充值准备</h1>
+        </div>
+        <div class="toolbar-actions">
+          <button class="status-button" id="workerButton" type="button">
+            <span id="workerLabel">Worker 空闲</span>
+          </button>
+          <button class="secondary-button" id="recordsButton" type="button">任务记录</button>
+          <button class="secondary-button" id="contrastButton" type="button" aria-pressed="false">高对比</button>
+        </div>
+      </header>
+
+      <main class="prepare-layout" aria-label="准备工作区">
+        <section class="prepare-hero" aria-labelledby="prepareTitle">
+          <div class="control-grid" aria-label="执行设置">
+            <div class="control-card source-card">
+              <div class="card-title-row">
+                <span class="field-label" id="prepareTitle">账号来源</span>
+                <div class="segmented compact" role="radiogroup" aria-label="账号来源">
+                  <button class="segment is-selected" type="button" role="radio" aria-checked="true" data-source-mode="csv">CSV</button>
+                  <button class="segment" type="button" role="radio" aria-checked="false" data-source-mode="opom">OPOM</button>
+                </div>
+              </div>
+              <div class="field-stack opom-fields" id="opomSourceFields" hidden>
+                <label>
+                  <span class="field-label">Group</span>
+                  <input id="opomGroup" type="text" value="VIP" autocomplete="off" />
+                </label>
+                <label>
+                  <span class="field-label">Status</span>
+                  <select id="opomStatus">
+                    <option value="card_switch&overdue">card_switch&amp;overdue</option>
+                    <option value="card_switch">card_switch</option>
+                    <option value="overdue">overdue</option>
+                  </select>
+                </label>
+                <label>
+                  <span class="field-label">数量上限</span>
+                  <input id="opomLimit" type="number" min="1" max="200" step="1" value="50" inputmode="numeric" />
+                </label>
+                <div class="opom-confirm">
+                  <button class="primary-button" id="loadOpomButton" type="button">确认获取</button>
+                  <small id="opomLoadStatus" role="status">尚未获取</small>
+                </div>
+              </div>
+              <div class="field-stack" id="csvSourceFields">
+                <button class="file-trigger" id="accountFileButton" type="button">账号 CSV<span id="accountFileLabel">未选择</span></button>
+              </div>
+            </div>
+
+            <div class="control-card rule-card">
+              <div class="card-heading">
+                <span class="field-label">充值规则</span>
+                <strong id="ruleSummary">145/150/20</strong>
+              </div>
+              <div class="field-stack balance-three-cols" id="balanceRuleFields">
+                <label>
+                  <span class="field-label">阈值</span>
+                  <input id="balanceThreshold" type="number" min="0" step="1" value="145" inputmode="numeric" />
+                </label>
+                <label>
+                  <span class="field-label">低于阈值</span>
+                  <input id="balanceLowAmount" type="number" min="0" step="1" value="150" inputmode="numeric" />
+                </label>
+                <label>
+                  <span class="field-label">达到/高于</span>
+                  <input id="balanceHighAmount" type="number" min="0" step="1" value="20" inputmode="numeric" />
+                </label>
+              </div>
+            </div>
+
+            <div class="control-card auto-card">
+              <div class="auto-heading">
+                <span class="auto-title">
+                  <strong>Auto Top-Up</strong>
+                  <small id="autoTopupSummary">100 / 150</small>
+                </span>
+                <label class="mode-switch">
+                  <span>仅开启</span>
+                  <input id="onlyAutoTopupToggle" type="checkbox" role="switch" aria-label="仅开启 Auto Top-Up" />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="field-stack two-cols">
+                <label>
+                  <span class="field-label">阈值</span>
+                  <input id="autoTopupThreshold" type="number" min="0" step="1" value="100" inputmode="numeric" />
+                </label>
+                <label>
+                  <span class="field-label">充值金额</span>
+                  <input id="autoTopupAmount" type="number" min="1" step="1" value="150" inputmode="numeric" />
+                </label>
+              </div>
+            </div>
+
+            <div class="support-stack">
+              <div class="control-card card-card">
+                <span class="field-label">支付卡</span>
+                <button class="file-trigger" id="cardFileButton" type="button">支付卡 CSV<span id="cardFileLabel">不替换卡片</span></button>
+              </div>
+              <div class="control-card address-card">
+                <span class="field-label">Billing 地址</span>
+                <label>
+                  <span class="field-label">州</span>
+                  <select id="stateSelect">
+                    <option value="OR">Oregon / 俄勒冈州</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div class="control-card ads-card">
+              <span class="field-label">AdsPower mapping</span>
+              <button class="secondary-button match-button" id="matchButton" type="button">匹配 AdsPower</button>
+              <label class="switch-inline ads-skip-option">
+                <span>
+                  <strong>跳过匹配</strong>
+                  <small>已人工确认</small>
+                </span>
+                <input id="skipAdsMatchToggle" type="checkbox" />
+              </label>
+              <label class="concurrency-option">
+                <span class="field-label">任务并发</span>
+                <input id="taskConcurrency" type="number" min="1" max="10" step="1" value="1" inputmode="numeric" />
+              </label>
+            </div>
+            <input id="accountFile" type="file" accept=".csv,text/csv" hidden />
+            <input id="cardFile" type="file" accept=".csv,text/csv" hidden />
+          </div>
+        </section>
+
+        <section class="table-section" aria-labelledby="tableTitle">
+          <div class="section-heading">
+            <div>
+              <p class="caption">匹配明细</p>
+              <h2 id="tableTitle">12 行 example.test 模拟账号</h2>
+            </div>
+            <div class="inline-metrics" aria-label="就绪计数">
+              <span><strong id="readyCount">0</strong> 就绪</span>
+              <span><strong id="selectedCount">0</strong> 已选择</span>
+              <span><strong id="blockedCount">0</strong> 需处理</span>
+            </div>
+            <div class="table-actions">
+              <button class="secondary-button" id="selectReadyButton" type="button">选择就绪</button>
+              <button class="secondary-button" id="resetButton" type="button">重置</button>
+              <button class="primary-button" id="startButton" type="button">开始执行</button>
+            </div>
+          </div>
+
+          <div class="table-wrap" tabindex="0" aria-label="可横向滚动的匹配明细表">
+            <table class="match-table">
+              <colgroup>
+                <col class="col-select" />
+                <col class="col-account" />
+                <col class="col-health" />
+                <col class="col-ads" />
+                <col class="col-ads-id" />
+                <col class="col-match" />
+                <col class="col-rule" />
+                <col class="col-auto" />
+                <col class="col-billing" />
+                <col class="col-card" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">选择</th>
+                  <th scope="col">账号</th>
+                  <th scope="col">OPOM health</th>
+                  <th scope="col">AdsPower</th>
+                  <th scope="col">AdsPowerId</th>
+                  <th scope="col">匹配</th>
+                  <th scope="col">充值规则</th>
+                  <th scope="col">Auto top-up</th>
+                  <th scope="col">Billing</th>
+                  <th scope="col">Card</th>
+                </tr>
+              </thead>
+              <tbody id="matchBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="sheet-backdrop" id="confirmBackdrop" hidden></div>
+    <section class="bottom-sheet" id="confirmSheet" aria-labelledby="confirmTitle" aria-modal="true" role="dialog" hidden>
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <h2 id="confirmTitle">开始模拟执行</h2>
+      <dl class="confirm-grid">
+        <div>
+          <dt>模式</dt>
+          <dd id="confirmMode">正常模式 · 原型</dd>
+        </div>
+        <div>
+          <dt>子任务</dt>
+          <dd id="confirmTasks">0</dd>
+        </div>
+        <div>
+          <dt>规则</dt>
+          <dd id="confirmRule">145/150/20</dd>
+        </div>
+      </dl>
+      <p class="sheet-copy">该原型只写入浏览器 localStorage，不提交充值、不调用 API、不连接 OPOM 或 AdsPower。</p>
+      <div class="sheet-actions">
+        <button class="secondary-button" id="cancelStart" type="button">取消</button>
+        <button class="primary-button" id="confirmStart" type="button">确认并打开执行页</button>
+      </div>
+    </section>
+
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <aside class="task-drawer" id="taskDrawer" aria-labelledby="drawerTitle" aria-modal="true" role="dialog" hidden>
+      <div class="drawer-header">
+        <div>
+          <p class="caption">任务记录</p>
+          <h2 id="drawerTitle">最近模拟 run</h2>
+        </div>
+        <button class="icon-text-button" id="closeDrawer" type="button">关闭</button>
+      </div>
+      <div id="recordList" class="record-list"></div>
+      <button class="primary-button full-width" id="openExecutionFromDrawer" type="button">打开执行页</button>
+    </aside>
+
+    <script src="./prototype.js"></script>
+  </body>
+</html>

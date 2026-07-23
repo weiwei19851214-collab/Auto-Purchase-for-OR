@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenRouter 充值执行器 · 执行页</title>
+    <link rel="stylesheet" href="/styles.css?v=20260723-2" />
+  </head>
+  <body data-page="execution">
+    <div class="app-shell">
+      <header class="toolbar" aria-label="执行页工具栏">
+        <div class="toolbar-inner">
+          <div class="title-lockup">
+            <span class="eyebrow">OpenRouter 充值</span>
+            <h1>执行工作</h1>
+          </div>
+          <div class="toolbar-actions">
+            <span class="page-note" id="workerLabel">Worker 状态读取中</span>
+            <a class="secondary-link" href="/">返回准备页</a>
+            <button class="secondary-button" id="refreshButton" type="button">刷新</button>
+            <button class="secondary-button" id="contrastButton" type="button" aria-pressed="false">高对比</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="page-shell execution-layout" aria-label="执行监控">
+        <section id="alert" class="alert" role="alert" hidden></section>
+
+        <section class="run-summary" aria-labelledby="runTitle">
+          <div>
+            <span class="eyebrow" id="runCaption">真实 worker 任务</span>
+            <h2 id="runTitle">等待 job 参数</h2>
+            <p id="runMeta" class="status-line">执行页只通过 jobId 恢复状态，关闭页面不影响后台任务。</p>
+          </div>
+          <div class="summary-grid" aria-label="执行汇总">
+            <div class="summary-card">
+              <strong id="summaryDone">0</strong>
+              <span>完成</span>
+            </div>
+            <div class="summary-card">
+              <strong id="summaryRunning">0</strong>
+              <span>执行中</span>
+            </div>
+            <div class="summary-card">
+              <strong id="summaryBlocked">0</strong>
+              <span>阻断/失败</span>
+            </div>
+            <div class="summary-card">
+              <strong id="summaryElapsed">0s</strong>
+              <span>耗时</span>
+            </div>
+          </div>
+          <div class="progress-bar" aria-label="整体进度">
+            <span id="progressFill"></span>
+          </div>
+          <span class="sr-only" id="progressLabel" aria-live="polite">整体进度 0%</span>
+        </section>
+
+        <section class="task-board" aria-labelledby="taskBoardTitle">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">子任务状态</span>
+              <h2 id="taskBoardTitle">逐行执行</h2>
+            </div>
+            <div class="table-actions">
+              <button class="secondary-button" id="cancelButton" type="button" disabled>停止后续行</button>
+              <button class="secondary-button" id="downloadButton" type="button" disabled>下载 result CSV</button>
+            </div>
+          </div>
+          <div class="execution-table-wrap" tabindex="0" aria-label="子任务状态表">
+            <table class="execution-table">
+              <thead>
+                <tr>
+                  <th scope="col">状态</th>
+                  <th scope="col">行</th>
+                  <th scope="col">账号</th>
+                  <th scope="col">AdsPower</th>
+                  <th scope="col">阶段</th>
+                  <th scope="col">充值</th>
+                  <th scope="col">余额</th>
+                  <th scope="col">Auto Top-Up</th>
+                  <th scope="col">卡 / OPOM</th>
+                  <th scope="col">消息</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="executionBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="task-board events-panel" aria-labelledby="eventsTitle">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">事件流水</span>
+              <h2 id="eventsTitle">最近事件</h2>
+            </div>
+          </div>
+          <div id="eventsBody" class="events muted">等待任务事件。</div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/execution.js?v=20260723-2"></script>
+  </body>
+</html>

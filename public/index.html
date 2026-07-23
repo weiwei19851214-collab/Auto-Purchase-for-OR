@@ -171,7 +171,7 @@
                 <span class="step-index">1</span>
                 <div>
                   <h2>任务来源</h2>
-                  <p class="muted">从 OPOM 查询需要充值的账号生成待执行清单。</p>
+                  <p class="muted">从 OPOM 查询需要充值账号，或上传账号选择 CSV 生成待执行清单。</p>
                 </div>
               </div>
 
@@ -206,7 +206,21 @@
                 </div>
               </div>
 
+              <label class="field file-field">
+                <span>或上传账号选择 CSV</span>
+                <input id="csvFile" type="file" accept=".csv,text/csv" />
+              </label>
+
+              <fieldset class="check-group">
+                <legend>自动充值监控</legend>
+                <label title="启用后服务端会在每小时 15 和 45 分同步 OPOM needs_recharge 并自动创建真实充值任务">
+                  <input id="autoRechargeEnabled" type="checkbox" />
+                  每小时 15 / 45 分自动充值
+                </label>
+              </fieldset>
+
               <div id="opomSummary" class="summary muted" role="status" aria-live="polite">未从 OPOM 拉取。</div>
+              <div id="autoRechargeSummary" class="summary muted" role="status" aria-live="polite">自动充值监控未启用。</div>
             </section>
 
             <section class="panel step-panel rule-panel">

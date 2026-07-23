@@ -220,9 +220,26 @@ function sleep(ms) {
 
 function responseErrorMessage(body) {
   if (!body || typeof body !== 'object') return '';
-  if (typeof body.error === 'string') return body.error;
-  if (body.error && typeof body.error.message === 'string') return body.error.message;
-  if (typeof body.message === 'string') return body.message;
+  const summary = typeof body.error === 'string'
+    ? body.error
+    : body.error && typeof body.error.message === 'string'
+      ? body.error.message
+      : typeof body.message === 'string'
+        ? body.message
+        : '';
+  // OPOM Bean Validation 会把具体字段放在 details；保留字段路径和规则，避免上传 CSV 时只看到泛化的 Invalid request。
+  const details = Array.isArray(body.details)
+    ? body.details
+      .map((item) => {
+        const path = String(item?.path || '').trim();
+        const message = String(item?.message || '').trim();
+        return path && message ? `${path}: ${message}` : (message || path);
+      })
+      .filter(Boolean)
+      .slice(0, 5)
+    : [];
+  if (summary && details.length) return `${summary} (${details.join('; ')})`;
+  if (summary) return summary;
   if (typeof body.raw === 'string') return body.raw.slice(0, 500);
   return '';
 }

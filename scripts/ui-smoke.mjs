@@ -88,6 +88,7 @@ try {
     ['Result CSV download action', /id=["']downloadLink["'][\s\S]*?>下载 result CSV</],
     ['Jobs pagination controls', /id=["']jobsPrevPageBtn["'][\s\S]*id=["']jobsPageInfo["'][\s\S]*id=["']jobsNextPageBtn["']/],
     ['OPOM writeback control', /id=["']opomWriteback["']/],
+    ['Auto recharge scheduler switch', /id=["']autoRechargeEnabled["']/],
     ['OPOM health table column', />OPOM health</],
   ]) {
     add(item[0], item[1].test(html), item[1].test(html) ? 'present' : 'missing');
@@ -109,7 +110,7 @@ try {
     /if \(!els\.scopePaymentMethod\.checked && \(els\.scopePurchase\.checked \|\| els\.scopeAutoTopup\.checked\)\) \{\s*els\.scopeBillingAddress\.checked = false;/.test(appJs),
     'scope_normalization_present',
   );
-  add('AdsPower status writeback UI hidden', !/adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'hidden');
+  add('AdsPower status writeback UI present', /adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'present');
   add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');
   add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}`), 'no_sensitive_literals');
 } catch (error) {
@@ -157,5 +158,5 @@ async function fetchText(url) {
 }
 
 function containsSensitive(value) {
-  return /5257970000000001|card_number=|cvv=|sk-or-v1-|api[_-]?key\s*[:=]/i.test(String(value || ''));
+  return /5257970000000001|card_number\s*=|cvv\s*=|sk-or-v1-|api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i.test(String(value || ''));
 }

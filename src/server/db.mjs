@@ -95,6 +95,18 @@ function migrate(db) {
       path TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS scheduler_state (
+      id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      last_slot TEXT NOT NULL DEFAULT '',
+      last_run_at TEXT NOT NULL DEFAULT '',
+      next_run_at TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'disabled',
+      message TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
   `);
   const columns = db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name);
   if (!columns.includes('options_json')) {

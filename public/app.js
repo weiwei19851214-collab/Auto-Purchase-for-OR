@@ -28,6 +28,8 @@ const els = {
   opomStatus: document.querySelector('#opomStatus'),
   opomLimit: document.querySelector('#opomLimit'),
   opomWriteback: document.querySelector('#opomWriteback'),
+  autoRechargeEnabled: document.querySelector('#autoRechargeEnabled'),
+  autoRechargeSummary: document.querySelector('#autoRechargeSummary'),
   rechargeRuleFixed: document.querySelector('#rechargeRuleFixed'),
   rechargeRuleBalance: document.querySelector('#rechargeRuleBalance'),
   fixedRuleFields: document.querySelector('#fixedRuleFields'),
@@ -467,15 +469,21 @@ function syncActionButtons() {
   setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 RECHARGE_API_TOKEN（或使用 .recharge.local.env 后重新启动）。');
   setButtonAvailability(els.adsPowerMatch, hasRows && hasAdsPowerConfig, hasRows
     ? '请先在本地配置中填写 AdsPower API 地址和 API key'
-    : '请先从 OPOM 拉取需要充值的账号');
-  setButtonAvailability(els.generateAddresses, hasRows, '请先从 OPOM 拉取需要充值的账号');
+    : '请先从 OPOM 拉取需要充值的账号，或上传账号选择 CSV');
+  setButtonAvailability(els.generateAddresses, hasRows, '请先从 OPOM 拉取需要充值的账号，或上传账号选择 CSV');
   setButtonAvailability(els.allocateCards, hasRows && adsMatchApproved && hasCardsCsv, hasRows
     ? (adsMatchApproved ? '请先上传 EJH cards CSV，或使用 Create EJH cards' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
-    : '请先从 OPOM 拉取需要充值的账号');
+    : '请先从 OPOM 拉取需要充值的账号，或上传账号选择 CSV');
   setButtonAvailability(els.createCards, hasRows && adsMatchApproved && hasCreateInputs, hasRows
     ? (adsMatchApproved ? '真实开卡需要填写 amount、active date、cardholder' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
-    : '请先从 OPOM 拉取需要充值的账号');
+    : '请先从 OPOM 拉取需要充值的账号，或上传账号选择 CSV');
   setButtonAvailability(els.adspowerDiscoverTargets, hasAdsPowerConfig, '请先在本地配置中填写 AdsPower API 地址和 API key');
+  if (els.autoRechargeEnabled) {
+    els.autoRechargeEnabled.disabled = !hasOpomConfig || !hasAdsPowerConfig;
+    els.autoRechargeEnabled.title = els.autoRechargeEnabled.disabled
+      ? '请先配置 OPOM 和 AdsPower；自动充值会使用当前页面参数创建真实充值任务'
+      : '';
+  }
   syncExecutionAvailability();
 }
 
@@ -1071,6 +1079,17 @@ function selectorRowsFromCsv(text, addressCsvText) {
   return applyAddressMappings(unique, addressMappingsFromCsv(addressCsvText));
 }
 
+function assertValidSelectorEmails(rows) {
+  const invalidRows = rows
+    .map((row, index) => ({index: index + 1, email: String(row.login_email || '').trim()}))
+    .filter((row) => row.email && !/^[^\s@]+@[^\s@]+$/.test(row.email));
+  if (!invalidRows.length) return;
+  // OPOM 会因任一非法邮箱拒绝整批 resolve；在上传阶段阻断，避免 Match AdsPower 后才暴露远端 400。
+  const preview = invalidRows.slice(0, 10).map((row) => row.index).join(', ');
+  const suffix = invalidRows.length > 10 ? ' 等' : '';
+  throw new Error(`账号选择 CSV 的 login_email/email/username 格式不正确：待执行清单第 ${preview}${suffix} 行。请修正后重新上传。`);
+}
+
 function noHeaderSelectorSource(line) {
   const values = line.map((value) => String(value || '').trim()).filter(Boolean);
   const loginEmail = values.find((value) => value.includes('@')) || '';
@@ -1370,7 +1389,7 @@ async function allocateCards({createCards = false} = {}) {
 }
 
 async function readSelectedFile() {
-  const file = els.file.files?.[0] || null;
+  const file = els.file?.files?.[0] || null;
   selectedCsvText = '';
   opomNextCursor = '';
   opomRows = [];
@@ -1380,10 +1399,12 @@ async function readSelectedFile() {
     const addressFile = els.addressMappingCsv.files?.[0] || null;
     const addressCsvText = addressFile ? await addressFile.text() : '';
     const addressMappingCount = addressCsvText ? addressMappingsFromCsv(addressCsvText).length : 0;
-    opomRows = selectorRowsFromCsv(accountCsvText, addressCsvText);
-    if (!opomRows.length) {
+    const selectorRows = selectorRowsFromCsv(accountCsvText, addressCsvText);
+    if (!selectorRows.length) {
       throw new Error('账号选择 CSV 至少需要 login_email/email/username、ads_power_serial_number/ID 或 ads_power_user_id');
     }
+    assertValidSelectorEmails(selectorRows);
+    opomRows = selectorRows;
     selectedFile = {name: file.name};
     syncSelectedCsv();
     els.opomSummary.textContent = `local selector rows=${opomRows.length} source=${selectedFile.name} addressMaps=${addressMappingCount}`;
@@ -1489,6 +1510,7 @@ async function refreshAll() {
   els.worker.textContent = data.worker?.running
     ? `Worker: running ${currentRows.length || 1} row${(currentRows.length || 1) > 1 ? 's' : ''} row=${current?.rowNumber || '-'} profile=${current?.profileId || '-'} stage=${current?.stage || '-'} elapsed=${formatDuration(current?.elapsedMs)}`
     : 'Worker: idle';
+  renderSchedulerState(data.scheduler);
   renderJobs(data.jobs || []);
   if (selectedJobId) await loadJob(selectedJobId);
   scheduleNextRefresh(data.worker?.running ? 3000 : 30000);
@@ -1721,6 +1743,60 @@ async function refreshPreflight() {
   if (!data.ok) els.preflight.classList.add('danger');
 }
 
+function schedulerPayload(enabled) {
+  return {
+    enabled,
+    confirmAutomaticPurchase: enabled,
+    group: els.opomGroup.value.trim() || 'VIP',
+    status: 'needs_recharge',
+    limit: els.opomLimit.value.trim() || '100',
+    options: {
+      ...optionsPayload(),
+      opomWriteback: true,
+      confirmPurchase: true,
+      preparePurchaseOnly: false,
+      scopePurchase: true,
+    },
+    defaults: opomDefaultsPayload(),
+  };
+}
+
+function renderSchedulerState(state = {}) {
+  if (!els.autoRechargeEnabled || !els.autoRechargeSummary || !state.ok) return;
+  els.autoRechargeEnabled.checked = !!state.enabled;
+  const lines = [
+    state.enabled ? '自动充值监控已启用。' : '自动充值监控未启用。',
+    state.schedule || '每小时 15 和 45 分',
+    state.nextRunAt ? `下次检查 ${formatChinaTime(state.nextRunAt)}` : '',
+    state.lastRunAt ? `上次检查 ${formatChinaTime(state.lastRunAt)}` : '',
+    state.message || '',
+  ].filter(Boolean);
+  els.autoRechargeSummary.textContent = lines.join(' ');
+  els.autoRechargeSummary.classList.toggle('success', !!state.enabled && !/failed/i.test(state.status || ''));
+  els.autoRechargeSummary.classList.toggle('warning', /failed|skipped|idle_no_ready/i.test(state.status || ''));
+}
+
+async function toggleAutoRecharge() {
+  if (!els.autoRechargeEnabled) return;
+  const enabled = els.autoRechargeEnabled.checked;
+  if (enabled) {
+    if (els.noPurchaseMode.checked) {
+      els.autoRechargeEnabled.checked = false;
+      throw new Error('自动充值不能启用 No-purchase 测试模式');
+    }
+    if (els.opomWriteback) els.opomWriteback.checked = true;
+    if (!window.confirm('启用后，服务端会在每小时 15 和 45 分同步 OPOM 需要充值账号，并按当前页面配置自动创建真实充值任务。确认启用？')) {
+      els.autoRechargeEnabled.checked = false;
+      return;
+    }
+  }
+  const state = await api('/api/scheduler', {
+    method: 'POST',
+    body: JSON.stringify(schedulerPayload(enabled)),
+  });
+  renderSchedulerState(state);
+}
+
 async function downloadSelectedResult(event) {
   event.preventDefault();
   if (!selectedJobId || els.download.disabled || els.download.classList.contains('disabled')) return;
@@ -1755,6 +1831,10 @@ els.opomPreviewBody.addEventListener('change', (event) => {
 els.opomReady.addEventListener('click', () => withButtonBusy(els.opomReady, 'Loading...', loadOpomReady).catch(showError));
 els.opomLoadMore.addEventListener('click', () => withButtonBusy(els.opomLoadMore, 'Loading...', loadMoreOpomRows).catch(showError));
 els.adsPowerMatch.addEventListener('click', () => withButtonBusy(els.adsPowerMatch, 'Matching...', matchAdsPower).catch(showError));
+els.autoRechargeEnabled?.addEventListener('change', () => toggleAutoRecharge().catch((error) => {
+  if (els.autoRechargeEnabled) els.autoRechargeEnabled.checked = false;
+  showError(error);
+}));
 els.adspowerDiscoverTargets?.addEventListener('click', () => withButtonBusy(els.adspowerDiscoverTargets, 'Discovering...', discoverAdsPowerStatusTargets).catch(showError));
 els.adspowerUseDiscoveredTargets?.addEventListener('click', () => useDiscoveredAdsPowerTargets().catch(showError));
 els.saveRuntimeConfig?.addEventListener('click', saveRuntimeConfig);

@@ -394,6 +394,11 @@ test('resolveOpomAccountsPayload marks OPOM batch resolve misses per row', async
           health: {status: 'ok', eligible: true, reason: ''},
           adsPower: {userId: 'profile_from_opom', serialNumber: '1415'},
         },
+        cardBinding: {
+          orderNo: 'order-resolved-1',
+          cardNo: '5257970000000001',
+          status: 'ACTIVE',
+        },
       },
       {
         index: 1,
@@ -416,6 +421,9 @@ test('resolveOpomAccountsPayload marks OPOM batch resolve misses per row', async
     assert.equal(result.matched, 1);
     assert.equal(result.failed, 1);
     assert.equal(result.rows[0].opom_account_id, 'acct_resolved');
+    assert.equal(result.rows[0].order_no, 'order-resolved-1');
+    assert.equal(result.rows[0].card_no, '5257970000000001');
+    assert.equal(result.rows[0].opom_card_status, 'ACTIVE');
     assert.equal(result.rows[1].opom_health_status, 'opom_not_found');
     assert.match(result.rows[1].opom_health_reason, /no OPOM account matched/);
   });
@@ -434,6 +442,22 @@ test('resolveOpomAccountsPayload reports OPOM network failures clearly', async (
         rows: [{login_email: 'selector@example.com'}],
       }),
       /OPOM network failed at http:\/\/opom\.local: UND_ERR_SOCKET/,
+    );
+  });
+});
+
+test('resolveOpomAccountsPayload includes OPOM validation detail for an invalid local selector row', async () => {
+  await withFetch(async () => Response.json({
+    error: 'Invalid request',
+    details: [{path: 'rows[3].loginEmail', message: 'loginEmail 格式不正确'}],
+  }, {status: 400}), async () => {
+    await assert.rejects(
+      () => resolveOpomAccountsPayload({
+        opomBaseUrl: 'http://opom.local',
+        opomRechargeToken: 'test-token',
+        rows: [{login_email: 'masked***@example.com'}],
+      }),
+      /Invalid request \(rows\[3\]\.loginEmail: loginEmail 格式不正确\)/,
     );
   });
 });

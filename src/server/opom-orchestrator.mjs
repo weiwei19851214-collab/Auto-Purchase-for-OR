@@ -233,8 +233,13 @@ function mergeResolvedOpomRow(row, canonical) {
     ads_power_user_id: row.ads_power_user_id || canonical.ads_power_user_id || '',
     ads_power_serial_number: row.ads_power_serial_number || canonical.ads_power_serial_number || '',
     ads_power_group_name: canonical.ads_power_group_name || row.ads_power_group_name || '',
+    opom_account_status: canonical.opom_account_status || row.opom_account_status || '',
     opom_health_status: canonical.opom_health_status || 'ok',
     opom_health_reason: canonical.opom_health_reason || '',
+    opom_card_status: canonical.opom_card_status || row.opom_card_status || '',
+    // 上传/分配卡 CSV 的卡号优先级更高；只有本地行没有卡时，才采用 OPOM resolve 返回的当前绑卡。
+    order_no: row.order_no || canonical.order_no || '',
+    card_no: row.card_no || canonical.card_no || '',
     idempotency_key: canonical.idempotency_key || row.idempotency_key || '',
   };
 }
@@ -264,7 +269,11 @@ function normalizeResolveStatus(status) {
 
 function mergeBatchResolvedRow(row, result = {}) {
   if (String(result.status || '').toLowerCase() === 'matched' && result.account) {
-    const canonical = opom.canonicalRowsFromOpomAccounts([result.account], {})[0] || {};
+    // OPOM 批量 resolve 把当前绑定卡放在结果顶层 cardBinding；合并后才能沿用统一的卡状态和全卡号映射。
+    const account = result.cardBinding
+      ? {...result.account, activeCard: result.cardBinding}
+      : result.account;
+    const canonical = opom.canonicalRowsFromOpomAccounts([account], {})[0] || {};
     return mergeResolvedOpomRow(row, canonical);
   }
   const status = normalizeResolveStatus(result.status);

@@ -150,7 +150,11 @@ function backfillSimplifiedRowErrors(db) {
       'failed', 'missing_fields', 'login_required', 'identity_mismatch',
       'payment_issue_card_declined', 'manual_security_blocker', 'purchase_unverified'
     )
-      AND (error_code = '' OR error_detail = '')
+      AND (
+        error_code = ''
+        OR error_detail = ''
+        OR error_code IN ('auto_topup_not_enabled', 'auto_topup_manage_missing')
+      )
   `).all();
   if (!rows.length) return;
   const update = db.prepare(`

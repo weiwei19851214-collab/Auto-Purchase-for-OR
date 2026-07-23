@@ -416,13 +416,27 @@ test('Auto top-up reloads Credits and retries once when Save stays disabled', ()
   assert.match(configureBody, /configureAutoTopupAttempt\(page, autoTopup, debugPort\)/);
 });
 
+test('Auto top-up waits and reloads Credits once when Enable or Manage is not rendered', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(script, /function isAutoTopupActionUnavailable/);
+  assert.match(script, /Auto top-up \(\?:Enable\|Manage\) button not found/);
+  assert.match(configureBody, /const maxAttempts = 2/);
+  assert.match(configureBody, /isAutoTopupActionUnavailable\(error\)/);
+  assert.match(configureBody, /waitForAutoTopupOverview\(page, 15000\)/);
+  assert.match(configureBody, /auto_topup_action_loaded_after_wait/);
+  assert.match(configureBody, /auto_topup_action_unavailable/);
+  assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
+  assert.doesNotMatch(configureBody, /executeConfirmedPurchase|clickPurchaseButton|writeOpomCardBindingAfterPurchase/);
+});
+
 test('Auto top-up accepts matching overview after a save recovery error', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
   assert.match(configureBody, /waitForAutoTopupConfigured\(\s*page,\s*autoTopup\.threshold,\s*autoTopup\.amount,\s*4000,\s*\)/);
   assert.match(configureBody, /recoveredState\?\.configured/);
   assert.match(configureBody, /overview_matched_after_recovery_error/);
-  assert.ok(configureBody.indexOf('recoveredState?.configured') < configureBody.indexOf('if (!isAutoTopupSaveButtonUnavailable(error)'));
+  assert.ok(configureBody.indexOf('recoveredState?.configured') < configureBody.indexOf('if ((!actionUnavailable && !saveButtonUnavailable)'));
 });
 
 test('Auto top-up refresh waits for a visible security challenge to clear', () => {

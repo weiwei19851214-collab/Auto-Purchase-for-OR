@@ -102,8 +102,8 @@ test('simplifyError distinguishes Auto Top-Up pending from generic Auto Top-Up f
   assert.equal(config.message, '自动充值规则未生效');
 
   const enable = simplifyError('Auto top-up Enable button not found: {"clicked":false,"tail":"Credits"}');
-  assert.equal(enable.errorCode, 'auto_topup_not_enabled');
-  assert.equal(enable.message, '自动充值未打开');
+  assert.equal(enable.errorCode, 'auto_topup_action_unavailable');
+  assert.equal(enable.message, '自动充值入口未加载');
 });
 
 test('simplifyError maps recharge verification and unknown system errors', () => {

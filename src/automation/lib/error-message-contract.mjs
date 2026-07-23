@@ -283,14 +283,9 @@ const RULES = [
       || /^purchase\.verify/i.test(stage),
   },
   {
-    errorCode: 'auto_topup_not_enabled',
-    message: '自动充值未打开',
-    matches: ({text}) => /Auto top-up Enable button not found/i.test(text),
-  },
-  {
-    errorCode: 'auto_topup_manage_missing',
-    message: '自动充值管理入口未找到',
-    matches: ({text}) => /Auto top-up Manage button.*not found/i.test(text),
+    errorCode: 'auto_topup_action_unavailable',
+    message: '自动充值入口未加载',
+    matches: ({text}) => /Auto top-up (?:Enable|Manage) button not found/i.test(text),
   },
   {
     errorCode: 'auto_topup_form_not_ready',

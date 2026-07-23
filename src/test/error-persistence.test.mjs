@@ -87,3 +87,42 @@ test('database migration preserves historical raw errors as detail and exposes a
     rmSync(dir, {recursive: true, force: true});
   }
 });
+
+test('database migration upgrades the old Auto Top-Up entry error code', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-error-upgrade-'));
+  const dbPath = join(dir, 'current.sqlite');
+  try {
+    let db = openDatabase(dbPath);
+    db.prepare(`
+      INSERT INTO jobs (
+        id, file_name, csv_path, result_csv_path, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('job_1', 'input.csv', '/tmp/input.csv', '/tmp/result.csv', 'failed', 'now', 'now');
+    db.prepare(`
+      INSERT INTO job_rows (
+        id, job_id, row_number, raw_index, status, stage,
+        error_code, message, error_detail, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'row_1',
+      'job_1',
+      2,
+      0,
+      'failed',
+      'automation',
+      'auto_topup_not_enabled',
+      '自动充值未打开',
+      'Auto top-up Enable button not found: {"clicked":false,"buttonTexts":[]}',
+      'now',
+    );
+    db.close();
+
+    db = openDatabase(dbPath);
+    const row = db.prepare('SELECT error_code, message FROM job_rows WHERE id = ?').get('row_1');
+    assert.equal(row.error_code, 'auto_topup_action_unavailable');
+    assert.equal(row.message, '自动充值入口未加载');
+    db.close();
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});

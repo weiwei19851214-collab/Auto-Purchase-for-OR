@@ -4641,6 +4641,10 @@ function isAutoTopupSaveButtonUnavailable(error) {
   return /Auto top-up save button not found:/.test(error?.message || String(error || ''));
 }
 
+function isAutoTopupActionUnavailable(error) {
+  return /Auto top-up (?:Enable|Manage) button not found:/.test(error?.message || String(error || ''));
+}
+
 async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
   if (!autoTopup?.enabled) return {configured: false, skipped: true};
   const navigation = await ensureCreditsPage(page);
@@ -4700,6 +4704,8 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
         },
       };
     } catch (error) {
+      const actionUnavailable = isAutoTopupActionUnavailable(error);
+      const saveButtonUnavailable = isAutoTopupSaveButtonUnavailable(error);
       // A successful save can close the editor just before our click/readback path
       // observes it. Treat the requested overview values as authoritative instead
       // of retrying an already-configured rule or returning a false failure.
@@ -4729,19 +4735,31 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
           },
         };
       }
-      if (!isAutoTopupSaveButtonUnavailable(error) || attempt === maxAttempts) {
+      if ((!actionUnavailable && !saveButtonUnavailable) || attempt === maxAttempts) {
         if (attempts.length > 0) {
-          error.message = `Auto top-up save stayed unavailable after ${attempt} attempts: ${error.message}`;
+          error.message = `Auto top-up configuration stayed unavailable after ${attempt} attempts: ${error.message}`;
         }
         throw error;
       }
-      // The OpenRouter editor occasionally leaves Save disabled after values are entered.
-      // Reload the Credits page and rebuild the editor state before trying again.
-      const refresh = await commandRefreshCreditsPage(page);
+
+      // The overview can remain in a skeleton state after purchase even though a
+      // later manual visit works. Wait briefly for a late render, then refresh
+      // only the Credits page before retrying Auto Top-Up. The purchase path is
+      // outside this retry loop and must never be replayed here.
+      const delayedState = actionUnavailable
+        ? await waitForAutoTopupOverview(page, 15000).catch(() => null)
+        : null;
+      const loadedAfterWait = !!(delayedState?.enabled || delayedState?.hasEnable || delayedState?.hasManage);
+      const refresh = loadedAfterWait
+        ? {refreshed: false, reason: 'auto_topup_action_loaded_after_wait'}
+        : await commandRefreshCreditsPage(page);
       attempts.push({
         attempt,
-        reason: 'auto_topup_save_button_unavailable',
+        reason: actionUnavailable
+          ? 'auto_topup_action_unavailable'
+          : 'auto_topup_save_button_unavailable',
         error: error.message || String(error),
+        delayedState,
         refresh,
       });
     }

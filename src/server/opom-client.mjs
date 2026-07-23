@@ -6,12 +6,22 @@ const DEFAULT_OPOM_REQUEST_TIMEOUT_MS = 45000;
 const DEFAULT_OPOM_REQUEST_RETRIES = 3;
 const DEFAULT_OPOM_WRITEBACK_RETRIES = 3;
 const DEFAULT_OPOM_RETRY_DELAY_MS = 1500;
+const CARD_PROVIDERS = new Set(['EJH', 'PINGPONG', 'LEGACY']);
 
 export function opomDefaults(env = process.env) {
+  const primaryRechargeToken = rechargeTokenFromEnv(env);
   return {
     opomBaseUrl: env.OPOM_BASE_URL || env.OPOM_API_BASE || '',
-    opomRechargeToken: env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: primaryRechargeToken,
+    opomSecondaryBaseUrl: env.OPOM_SECONDARY_BASE_URL || env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: env.OPOM_SECONDARY_RECHARGE_TOKEN
+      || env.OPOM_WRITEBACK_SECONDARY_TOKEN
+      || primaryRechargeToken,
   };
+}
+
+function rechargeTokenFromEnv(env = process.env) {
+  return env.RECHARGE_API_TOKEN || env.OPOM_RECHARGE_TOKEN || '';
 }
 
 function normalizeBaseUrl(value) {
@@ -30,7 +40,106 @@ function authHeaders(args) {
 
 function assertConfigured(args) {
   if (!normalizeBaseUrl(args.opomBaseUrl)) throw new Error('OPOM_BASE_URL is not configured');
-  if (!args.opomRechargeToken) throw new Error('OPOM_RECHARGE_TOKEN is not configured');
+  if (!args.opomRechargeToken) throw new Error('OPOM_RECHARGE_TOKEN/RECHARGE_API_TOKEN is not configured');
+}
+
+function writebackTargets(args) {
+  const primaryBaseUrl = normalizeBaseUrl(args.opomBaseUrl);
+  const primaryRechargeToken = args.opomRechargeToken || rechargeTokenFromEnv();
+  const secondaryBaseUrl = normalizeBaseUrl(
+    args.opomSecondaryBaseUrl
+    || process.env.OPOM_SECONDARY_BASE_URL
+    || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL
+    || '',
+  );
+  const secondaryRechargeToken = args.opomSecondaryRechargeToken
+    || process.env.OPOM_SECONDARY_RECHARGE_TOKEN
+    || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN
+    || primaryRechargeToken;
+  const targets = [{
+    role: 'primary',
+    baseUrl: primaryBaseUrl,
+    rechargeToken: primaryRechargeToken,
+    required: true,
+  }];
+
+  // 备 OPOM 只参与写回，不参与拉取/解析；失败只能写日志，不能影响主流程完成。
+  if (secondaryBaseUrl && secondaryBaseUrl !== primaryBaseUrl) {
+    targets.push({
+      role: 'secondary',
+      baseUrl: secondaryBaseUrl,
+      rechargeToken: secondaryRechargeToken,
+      required: false,
+    });
+  }
+  return targets;
+}
+
+function argsForWritebackTarget(args, target) {
+  return {
+    ...args,
+    opomBaseUrl: target.baseUrl,
+    opomRechargeToken: target.rechargeToken,
+  };
+}
+
+async function requestWritebackTargets(args, path, options = {}) {
+  let primaryBody = {};
+  const secondaryFailures = [];
+  for (const target of writebackTargets(args)) {
+    try {
+      const body = await requestJson(argsForWritebackTarget(args, target), path, options);
+      if (target.role === 'primary') primaryBody = body;
+    } catch (error) {
+      if (target.required) throw error;
+      secondaryFailures.push(secondaryWritebackFailure(target, path, error));
+    }
+  }
+  return {body: primaryBody, secondaryFailures};
+}
+
+async function requestResultWritebackTargets(args, path, body) {
+  let primaryBody = {};
+  const secondaryFailures = [];
+  for (const target of writebackTargets(args)) {
+    try {
+      const result = await requestResultForTarget(argsForWritebackTarget(args, target), path, body);
+      if (target.role === 'primary') primaryBody = result;
+    } catch (error) {
+      if (target.required) throw error;
+      secondaryFailures.push(secondaryWritebackFailure(target, path, error));
+    }
+  }
+  return {body: primaryBody, secondaryFailures};
+}
+
+async function requestResultForTarget(args, path, body) {
+  try {
+    return await requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (!shouldRetryWithoutNegativeBalances(error, body)) throw error;
+    // 兼容旧 OPOM 余额字段不能为负的校验；重试只作用于当前 target，避免主备互相串状态。
+    return requestJson(args, path, {
+      method: 'POST',
+      idempotent: true,
+      body: JSON.stringify(omitNegativeBalances(body)),
+    });
+  }
+}
+
+function secondaryWritebackFailure(target, path, error) {
+  const message = redact(`secondary writeback failed: ${target.baseUrl}${path}: ${error?.message || 'unknown error'}`);
+  console.warn(message);
+  return {
+    role: target.role,
+    baseUrl: target.baseUrl,
+    path,
+    message,
+  };
 }
 
 async function readJsonResponse(res) {
@@ -71,13 +180,18 @@ async function requestJson(args, path, options = {}) {
       clearTimeout(timeout);
       const body = await readJsonResponse(res);
       if (!res.ok) {
-        const message = body?.error?.message || body?.error || body?.message || `OPOM HTTP ${res.status}`;
+        const message = responseErrorMessage(body) || `OPOM HTTP ${res.status}`;
+        const detail = `${method} ${path} HTTP ${res.status}: ${message}`;
         if ((method === 'GET' || retryableWrite) && res.status >= 500 && attempt < retries) {
-          lastError = new Error(`OPOM request failed: ${message}`);
+          lastError = new Error(`OPOM request failed: ${detail}`);
           await sleep(retryDelayMs * attempt);
           continue;
         }
-        const httpError = new Error(redact(`OPOM request failed: ${message}`));
+        const httpError = new Error(redact(`OPOM request failed: ${detail}`));
+        httpError.httpStatus = res.status;
+        httpError.method = method;
+        httpError.path = path;
+        httpError.responseBody = body;
         httpError.nonRetryable = true;
         throw httpError;
       }
@@ -104,6 +218,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function responseErrorMessage(body) {
+  if (!body || typeof body !== 'object') return '';
+  const summary = typeof body.error === 'string'
+    ? body.error
+    : body.error && typeof body.error.message === 'string'
+      ? body.error.message
+      : typeof body.message === 'string'
+        ? body.message
+        : '';
+  // OPOM Bean Validation 会把具体字段放在 details；保留字段路径和规则，避免上传 CSV 时只看到泛化的 Invalid request。
+  const details = Array.isArray(body.details)
+    ? body.details
+      .map((item) => {
+        const path = String(item?.path || '').trim();
+        const message = String(item?.message || '').trim();
+        return path && message ? `${path}: ${message}` : (message || path);
+      })
+      .filter(Boolean)
+      .slice(0, 5)
+    : [];
+  if (summary && details.length) return `${summary} (${details.join('; ')})`;
+  if (summary) return summary;
+  if (typeof body.raw === 'string') return body.raw.slice(0, 500);
+  return '';
+}
+
 export async function fetchRechargeAccounts(args, input = {}) {
   const params = new URLSearchParams();
   params.set('group', input.group || DEFAULT_GROUP);
@@ -118,11 +258,40 @@ export async function fetchRechargeAccounts(args, input = {}) {
   };
 }
 
+export async function resolveRechargeAccounts(args, input = {}) {
+  const rows = Array.isArray(input.rows) ? input.rows : [];
+  const body = await requestJson(args, '/api/v1/recharge/accounts/resolve', {
+    method: 'POST',
+    idempotent: true,
+    body: JSON.stringify({
+      rows: rows.map((row, index) => ({
+        index: Number.isInteger(row.index) ? row.index : index,
+        ...(row.opomAccountId || row.opom_account_id ? {opomAccountId: row.opomAccountId || row.opom_account_id} : {}),
+        ...(row.loginEmail || row.login_email ? {loginEmail: row.loginEmail || row.login_email} : {}),
+        ...(row.adsPowerUserId || row.ads_power_user_id ? {adsPowerUserId: row.adsPowerUserId || row.ads_power_user_id} : {}),
+        ...(row.adsPowerSerialNumber || row.ads_power_serial_number ? {adsPowerSerialNumber: row.adsPowerSerialNumber || row.ads_power_serial_number} : {}),
+      })),
+      ...(input.group ? {group: input.group} : {}),
+      ...(input.status ? {status: input.status} : {}),
+      includeAllStatus: input.includeAllStatus === true,
+      fallbackAll: input.fallbackAll === true,
+    }),
+  });
+  return {
+    results: Array.isArray(body.results) ? body.results : Array.isArray(body.data) ? body.data : [],
+    total: Number(body.total || rows.length),
+    matched: Number(body.matched || 0),
+    failed: Number(body.failed || 0),
+  };
+}
+
 export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
+  const useLocalRechargeRules = hasLocalRechargeRuleDefaults(defaults);
   return accounts.map((account) => {
     const policy = account.rechargePolicy || {};
     const ads = account.adsPower || {};
     const health = account.health || {};
+    const activeCard = account.activeCard || account.card || account.bankCard || {};
     return {
       status: '',
       opom_account_id: account.opomAccountId || account.id || '',
@@ -130,26 +299,38 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
       ads_power_user_id: ads.userId || account.ads_power_user_id || '',
       ads_power_serial_number: ads.serialNumber || account.ads_power_serial_number || '',
       ads_power_group_name: ads.groupName || '',
+      opom_account_status: account.status || account.accountStatus || '',
       opom_health_status: health.status || (health.eligible === false ? 'unknown_blocked' : 'ok'),
       opom_health_reason: health.reason || '',
+      opom_card_status: activeCard.status || account.cardStatus || account.bankCardStatus || account.bank_card_status || '',
       ads_match_status: 'not_verified',
-      order_no: '',
-      card_no: '',
+      // OPOM 查询账号可能直接返回当前绑定卡；后续结果回调要用 orderNo + 完整卡号匹配禁卡。
+      order_no: activeCard.orderNo || activeCard.order_no || account.orderNo || account.order_no || '',
+      card_no: activeCard.cardNo || activeCard.card_no || account.cardNo || account.card_no || '',
       exp_month: '',
       exp_year: '',
       cvv: '',
-      amount: policy.amount || policy.amountUsd || defaults.amount || defaults.purchaseAmount || '',
+      // OPOM 只提供账号清单；本地操作台的充值规则是唯一执行策略来源。
+      amount: useLocalRechargeRules
+        ? firstConfiguredValue(defaults.amount, defaults.purchaseAmount)
+        : firstConfiguredValue(policy.amount, policy.amountUsd),
       postal_code: defaults.postalCode || '',
       holder_name: defaults.holderName || '',
       country: defaults.country || 'US',
       address_line1: defaults.addressLine1 || '',
       city: defaults.city || '',
       state: defaults.state || '',
-      balance_threshold: policy.balanceThreshold || policy.balanceThresholdUsd || defaults.balanceThreshold || '',
-      amount_below_threshold: policy.amountBelowThreshold || policy.amountBelowThresholdUsd || defaults.amountBelowThreshold || '',
-      amount_at_or_above_threshold: policy.amountAtOrAboveThreshold || policy.amountAtOrAboveThresholdUsd || defaults.amountAtOrAboveThreshold || '',
-      auto_topup_threshold: policy.autoTopupThreshold || defaults.autoTopupThreshold || '',
-      auto_topup_amount: policy.autoTopupAmount || defaults.autoTopupAmount || '',
+      balance_threshold: useLocalRechargeRules
+        ? (defaults.balanceThreshold ?? '')
+        : firstConfiguredValue(policy.balanceThreshold, policy.balanceThresholdUsd),
+      amount_below_threshold: useLocalRechargeRules
+        ? (defaults.amountBelowThreshold ?? '')
+        : firstConfiguredValue(policy.amountBelowThreshold, policy.amountBelowThresholdUsd),
+      amount_at_or_above_threshold: useLocalRechargeRules
+        ? (defaults.amountAtOrAboveThreshold ?? '')
+        : firstConfiguredValue(policy.amountAtOrAboveThreshold, policy.amountAtOrAboveThresholdUsd),
+      auto_topup_threshold: firstConfiguredValue(policy.autoTopupThreshold, defaults.autoTopupThreshold),
+      auto_topup_amount: firstConfiguredValue(policy.autoTopupAmount, defaults.autoTopupAmount),
       idempotency_key: account.version
         ? `recharge_plan:${account.opomAccountId || account.id}:${account.version}`
         : '',
@@ -157,17 +338,41 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
   });
 }
 
+function firstConfiguredValue(...values) {
+  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') ?? '';
+}
+
+function hasLocalRechargeRuleDefaults(defaults) {
+  return [
+    'amount',
+    'purchaseAmount',
+    'balanceThreshold',
+    'amountBelowThreshold',
+    'amountAtOrAboveThreshold',
+  ].some((key) => Object.hasOwn(defaults, key));
+}
+
 export function cardExpiryIso(row) {
   const explicit = row.expires_at || row.validityDate || row.validity_date || '';
-  if (explicit) return new Date(explicit).toISOString();
+  if (explicit) return String(explicit).trim();
   const month = Number(String(row.exp_month || '').replace(/\D/g, ''));
   let year = Number(String(row.exp_year || '').replace(/\D/g, ''));
   if (year > 0 && year < 100) year += 2000;
   if (!month || !year) return '';
-  return new Date(Date.UTC(year, month, 0, 0, 0, 0)).toISOString();
+  // 新 OPOM 文档支持 YYYY-MM；这里保留历史函数名，实际传月份精度，避免时区日期偏移。
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`;
 }
 
-export async function writeCompletedRow(args, row, details, context = {}) {
+function normalizeCardProvider(value) {
+  const normalized = String(value || 'EJH').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'EJH';
+}
+
+function cardType(row) {
+  return String(row.card_type || row.cardType || row.card_product || row.cardProduct || '').trim();
+}
+
+export async function writeCardBinding(args, row, details, context = {}) {
   const opomAccountId = plan.opomAccountId(row);
   if (!args.opomWriteback || !opomAccountId) {
     return {cardStatus: 'skipped', resultStatus: 'skipped'};
@@ -177,6 +382,8 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   const cardNo = plan.cardNumber(row);
   const idempotencyKey = row.card_binding_idempotency_key || `card_binding:${opomAccountId}:${orderNo || details.cardLast4 || runId}`;
   const expiresAt = cardExpiryIso(row);
+  const provider = normalizeCardProvider(args.cardProvider || row.card_provider || row.cardProvider);
+  const type = cardType(row);
   if (!orderNo || !cardNo || !expiresAt) {
     throw writebackError(new Error('OPOM card binding requires orderNo, cardNo, and expiresAt'), {
       cardStatus: 'failed',
@@ -186,32 +393,72 @@ export async function writeCompletedRow(args, row, details, context = {}) {
   const bindingBody = {
     idempotencyKey,
     card: {
+      // OPOM 绑卡写回需要明确卡通道；系统默认 EJH，避免未选择时丢失来源口径。
+      provider,
       orderNo,
       cardNo,
       expiresAt,
-      cvvPresent: !!row.cvv,
+      expires_at: expiresAt,
+      ...(type ? {card_type: type} : {}),
+      cvvPresent: !!(row.cvv || row.cvv_present),
     },
+    ...adsPowerPayload(row, details),
     binding: {
       boundAt: new Date().toISOString(),
-      source: 'recharge-runner',
+      source: 'recharge-api',
       notes: runId ? `${runId} row ${context.rowNumber || ''}`.trim() : 'recharge-runner',
     },
   };
+  const secondaryFailures = [];
   try {
-    await requestJson(args, `/api/v1/recharge/accounts/${encodeURIComponent(opomAccountId)}/card-binding`, {
+    const writeback = await requestWritebackTargets(args, `/api/v1/recharge/accounts/${encodeURIComponent(opomAccountId)}/card-binding`, {
       method: 'PUT',
       idempotent: true,
       body: JSON.stringify(bindingBody),
     });
+    secondaryFailures.push(...writeback.secondaryFailures);
   } catch (error) {
     throw writebackError(error, {cardStatus: 'failed', resultStatus: 'skipped'});
   }
-  try {
-    await writeRowResult(args, row, details, {...context, status: 'completed'});
-  } catch (error) {
-    throw writebackError(error, {cardStatus: 'written', resultStatus: 'failed'});
+  return {
+    cardStatus: 'written',
+    resultStatus: 'skipped',
+    ...(secondaryFailures.length ? {secondaryFailures} : {}),
+  };
+}
+
+export async function writeCompletedRow(args, row, details, context = {}) {
+  if (!args.opomWriteback || !plan.opomAccountId(row)) return {cardStatus: 'skipped', resultStatus: 'skipped'};
+  if (args.scopePaymentMethod === false) {
+    const result = await writeRowResult(args, row, details, {
+      ...context,
+      status: 'completed',
+      stage: 'closed_loop.complete',
+    });
+    return {cardStatus: 'skipped', resultStatus: result.resultStatus};
   }
-  return {cardStatus: 'written', resultStatus: 'written'};
+  let cardStatus = 'skipped';
+  const secondaryFailures = [];
+  try {
+    const binding = await writeCardBinding(args, row, details, context);
+    cardStatus = binding.cardStatus;
+    if (binding.secondaryFailures?.length) secondaryFailures.push(...binding.secondaryFailures);
+  } catch (error) {
+    // 新 OPOM 合同以充值结果回传为准；绑卡写回失败不能阻止 completed 结果进入 OPOM recharge_record。
+    cardStatus = error.opomCardWritebackStatus || 'failed';
+  }
+  const result = await writeRowResult(args, row, details, {
+    ...context,
+    status: 'completed',
+    stage: 'closed_loop.complete',
+  });
+  return {
+    cardStatus,
+    resultStatus: result.resultStatus,
+    ...(secondaryFailures.length || result.secondaryFailures?.length
+      ? {secondaryFailures: [...secondaryFailures, ...(result.secondaryFailures || [])]}
+      : {}),
+  };
 }
 
 export async function writeRowResult(args, row, details, context = {}) {
@@ -238,26 +485,55 @@ export async function writeRowResult(args, row, details, context = {}) {
     balanceBeforeUsd: numberOrUndefined(details.balanceBefore),
     balanceAfterUsd: numberOrUndefined(details.balanceAfter),
     ...(card ? {card} : {}),
+    ...adsPowerPayload(row, details),
     ...(errorCode ? {errorCode} : {}),
     ...(errorMessage ? {errorMessage} : {}),
     ...(stage ? {stage} : {}),
     occurredAt: new Date().toISOString(),
   };
-  await requestJson(args, `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`, {
-    method: 'POST',
-    idempotent: true,
-    body: JSON.stringify(body),
-  });
-  return {resultStatus: 'written'};
+  const path = `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`;
+  const writeback = await requestResultWritebackTargets(args, path, body);
+  return {
+    resultStatus: 'written',
+    ...(writeback.secondaryFailures.length ? {secondaryFailures: writeback.secondaryFailures} : {}),
+  };
+}
+
+function shouldRetryWithoutNegativeBalances(error, body) {
+  if (![400, 422].includes(Number(error?.httpStatus))) return false;
+  return ['balanceBeforeUsd', 'balanceAfterUsd'].some((field) => typeof body[field] === 'number' && body[field] < 0);
+}
+
+function omitNegativeBalances(body) {
+  const next = {...body};
+  for (const field of ['balanceBeforeUsd', 'balanceAfterUsd']) {
+    if (typeof next[field] === 'number' && next[field] < 0) delete next[field];
+  }
+  return next;
 }
 
 function resultCard(row, details = {}) {
   const card = {};
   const orderNo = plan.ejhOrderNo(row);
+  // OPOM 充值结果需要完整卡号做卡状态处理；优先使用执行行里的安全卡 CSV 全卡号，details 仅作兜底。
+  const cardNo = plan.cardNumber(row) || String(details.cardNo || '').trim();
   const panLast4 = details.cardLast4 || cardLast4FromRow(row);
   if (orderNo) card.orderNo = orderNo;
+  if (cardNo) card.cardNo = cardNo;
   if (/^\d{4}$/.test(panLast4)) card.panLast4 = panLast4;
   return Object.keys(card).length ? card : null;
+}
+
+function adsPowerPayload(row, details = {}) {
+  const userId = String(details.adsPowerUserId || plan.adsPowerUserId(row) || '').trim();
+  const serialNumber = String(details.adsPowerSerialNumber || plan.adsPowerSerialNumber(row) || '').trim();
+  if (!userId && !serialNumber) return {};
+  return {
+    adsPower: {
+      ...(userId ? {userId} : {}),
+      ...(serialNumber ? {serialNumber} : {}),
+    },
+  };
 }
 
 function cardLast4FromRow(row) {

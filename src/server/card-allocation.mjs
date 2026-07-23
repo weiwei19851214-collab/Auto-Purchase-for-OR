@@ -8,12 +8,13 @@ import {canonicalCsvFromRows} from './opom-orchestrator.mjs';
 const RAW_EJH_FIELDS = new Set(['requestPayload', 'encryptedParam', 'rawResponse']);
 const DEFAULT_BILLING_FIELDS = ['postal_code', 'holder_name', 'country', 'address_line1', 'city', 'state'];
 
-export function cardAllocationEligibleRows(rows = []) {
+export function cardAllocationEligibleRows(rows = [], {skipAdsPowerMatch = false} = {}) {
   return rows
     .map((row, index) => ({row, index}))
     .filter(({row}) => {
       const opomAccountId = row.opom_account_id || row.opomAccountId;
       const matchStatus = row.ads_match_status || row.adsMatchStatus || '';
+      if (skipAdsPowerMatch) return Boolean(row.ads_power_user_id || row.adsPowerUserId || row.ads_power_serial_number || row.adsPowerSerialNumber || row.ID);
       if (!opomAccountId && !matchStatus) return true;
       return matchStatus === 'matched';
     });
@@ -52,6 +53,10 @@ function expiryParts(row) {
   return {month: '', year: ''};
 }
 
+function expiryValue(row) {
+  return firstValue(row, ['expires_at', 'validityDate', 'validity_date', 'expiry', 'expires']);
+}
+
 export function parseSafeCardCsv(cardCsvText = '') {
   const parsed = csv.parseCsv(cardCsvText);
   if (parsed.length < 2) return [];
@@ -69,6 +74,9 @@ export function parseSafeCardCsv(cardCsvText = '') {
       openStatus: status,
       orderNo: firstValue(source, ['order_no', 'orderNo']),
       cardNo,
+      provider: firstValue(source, ['card_provider', 'cardProvider', 'provider']),
+      cardType: firstValue(source, ['card_type', 'cardType', 'card_product', 'cardProduct']),
+      expiresAt: expiryValue(source),
       expMonth: expiry.month,
       expYear: expiry.year,
       cvv: firstValue(source, ['cvv', 'cvvPassword']),
@@ -91,9 +99,9 @@ function validateUsableCard(card) {
   return missing;
 }
 
-export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) {
+export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) throw new Error('rows are required for card allocation');
-  const eligibleRows = cardAllocationEligibleRows(rows);
+  const eligibleRows = cardAllocationEligibleRows(rows, options);
   if (!eligibleRows.length) {
     throw new Error('No rows are eligible for card allocation; run AdsPower match first and resolve failed matches');
   }
@@ -118,6 +126,9 @@ export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) 
     const next = {...row};
     next.order_no = card.orderNo;
     next.card_no = card.cardNo;
+    if (card.provider) next.card_provider = card.provider;
+    if (card.cardType) next.card_type = card.cardType;
+    if (card.expiresAt) next.expires_at = card.expiresAt;
     next.exp_month = card.expMonth;
     next.exp_year = card.expYear;
     next.cvv = card.cvv;
@@ -174,7 +185,7 @@ export async function allocateCardsPayload(payload = {}) {
 
   if (payload.createCards) {
     if (!payload.confirmCreateCards) throw new Error('Real EJH card creation requires confirmCreateCards=true');
-    const eligibleRows = cardAllocationEligibleRows(payload.rows || []);
+    const eligibleRows = cardAllocationEligibleRows(payload.rows || [], {skipAdsPowerMatch: !!payload.skipAdsPowerMatch});
     if (!eligibleRows.length) {
       throw new Error('No rows are eligible for EJH card creation; run AdsPower match first and resolve failed matches');
     }
@@ -186,6 +197,9 @@ export async function allocateCardsPayload(payload = {}) {
       activeDate: payload.activeDate,
       cardholder: payload.cardholder,
       cardBatchId: payload.cardBatchId,
+      appKey: payload.ejhAppKey,
+      appSecret: payload.ejhAppSecret,
+      python: payload.python,
       output: cardCsvPath,
     });
     if (!ejhResult.ok) throw new Error(`EJH card creation failed: ${ejhResult.stderr || ejhResult.stdout || ejhResult.error || 'unknown error'}`);
@@ -193,7 +207,7 @@ export async function allocateCardsPayload(payload = {}) {
   }
 
   if (!cardCsvText.trim()) throw new Error('cardCsvText is required unless createCards=true');
-  const allocation = allocateCardsToRows(payload.rows || [], cardCsvText, payload.defaults || {});
+  const allocation = allocateCardsToRows(payload.rows || [], cardCsvText, payload.defaults || {}, {skipAdsPowerMatch: !!payload.skipAdsPowerMatch});
   return {
     ok: true,
     cardCsvPath,

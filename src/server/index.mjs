@@ -1,8 +1,9 @@
 import {createServer} from 'node:http';
+import {execFile} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
-import {DEFAULT_SERVER_PORT, PUBLIC_DIR} from './config.mjs';
+import {DEFAULT_SERVER_PORT, PUBLIC_DIR, ROOT_DIR} from './config.mjs';
 import {openDatabase, getJob, recoverInterruptedWork} from './db.mjs';
 import {httpError, readJsonBody, route, sendFile, sendJson, sendText} from './http-utils.mjs';
 import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList, repairOpomWriteback, resumeJob, resumePreview} from './jobs.mjs';
@@ -14,11 +15,13 @@ import {readyToRechargePayload, resolveOpomAccountsPayload} from './opom-orchest
 import {redact} from './redact.mjs';
 import {runnerArgs} from './automation-adapter.mjs';
 import {JobWorker} from './worker.mjs';
+import {AutoRechargeScheduler} from './auto-recharge-scheduler.mjs';
 
 const db = openDatabase();
 const recoveredJobIds = recoverInterruptedWork(db);
 if (recoveredJobIds.length) console.warn(`[recovery] blocked ${recoveredJobIds.length} interrupted job(s) for manual verification`);
 const worker = new JobWorker(db);
+const autoRechargeScheduler = new AutoRechargeScheduler(db);
 for (const jobId of recoveredJobIds) {
   try {
     await worker.writeCurrentResult(jobId);
@@ -27,6 +30,7 @@ for (const jobId of recoveredJobIds) {
   }
 }
 worker.start();
+autoRechargeScheduler.start();
 
 const server = createServer(async (req, res) => {
   try {
@@ -44,7 +48,7 @@ async function handle(req, res) {
   assertLocalRequest(req);
 
   if (pathname === '/api/health') {
-    sendJson(res, 200, {ok: true, worker: worker.status()});
+    sendJson(res, 200, {ok: true, worker: worker.status(), scheduler: autoRechargeScheduler.getState()});
     return;
   }
 
@@ -53,9 +57,15 @@ async function handle(req, res) {
     return;
   }
 
+  if (pathname === '/api/repo-info') {
+    sendJson(res, 200, {ok: true, repo: await repoInfo()});
+    return;
+  }
+
   if (pathname === '/api/preflight') {
     requireSession(req);
-    sendJson(res, 200, await environmentPreflight());
+    const payload = req.method === 'POST' ? await readJsonBody(req) : {};
+    sendJson(res, 200, await environmentPreflight(payload.options || payload || {}));
     return;
   }
 
@@ -113,9 +123,22 @@ async function handle(req, res) {
     return;
   }
 
+  if (pathname === '/api/scheduler') {
+    requireSession(req);
+    if (req.method === 'GET') {
+      sendJson(res, 200, autoRechargeScheduler.getState());
+      return;
+    }
+    if (req.method === 'POST') {
+      const payload = await readJsonBody(req);
+      sendJson(res, 200, autoRechargeScheduler.update(payload));
+      return;
+    }
+  }
+
   if (req.method === 'GET' && pathname === '/api/jobs') {
     requireSession(req);
-    sendJson(res, 200, {ok: true, jobs: jobsList(db), worker: worker.status()});
+    sendJson(res, 200, {ok: true, jobs: jobsList(db), worker: worker.status(), scheduler: autoRechargeScheduler.getState()});
     return;
   }
 
@@ -173,6 +196,45 @@ async function handle(req, res) {
   }
 
   throw httpError(404, 'Not found');
+}
+
+function gitOutput(args) {
+  return new Promise((resolveOutput, reject) => {
+    execFile('git', args, {
+      cwd: ROOT_DIR,
+      timeout: 2000,
+      maxBuffer: 1024 * 64,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolveOutput(String(stdout || '').trim());
+    });
+  });
+}
+
+async function repoInfo() {
+  try {
+    const [branch, updatedAt, shortSha] = await Promise.all([
+      gitOutput(['rev-parse', '--abbrev-ref', 'HEAD']),
+      gitOutput(['log', '-1', '--format=%cI']),
+      gitOutput(['rev-parse', '--short', 'HEAD']),
+    ]);
+    return {
+      branch,
+      updatedAt,
+      shortSha,
+    };
+  } catch (error) {
+    // Git 信息只用于页面展示；读取失败不能影响充值执行器主体功能。
+    return {
+      branch: 'unknown',
+      updatedAt: '',
+      shortSha: '',
+      error: redact(error.message || 'git info unavailable'),
+    };
+  }
 }
 
 async function serveStatic(res, pathname) {

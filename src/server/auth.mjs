@@ -10,7 +10,7 @@ export function sessionPayload() {
     integrations: {
       opomWritebackConfigured: !!(
         (process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE)
-        && process.env.OPOM_RECHARGE_TOKEN
+        && (process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN)
       ),
     },
   };

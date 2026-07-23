@@ -118,10 +118,12 @@ export async function createJob(db, payload) {
     INSERT INTO job_rows (
       id, job_id, row_number, raw_index, profile_id, opom_account_id,
       username_masked, login_email_masked, ads_power_user_id, ads_power_serial_number,
-      ads_match_status, ejh_order_no, card_no, card_last4, purchase_plan, amount,
+      ads_match_status, ejh_order_no, card_no, card_last4, card_provider, card_type,
+      expires_at, purchase_plan, amount,
       status, stage, message, missing_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const jobArgs = runnerArgs(jobOptions);
   for (const row of plan.rows) {
     const item = rowInsertFromDryRun(jobId, row);
     insertRow.run(
@@ -139,6 +141,9 @@ export async function createJob(db, payload) {
       item.ejhOrderNo,
       item.cardNo,
       item.cardLast4,
+      item.cardProvider || jobArgs.cardProvider,
+      item.cardType,
+      item.cardExpiresAt,
       item.purchasePlan,
       item.amount,
       item.status,
@@ -159,9 +164,12 @@ export async function createJob(db, payload) {
         rawIndex: row.rawIndex,
         status: row.status,
         message: row.message,
-      details: {
+        details: {
           cardLast4: row.cardLast4,
           cardNo: row.cardNo,
+          cardProvider: row.cardProvider,
+          cardType: row.cardType,
+          cardExpiresAt: row.cardExpiresAt,
           opomAccountId: row.opomAccountId,
           username: row.username,
           loginEmail: row.loginEmail || row.username,
@@ -209,7 +217,9 @@ function publicOptions(options) {
     hasAdspowerApiKey: !!args.adspowerApiKey,
     opomWriteback: args.opomWriteback,
     opomBaseUrl: args.opomBaseUrl,
+    opomSecondaryBaseUrl: args.opomSecondaryBaseUrl,
     hasOpomRechargeToken: !!args.opomRechargeToken,
+    hasOpomSecondaryRechargeToken: !!args.opomSecondaryRechargeToken,
     runId: args.runId,
     adspowerStatusMode: args.adspowerStatusMode,
     hasAdspowerSuccessGroupTarget: !!(args.adspowerSuccessGroupId || args.adspowerSuccessGroupName),
@@ -274,6 +284,9 @@ export async function cancelJob(db, jobId) {
         details: {
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          cardProvider: row.card_provider,
+          cardType: row.card_type,
+          cardExpiresAt: row.expires_at,
           opomAccountId: row.opom_account_id,
           username: row.username_masked,
           loginEmail: row.login_email_masked,
@@ -335,11 +348,12 @@ function resumeRowDecision(row, includeRiskyRows = false) {
   return {action: 'skip_unsupported', reason: `unsupported status: ${row.status}`};
 }
 
-function previewRows(rows, startRowNumber, includeRiskyRows = false) {
-  const candidates = rows.filter((row) => row.row_number >= startRowNumber);
+function previewRows(rows, startRowNumber, includeRiskyRows = false, onlyRow = false) {
+  const candidates = rows.filter((row) => onlyRow ? row.row_number === startRowNumber : row.row_number >= startRowNumber);
   const output = {
     startRowNumber,
     includeRiskyRows: !!includeRiskyRows,
+    onlyRow: !!onlyRow,
     totalCandidateRows: candidates.length,
     queuedRows: [],
     alreadyQueuedRows: [],
@@ -550,7 +564,7 @@ export async function resumePreview(db, jobId, payload = {}) {
     ok: true,
     job: publicJob(getJob(db, jobId)),
     csvAvailability,
-    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows),
+    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow),
   };
 }
 
@@ -567,7 +581,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   const csvAvailability = await ensureJobCsvAvailable(job);
   if (!csvAvailability.ok) throw httpError(409, csvAvailability.reason);
   const rows = listRows(db, jobId);
-  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows);
+  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow);
   if (!rows.some((row) => row.row_number === startRowNumber)) {
     throw httpError(400, `row ${startRowNumber} does not exist in this job`);
   }
@@ -611,9 +625,10 @@ export async function resumeJob(db, jobId, payload = {}) {
       updated_at = ?
     WHERE id = ?
   `).run(now, jobId);
-  addEvent(db, jobId, 'job.resume_requested', `resume from row ${startRowNumber}`, {
+  addEvent(db, jobId, 'job.resume_requested', payload.onlyRow ? `retry row ${startRowNumber}` : `resume from row ${startRowNumber}`, {
     startRowNumber,
     includeRiskyRows: !!payload.includeRiskyRows,
+    onlyRow: !!payload.onlyRow,
     queuedRows: preview.queuedRows.map((row) => row.rowNumber),
     alreadyQueuedRows: preview.alreadyQueuedRows.map((row) => row.rowNumber),
     skippedCompletedRows: preview.skippedCompletedRows.map((row) => row.rowNumber),
@@ -631,7 +646,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   return {
     ok: true,
     csvAvailability,
-    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows}),
+    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows, onlyRow: !!payload.onlyRow}),
     ...jobDetails(db, jobId),
   };
 }
@@ -651,6 +666,9 @@ async function rewriteResumeResult(db, jobId) {
         balanceAfter: row.balance_after,
         cardLast4: row.card_last4,
         cardNo: row.card_no,
+        cardProvider: row.card_provider,
+        cardType: row.card_type,
+        cardExpiresAt: row.expires_at,
         autoTopupStatus: row.auto_topup_status,
         autoTopupThreshold: row.auto_topup_threshold,
         autoTopupAmount: row.auto_topup_amount,

@@ -1,126 +1,96 @@
-# Recharge x OPOM Production Runbook
+# Recharge x OPOM 生产运行手册
 
-This runbook is the operator checklist for taking the Recharge x OPOM
-integration from local verification to production use. It intentionally does
-not contain secrets, card numbers, CVV, cookies, session tokens, SSH passwords,
-or OPOM admin passwords.
+这份运行手册是操作员将 Recharge x OPOM 集成从本地验证推进到生产使用时的检查清单。它刻意不包含密钥、卡号、CVV、Cookie、Session Token、SSH 密码或 OPOM 管理员密码。
 
-## Scope
+## 范围
 
-Covered:
+包含：
 
-- OPOM production deployment preparation for `/api/v1/recharge/*`.
-- Recharge local runner production-readiness checks.
-- Read-only OPOM queue verification.
-- No-purchase sandbox validation.
-- Explicit authorization gates for EJH card creation, OPOM writeback,
-  AdsPower status writeback, and OpenRouter live recharge.
-- Rollback and stop points.
+- `/api/v1/recharge/*` 的 OPOM 生产部署准备。
+- Recharge 本地执行器的生产就绪检查。
+- 只读 OPOM 队列验证。
+- no-purchase 沙箱验证。
+- EJH 创建卡、OPOM 写回、AdsPower 状态写回、OpenRouter 真实充值的明确授权门。
+- 回滚和停止点。
 
-Not covered:
+不包含：
 
-- Creating OpenRouter accounts.
-- Creating OpenRouter API keys.
-- Refund or appeal workflows.
-- Bank statement reconciliation implementation changes. OPOM keeps owning bank
-  statement import, reconciliation, and customer confirmation exports.
+- 创建 OpenRouter 账号。
+- 创建 OpenRouter API Key。
+- 退款或申诉流程。
+- 银行流水对账实现变更。银行流水导入、对账和客户确认导出仍由 OPOM 负责。
 
-## Authorization Gates
+## 授权门
 
-Do not proceed past these gates without explicit user approval in the current
-task:
+没有当前任务中的用户明确授权，不得越过以下门槛继续操作：
 
-1. `git push`.
-2. OPOM production deployment.
-3. Editing OPOM production `.env`.
-4. Running OPOM production `db:push`.
-5. Any OPOM production write API call beyond the documented read-only queue
-   check.
-6. Real EJH card creation.
-7. OpenRouter live purchase submission.
-8. Any future AdsPower status writeback through `group_move`, `remark_append`,
-   `remark_append_v2`, or a native AdsPower tag API. This gate is waived for
-   the current launch unless the user explicitly re-enables AdsPower writes.
+1. `git push`。
+2. OPOM 生产部署。
+3. 修改 OPOM 生产 `.env`。
+4. 运行 OPOM 生产 `db:push`。
+5. 除文档化只读队列检查之外的任何 OPOM 生产写 API 调用。
+6. 真实 EJH 创建卡。
+7. OpenRouter 真实付款提交。
+8. 未来任何通过 `group_move`、`remark_append`、`remark_append_v2` 或 AdsPower 原生标签 API 进行的 AdsPower 状态写回。除非用户明确重新启用 AdsPower 写入，否则当前发布默认豁免该门槛。
 
-## Local Release Gate
+## 本地发布门
 
-Run from `/Users/weiwei/project/Auto-Purchase-for-OR` while the local Recharge
-server is running:
+本地 Recharge server 运行时，在 `/Users/weiwei/project/Auto-Purchase-for-OR` 下执行：
 
 ```bash
 npm run verify:integration -- --base http://127.0.0.1:4100
 ```
 
-This must pass before any production action. It verifies Recharge API/UI smoke,
-Feishu result CSV handoff, goal readiness audit, launch checklist, sensitive
-static audit, syntax checks, all Recharge tests, OPOM temporary-SQLite
-`db:push`, OPOM production build, OPOM typecheck, OPOM lint, OPOM Recharge
-route/import/migration tests, and whitespace checks.
+任何生产动作之前必须通过该检查。它会验证 Recharge API/UI smoke、Feishu result CSV handoff、目标就绪审计、发布清单、敏感信息静态审计、语法检查、全部 Recharge 测试、OPOM 临时 SQLite `db:push`、OPOM 生产构建、OPOM typecheck、OPOM lint、OPOM Recharge 路由/导入/迁移测试和空白字符检查。
 
-The normal readiness audit can pass with pending manual or external items. To
-prove the full objective is complete rather than merely locally ready, run:
+普通就绪审计可以在仍存在人工或外部待办项时通过。如果要证明完整目标已经完成，而不仅是本地就绪，请运行：
 
 ```bash
 npm run audit:completion
 ```
 
-This stricter gate intentionally fails until all pending authorization,
-operator, OPOM production deployment/read-verification, and external AdsPower
-status-writeback items have been resolved. OPOM production verification is
-marked complete only when the verification environment provides
-either a recent preflight marker from a successful read-only OPOM queue read or
-the shell-only marker variables
-`OPOM_PRODUCTION_RECHARGE_API_VERIFIED=true` and
-`OPOM_PRODUCTION_PREFLIGHT_PASSED_AT` together with an OPOM production base URL
-and recharge API token.
+这个更严格的门槛会刻意失败，直到所有待授权项、操作员项、OPOM 生产部署/读取验证项以及外部 AdsPower 状态写回项都已解决。只有验证环境提供了以下任一信息时，OPOM 生产验证才会被标记为完成：来自成功只读 OPOM 队列读取的近期 preflight marker，或者 shell-only marker 变量 `OPOM_PRODUCTION_RECHARGE_API_VERIFIED=true` 和 `OPOM_PRODUCTION_PREFLIGHT_PASSED_AT`，并同时提供 OPOM 生产 base URL 和 recharge API token。
 
-For a concise machine-readable launch summary:
+如需简洁的机器可读发布摘要：
 
 ```bash
 npm run checklist:launch
 npm run checklist:launch -- --json
 ```
 
-The checklist is read-only. It summarizes the readiness audit, remaining
-pending items, required commands, explicit authorization gates, and the first
-operational sequence.
+该清单是只读的。它汇总就绪审计、剩余待办项、必需命令、明确授权门和第一轮操作顺序。
 
-If the Recharge server is not running, start it locally only in this project:
+如果 Recharge server 未运行，只在本项目内本地启动：
 
 ```bash
 PORT=4100 npm start
 ```
 
-Do not start the OPOM local service for this release path.
+不要为了这条发布路径启动 OPOM 本地服务。
 
-## OPOM Production Deployment Checklist
+## OPOM 生产部署清单
 
-Use the OPOM production convention from
-`/Users/weiwei/project/manager-openrouter/AGENTS.md`:
+使用 `/Users/weiwei/project/manager-openrouter/AGENTS.md` 中的 OPOM 生产约定：
 
-- Production URL: configure through `OPOM_BASE_URL`.
-- Server: use the operator-approved OPOM production SSH host.
-- Persistent checkout: `~/manager-openrouter/repo`.
-- Shared runtime data: `~/manager-openrouter/shared`.
-- Production `.env`: `~/manager-openrouter/shared/.env`.
-- Production SQLite DB: `~/manager-openrouter/shared/dev.db`.
-- Deploy script: `~/manager-openrouter/deploy.sh`.
+- 生产 URL：通过 `OPOM_BASE_URL` 配置。
+- 服务器：使用操作员批准的 OPOM 生产 SSH 主机。
+- 持久 checkout：`~/manager-openrouter/repo`。
+- 共享运行时数据：`~/manager-openrouter/shared`。
+- 生产 `.env`：`~/manager-openrouter/shared/.env`。
+- 生产 SQLite DB：`~/manager-openrouter/shared/dev.db`。
+- 部署脚本：`~/manager-openrouter/deploy.sh`。
 
-Before deployment:
+部署前：
 
-1. Confirm the local OPOM tree contains only intended Recharge integration
-   changes.
-2. Confirm local OPOM checks passed through `npm run verify:integration`.
-3. Commit and push only after explicit authorization.
-4. On the server, back up `~/manager-openrouter/shared/.env` and
-   `~/manager-openrouter/shared/dev.db`.
-5. Add `RECHARGE_API_TOKEN` to `~/manager-openrouter/shared/.env` through a
-   secure channel. Do not paste it into logs or Git-tracked files.
-6. Run `~/manager-openrouter/deploy.sh` only after push/deploy authorization.
-7. Confirm the deployment preserved the shared `.env` and shared SQLite DB
-   symlink/paths.
+1. 确认本地 OPOM 目录只包含预期的 Recharge 集成改动。
+2. 确认本地 OPOM 检查已通过 `npm run verify:integration`。
+3. 只有获得明确授权后才 commit 和 push。
+4. 在服务器上备份 `~/manager-openrouter/shared/.env` 和 `~/manager-openrouter/shared/dev.db`。
+5. 通过安全渠道把 `RECHARGE_API_TOKEN` 加入 `~/manager-openrouter/shared/.env`。不要把它粘贴进日志或 Git 跟踪文件。
+6. 只有获得 push/deploy 授权后才运行 `~/manager-openrouter/deploy.sh`。
+7. 确认部署保留了共享 `.env` 和共享 SQLite DB 的 symlink/路径。
 
-After deployment, run on the OPOM server or through the deployment shell:
+部署后，在 OPOM 服务器或部署 shell 中运行：
 
 ```bash
 cd ~/manager-openrouter/repo
@@ -132,13 +102,11 @@ npm run lint
 npm test -- test/recharge-api-routes.test.ts test/admin-routes.test.ts test/setup-db-migration.test.ts
 ```
 
-`scripts/setup-db.mjs` should add `Account.adsPowerUserId` and
-`Account.adsPowerSerialNumber` incrementally. It must not replace production
-account data.
+`scripts/setup-db.mjs` 应该增量添加 `Account.adsPowerUserId` 和 `Account.adsPowerSerialNumber`。它不得替换生产账号数据。
 
-## Read-Only Production Verification
+## 只读生产验证
 
-From the Recharge local runner machine:
+在 Recharge 本地执行器机器上运行：
 
 ```bash
 export OPOM_BASE_URL="https://opom.example.internal"
@@ -146,167 +114,108 @@ export OPOM_RECHARGE_TOKEN="<from secure channel>"
 npm run preflight:production -- --with-opom-read --marker-file ./var/production-preflight-marker.json
 ```
 
-After the OPOM read check passes, use the non-sensitive marker file for the
-strict completion audit:
+OPOM 读取检查通过后，使用不含敏感信息的 marker 文件执行严格完成审计：
 
 ```bash
 npm run audit:completion -- --preflight-marker ./var/production-preflight-marker.json
 ```
 
-The marker file records only the verification timestamp, OPOM base URL, group,
-and sanitized check summaries. It must not contain the OPOM token, card numbers,
-CVV, cookies, or raw EJH diagnostic payloads.
-For one-shell verification, the environment-marker path is also supported:
+marker 文件只记录验证时间戳、OPOM base URL、分组和已清洗的检查摘要。它不得包含 OPOM token、卡号、CVV、Cookie 或 EJH 原始诊断 payload。
+
+也支持单 shell 验证的环境 marker 路径：
 
 ```bash
 export OPOM_PRODUCTION_RECHARGE_API_VERIFIED=true
 export OPOM_PRODUCTION_PREFLIGHT_PASSED_AT="<timestamp from preflight output>"
 ```
 
-This check may create a normal OPOM read audit log for
-`RECHARGE_ACCOUNTS_READ`. It must not call:
+该检查可能会为 `RECHARGE_ACCOUNTS_READ` 创建普通 OPOM 读取审计日志。它不得调用：
 
 - `PUT /api/v1/recharge/accounts/:opomAccountId/card-binding`
 - `POST /api/v1/recharge/runs/:runId/results`
-- EJH card creation
-- OpenRouter browser automation
-- AdsPower status writeback
+- EJH 创建卡
+- OpenRouter 浏览器自动化
+- AdsPower 状态写回
 
-When `ADSPOWER_STATUS_MODE=group_move`, the same preflight reads AdsPower
-`/api/v1/group/list` once and resolves exact group-name targets. It only checks
-whether the configured success/failure/blocker targets are usable; it does not
-call `/api/v1/user/regroup` or update profile remarks.
+当 `ADSPOWER_STATUS_MODE=group_move` 时，同一个 preflight 会读取一次 AdsPower `/api/v1/group/list`，并解析精确的分组名称目标。它只检查已配置的成功/失败/阻断目标是否可用；它不会调用 `/api/v1/user/regroup`，也不会更新 profile 备注。
 
-If AdsPower status writeback is explicitly re-enabled later,
-`npm run adspower:status-targets -- --json` is the matching read-only discovery
-step. It lists current AdsPower groups, resolves configured `ADSPOWER_*_GROUP_ID`
-or `ADSPOWER_*_GROUP_NAME` values, and prints suggested env exports when a
-candidate group is obvious. Prefer `name:<exact group name>` or
-`ADSPOWER_*_GROUP_NAME` for operator readability; the preflight will still
-verify that the name resolves to exactly one group before any live run can use
-it. The operator console `Discover groups` button uses the same read-only
-lookup against the current on-screen target fields, so operators can verify the
-targets without switching to a terminal. `Use discovered targets` only copies
-resolved or candidate group IDs into the local `group_move` form fields and
-forces the next execution attempt to run preflight again; it does not call
-AdsPower write endpoints.
+如果后续明确重新启用 AdsPower 状态写回，`npm run adspower:status-targets -- --json` 是对应的只读发现步骤。它会列出当前 AdsPower 分组，解析已配置的 `ADSPOWER_*_GROUP_ID` 或 `ADSPOWER_*_GROUP_NAME` 值，并在候选分组明显时打印建议的 env exports。为了操作员可读性，优先使用 `name:<exact group name>` 或 `ADSPOWER_*_GROUP_NAME`；preflight 仍会在任何 live run 使用前验证该名称只解析到一个分组。操作台的 `Discover groups` 按钮使用同样的只读查询，针对当前屏幕上的目标字段进行验证，因此操作员不需要切换到终端也能确认目标。`Use discovered targets` 只会把已解析或候选 group ID 复制到本地 `group_move` 表单字段，并强制下一次执行尝试重新运行 preflight；它不会调用 AdsPower 写端点。
 
-If a candidate CSV already exists, validate it read-only:
+如果候选 CSV 已存在，可以只读验证：
 
 ```bash
 npm run preflight:production -- --csv /path/to/recharge-candidate.csv
 ```
 
-The CSV gate rejects missing fields and raw EJH diagnostic columns such as
-`encryptedParam`, `requestPayload`, and `rawResponse`.
+CSV 门槛会拒绝缺失字段，以及 `encryptedParam`、`requestPayload`、`rawResponse` 等 EJH 原始诊断列。
 
-## First Operational Validation Sequence
+## 第一轮操作验证顺序
 
-Use this order after OPOM production read-only verification passes:
+OPOM 生产只读验证通过后，按以下顺序执行：
 
-1. Operator prepares AdsPower profiles and moves eligible OPOM accounts into
-   `group=recharge`.
-2. In Recharge, click `Load OPOM group`.
-3. Review the pending rows and OPOM health status.
-4. Click `Match AdsPower`.
-5. Enter this run's amount or balance rule, Auto top-up values, and any billing
-   address mapping CSV.
-6. Tick the execution confirmation and start the run; the console automatically
-   runs preflight first. Resolve all `missing_fields`, `identity_mismatch`, and
-   AdsPower match failures before any browser automation starts.
-7. Run no-purchase mode for one row. This may open AdsPower/OpenRouter and
-   prepare the purchase form, but it must not click final Purchase.
-8. Validate one expected `identity_mismatch` row if test data is available.
-9. Validate one expected `manual_security_blocker` row only if a safe blocker
-   scenario is available. Leave the browser open for manual inspection.
-10. After explicit authorization, create the EJH card batch and verify the safe
-    card CSV path.
-11. After explicit authorization, run one small live recharge row.
-12. Confirm the row has all completion evidence:
-    OPOM account matched, AdsPower profile matched, OpenRouter account matched,
-    new card binding written to OPOM, balance increase verified, Auto top-up
-    readback matched, result CSV generated, and AdsPower status handling
-    recorded.
-    In the result CSV, `completion_evidence_status=production_complete` is the
-    handoff signal for a real closed-loop row. `test_mode_complete` means a
-    no-purchase rehearsal only, and `incomplete` must be resolved using
-    `completion_evidence_missing`.
-    OPOM-sourced rows in confirmed purchase mode must have OPOM writeback
-    enabled before preflight can mark them executable.
+1. 操作员准备 AdsPower profiles，并将符合条件的 OPOM 账号移动到 `group=recharge`。
+2. 在 Recharge 中点击 `Load OPOM group`。
+3. 检查待处理行和 OPOM 健康状态。
+4. 点击 `Match AdsPower`。
+5. 输入本轮金额或余额规则、Auto top-up 值，以及任何 billing address 映射 CSV。
+6. 勾选执行确认并启动运行；控制台会先自动运行 preflight。任何浏览器自动化启动前，都要解决所有 `missing_fields`、`identity_mismatch` 和 AdsPower 匹配失败。
+7. 对一行运行 no-purchase mode。它可以打开 AdsPower/OpenRouter 并准备购买表单，但不得点击最终 Purchase。
+8. 如果有测试数据，验证一行预期的 `identity_mismatch`。
+9. 只有存在安全的阻断场景时，才验证一行预期的 `manual_security_blocker`。保留浏览器打开，供人工检查。
+10. 获得明确授权后，创建 EJH 卡批次，并验证 safe card CSV 路径。
+11. 获得明确授权后，运行一行小额真实充值。
+12. 确认该行拥有所有完成证据：OPOM 账号已匹配、AdsPower profile 已匹配、OpenRouter 账号已匹配、新卡绑定已写入 OPOM、余额增长已验证、Auto top-up 回读匹配、result CSV 已生成、AdsPower 状态处理已记录。
 
-## AdsPower Status Handling
+在 result CSV 中，`completion_evidence_status=production_complete` 是真实闭环行的交付信号。`test_mode_complete` 只表示 no-purchase 演练，`incomplete` 必须通过 `completion_evidence_missing` 解决。OPOM 来源行在 confirmed purchase mode 中，必须启用 OPOM writeback，preflight 才能把它们标记为可执行。
 
-Default mode is `disabled` because the user waived AdsPower status writeback
-for the current launch; result CSV records:
+## AdsPower 状态处理
+
+默认模式是 `disabled`，因为用户已为当前发布豁免 AdsPower 状态写回；result CSV 记录：
 
 ```text
 adspower_tag_status=skipped_user_waived
 adspower_status_target=waived_by_user
 ```
 
-Use `group_move`, `remark_append`, or `remark_append_v2` only with explicit
-authorization and configured group targets or remark policy. For `group_move`,
-targets can be AdsPower group ids, `id:<group_id>`, `name:<exact group name>`,
-or the `ADSPOWER_*_GROUP_NAME` environment variables; exact-name resolution
-must resolve to one group before regrouping. Treat these as operational
-markers, not native AdsPower tags. Do not claim native tag writeback until the
-official AdsPower Local API exposes a confirmed tag-write endpoint.
-Use `npm run adspower:status-targets -- --json` before production preflight
-only when AdsPower status writeback is explicitly re-enabled. It discovers
-group ids and verifies that configured target names are unambiguous; the
-command is read-only and does not call regroup or profile update endpoints.
-The result CSV records the concrete marker target in `adspower_status_target`,
-for example `group:success:<group_id>`, `group:failure:<group_id>`,
-`group:blocker:<group_id>`, `remark:v1`, or `remark:v2`.
+只有在获得明确授权并配置了分组目标或备注策略时，才使用 `group_move`、`remark_append` 或 `remark_append_v2`。对于 `group_move`，目标可以是 AdsPower group id、`id:<group_id>`、`name:<exact group name>` 或 `ADSPOWER_*_GROUP_NAME` 环境变量；按精确名称解析时，必须解析到一个分组后才能 regroup。把这些视为操作标记，而不是 AdsPower 原生标签。在官方 AdsPower Local API 暴露已确认的标签写入端点前，不要声称支持原生标签写回。
 
-## Rollback
+只有在明确重新启用 AdsPower 状态写回时，才在生产 preflight 前使用 `npm run adspower:status-targets -- --json`。它会发现 group id，并验证已配置目标名称没有歧义；该命令是只读的，不会调用 regroup 或 profile update 端点。result CSV 会在 `adspower_status_target` 中记录具体标记目标，例如 `group:success:<group_id>`、`group:failure:<group_id>`、`group:blocker:<group_id>`、`remark:v1` 或 `remark:v2`。
 
-If OPOM deployment fails before `db:push`:
+## 回滚
 
-1. Stop and do not run writeback or live recharge.
-2. Re-run the previous deployed revision through the server deploy mechanism or
-   restore the previous release according to OPOM operations practice.
-3. Preserve logs and the failed build output.
+如果 OPOM 部署在 `db:push` 前失败：
 
-If OPOM deployment fails after `db:push`:
+1. 停止，不要运行 writeback 或 live recharge。
+2. 通过服务器部署机制重新运行上一个已部署版本，或按照 OPOM 运维实践恢复上一个发布。
+3. 保留日志和失败构建输出。
 
-1. Stop Recharge operations.
-2. Preserve `~/manager-openrouter/shared/dev.db`.
-3. Restore the pre-deploy SQLite backup only after explicit user approval.
-4. Restore the pre-deploy `.env` backup if `RECHARGE_API_TOKEN` or other
-   environment changes need to be removed.
-5. Re-run OPOM read-only health checks before resuming.
+如果 OPOM 部署在 `db:push` 后失败：
 
-If Recharge live execution fails:
+1. 停止 Recharge 操作。
+2. 保留 `~/manager-openrouter/shared/dev.db`。
+3. 只有在获得用户明确授权后，才恢复部署前的 SQLite 备份。
+4. 如果需要移除 `RECHARGE_API_TOKEN` 或其他环境变更，则恢复部署前的 `.env` 备份。
+5. 恢复前重新运行 OPOM 只读健康检查。
 
-1. Do not retry the same card after `payment_issue_card_declined`.
-2. Stop the batch on `manual_security_blocker` and keep the browser state for
-   manual inspection.
-3. Use the generated result CSV and OPOM run-result audit to identify rows for
-   manual handling.
-4. Do not infer completion from old invoices, old transactions, Feishu manual
-   state, or OPOM planning state.
+如果 Recharge live execution 失败：
 
-## Completion Criteria
+1. 出现 `payment_issue_card_declined` 后，不要重试同一张卡。
+2. 出现 `manual_security_blocker` 时停止批次，并保留浏览器状态供人工检查。
+3. 使用生成的 result CSV 和 OPOM run-result audit 识别需要人工处理的行。
+4. 不要从旧 invoice、旧交易、Feishu 手工状态或 OPOM 计划状态推断完成。
 
-The integration is production-complete only when every required row can prove:
+## 完成标准
 
-- OPOM account, AdsPower profile, and OpenRouter login identity match.
-- EJH card allocation has an `orderNo` and only safe card CSV fields are used in
-  normal handoff.
-- OpenRouter payment card is replaced or bound.
-- Billing address is present when required.
-- Validation purchase balance increase is verified.
-- Auto top-up threshold and amount are read back and match the requested values.
-- OPOM-sourced confirmed purchase rows were executed with OPOM writeback
-  enabled.
-- OPOM card binding writeback succeeds.
-- OPOM row result writeback succeeds.
-- Result CSV is generated without CVV, cookies, sessions, tokens, AK,
-  or raw EJH diagnostic payloads.
-- AdsPower status writeback is either explicitly waived with
-  `adspower_tag_status=skipped_user_waived` and
-  `adspower_status_target=waived_by_user`, or written through an explicitly
-  authorized operational mode (`group_move`, `remark_append`, or
-  `remark_append_v2`) with the concrete `adspower_status_target` visible in the
-  result CSV.
+只有每个必需行都能证明以下事项时，集成才算生产完成：
+
+- OPOM 账号、AdsPower profile 和 OpenRouter 登录身份匹配。
+- EJH 卡分配具有 `orderNo`，普通交付中只使用 safe card CSV 字段。
+- OpenRouter 付款卡已替换或绑定。
+- 需要时 billing address 存在。
+- 验证付款的余额增长已确认。
+- Auto top-up 阈值和金额已回读，并与请求值一致。
+- OPOM 来源的 confirmed purchase 行执行时已启用 OPOM writeback。
+- OPOM card binding writeback 成功。
+- OPOM row result writeback 成功。
+- Result CSV 已生成，且不包含 CVV、Cookie、Session、Token、AK 或 EJH 原始诊断 payload。
+- AdsPower 状态写回要么明确豁免，并带有 `adspower_tag_status=skipped_user_waived` 和 `adspower_status_target=waived_by_user`，要么通过明确授权的操作模式（`group_move`、`remark_append` 或 `remark_append_v2`）写入，并且具体 `adspower_status_target` 在 result CSV 中可见。

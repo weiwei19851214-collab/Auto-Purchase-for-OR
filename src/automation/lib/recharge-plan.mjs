@@ -1,5 +1,5 @@
 import {cardLast4, normalizeExpiry, normalizeMoneyValue, redact} from './common.mjs';
-import {setCell} from './csv.mjs';
+import {rowObject, setCell} from './csv.mjs';
 
 export function loginEmail(row) {
   return String(row.login_email || row.username || '').trim();
@@ -10,15 +10,38 @@ export function adsPowerSerialNumber(row) {
 }
 
 export function adsPowerUserId(row) {
-  return String(row.ads_power_user_id || row.profile_id || '').trim();
+  return String(row.ads_power_user_id || row.adsPowerUserId || row.adsPowerId || row.ads_power_id || row.adspower_id || row.user_id || row.userId || row.profile_id || '').trim();
 }
 
 export function profileDisplayId(row) {
-  return adsPowerSerialNumber(row) || adsPowerUserId(row);
+  return adsPowerUserId(row) || adsPowerSerialNumber(row);
+}
+
+export function adsPowerProfileIdentifier(row) {
+  const userId = adsPowerUserId(row);
+  const serialNumber = adsPowerSerialNumber(row);
+  return {
+    userId,
+    serialNumber,
+    value: userId || serialNumber,
+    source: userId ? 'user_id' : (serialNumber ? 'serial_number' : ''),
+  };
 }
 
 export function cardNumber(row) {
   return String(row.card_number || row.card_no || '').trim();
+}
+
+export function cardProvider(row) {
+  return String(row.card_provider || row.cardProvider || '').trim();
+}
+
+export function cardType(row) {
+  return String(row.card_type || row.cardType || row.card_product || row.cardProduct || '').trim();
+}
+
+export function cardExpiresAt(row) {
+  return String(row.expires_at || row.validityDate || row.validity_date || row.expiry || row.expires || '').trim();
 }
 
 export function ejhOrderNo(row) {
@@ -35,6 +58,27 @@ export function adsMatchStatus(row) {
 
 export function opomHealthStatus(row) {
   return String(row.opom_health_status || '').trim().toLowerCase();
+}
+
+export function opomCardStatus(row) {
+  return String(row.opom_card_status || row.card_status || row.cardStatus || row.bank_card_status || row.bankCardStatus || '').trim();
+}
+
+const HEALTHY_OPOM_STATUSES = new Set(['ok', 'local_selector', 'completed']);
+const ACTIVE_CARD_STATUSES = new Set(['active', '激活', '1']);
+
+export function isHealthyOpomStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  // Some compatible OPOM deployments report an eligible account as
+  // "completed". The queue filter has already selected it for recharge;
+  // do not turn that healthy status into a local preflight blocker.
+  return !status || HEALTHY_OPOM_STATUSES.has(status);
+}
+
+export function inactiveOpomCardStatus(row) {
+  const status = opomCardStatus(row);
+  if (!status) return '';
+  return ACTIVE_CARD_STATUSES.has(status.toLowerCase()) ? '' : status;
 }
 
 export function requiredColumns() {
@@ -75,9 +119,12 @@ export function resultColumns() {
     'login_email',
     'ads_power_user_id',
     'ads_power_serial_number',
+    'opom_account_status',
     'opom_health_status',
     'opom_health_reason',
+    'opom_card_status',
     'ads_match_status',
+    'ads_match_waived',
     'ejh_order_no',
     'cardno',
     'opom_card_writeback_status',
@@ -100,6 +147,7 @@ export function isEligible(row) {
 }
 
 export function autoTopupPlan(row, args) {
+  if (args.autoTopupEnableOnly) return {threshold: '', amount: '', missing: [], preserveRules: true};
   const threshold = normalizeMoneyValue(args.autoTopupThreshold || row.auto_topup_threshold || '');
   const amount = normalizeMoneyValue(args.autoTopupAmount || row.auto_topup_amount || '');
   const missing = [];
@@ -109,29 +157,32 @@ export function autoTopupPlan(row, args) {
 }
 
 export function purchasePlan(row) {
-  const thresholdRaw = row.balance_threshold || '';
-  const belowRaw = row.amount_below_threshold || '';
-  const atOrAboveRaw = row.amount_at_or_above_threshold || '';
+  const thresholdRaw = row.balance_threshold ?? '';
+  const belowRaw = row.amount_below_threshold ?? '';
+  const atOrAboveRaw = row.amount_at_or_above_threshold ?? '';
   const anyRule = !!(thresholdRaw || belowRaw || atOrAboveRaw);
-  const allRule = !!(thresholdRaw && belowRaw && atOrAboveRaw);
-  if (allRule) {
+  const completeRule = !!(thresholdRaw && belowRaw);
+  if (completeRule) {
+    const belowAmount = normalizeMoneyValue(belowRaw);
+    const atOrAboveAmount = normalizeOptionalPurchaseAmount(atOrAboveRaw);
     return {
       purchase: {
         confirmed: true,
         rule: {
           threshold: normalizeMoneyValue(thresholdRaw),
-          belowAmount: normalizeMoneyValue(belowRaw),
-          atOrAboveAmount: normalizeMoneyValue(atOrAboveRaw),
+          // 第二、三字段均为固定充值金额；第三字段留空或为 0 时，高余额分支跳过充值。
+          belowAmount,
+          atOrAboveAmount,
         },
       },
       missing: [],
-      mode: 'balance_rule',
+      mode: 'balance_threshold_amounts',
     };
   }
   if (anyRule) {
     return {
       purchase: {confirmed: true},
-      missing: ['balance_threshold', 'amount_below_threshold', 'amount_at_or_above_threshold'].filter((key) => !row[key]),
+      missing: ['balance_threshold', 'amount_below_threshold'].filter((key) => !row[key]),
       mode: 'incomplete_balance_rule',
     };
   }
@@ -141,6 +192,14 @@ export function purchasePlan(row) {
     missing: amount ? [] : ['amount'],
     mode: 'fixed_amount',
   };
+}
+
+function normalizeOptionalPurchaseAmount(value) {
+  const cleaned = String(value ?? '').replace(/[$,\s]/g, '');
+  if (!cleaned) return '';
+  const amount = Number(cleaned);
+  if (amount === 0) return '';
+  return normalizeMoneyValue(cleaned);
 }
 
 export function safePurchasePlan(row) {
@@ -199,8 +258,8 @@ export function validateRow(row, args) {
   const missing = validateScope(args);
   const scope = executionScope(args);
   if (!adsPowerSerialNumber(row) && !adsPowerUserId(row)) missing.push('ads_power_user_id_or_serial_number');
-  if (adsMatchStatus(row) && adsMatchStatus(row) !== 'matched') missing.push(`ads_match_status:${adsMatchStatus(row)}`);
-  if (opomHealthStatus(row) && !['ok', 'local_selector'].includes(opomHealthStatus(row))) missing.push(`opom_health_status:${opomHealthStatus(row)}`);
+  if (!args.skipAdsPowerMatch && adsMatchStatus(row) && adsMatchStatus(row) !== 'matched') missing.push(`ads_match_status:${adsMatchStatus(row)}`);
+  if (!isHealthyOpomStatus(opomHealthStatus(row))) missing.push(`opom_health_status:${opomHealthStatus(row)}`);
   if (!loginEmail(row)) missing.push('login_email');
   if (scope.paymentMethod) {
     if (!cardNumber(row)) missing.push('card_number');
@@ -214,10 +273,7 @@ export function validateRow(row, args) {
   if (scope.purchase) {
     missing.push(...safePurchasePlan(row).missing);
   }
-  if (opomAccountId(row) && scope.purchase && args.confirmPurchase !== false && !args.opomWriteback) {
-    missing.push('opom_writeback');
-  }
-  if (args.opomWriteback && scope.purchase && args.confirmPurchase !== false) {
+  if (args.opomWriteback && scope.purchase && scope.paymentMethod && args.confirmPurchase !== false) {
     if (!ejhOrderNo(row)) missing.push('order_no');
     if (!cardNumber(row)) missing.push('card_number');
     if (!row.exp_month) missing.push('exp_month');
@@ -246,8 +302,41 @@ export function buildClosedLoopTask(row, args) {
     billingAddressOnly,
     autoTopupOnly,
     purchaseOnly,
-    autoTopup: {enabled: scope.autoTopup, threshold: autoTopup.threshold, amount: autoTopup.amount},
+    autoTopup: {
+      enabled: scope.autoTopup,
+      preserveRules: !!args.autoTopupEnableOnly,
+      threshold: autoTopup.threshold,
+      amount: autoTopup.amount,
+    },
     purchase,
+    opom: args.opomWriteback ? {
+      enabled: true,
+      opomBaseUrl: args.opomBaseUrl || '',
+      opomRechargeToken: args.opomRechargeToken || '',
+      opomSecondaryBaseUrl: args.opomSecondaryBaseUrl || '',
+      opomSecondaryRechargeToken: args.opomSecondaryRechargeToken || '',
+      opomRequestTimeoutMs: args.opomRequestTimeoutMs || '',
+      opomRequestRetries: args.opomRequestRetries || '',
+      opomWritebackRetries: args.opomWritebackRetries || '',
+      opomRetryDelayMs: args.opomRetryDelayMs || '',
+      runId: args.runId || '',
+      row: {
+        opom_account_id: opomAccountId(row),
+        login_email: loginEmail(row),
+        ads_power_user_id: adsPowerUserId(row),
+        ads_power_serial_number: adsPowerSerialNumber(row),
+        ads_match_status: adsMatchStatus(row) || '',
+        ejh_order_no: ejhOrderNo(row),
+        order_no: ejhOrderNo(row),
+        card_no: cardNumber(row),
+        exp_month: row.exp_month,
+        exp_year: row.exp_year,
+        expires_at: cardExpiresAt(row),
+        card_provider: args.cardProvider || cardProvider(row) || '',
+        card_type: cardType(row),
+        cvv_present: !!row.cvv,
+      },
+    } : {enabled: false},
     card: {
       number: cardNumber(row),
       expMonth: row.exp_month,
@@ -277,12 +366,17 @@ export function baseRowResult(rowNumber, row) {
     username: loginEmail(row),
     adsPowerUserId: adsPowerUserId(row),
     adsPowerSerialNumber: adsPowerSerialNumber(row),
+    opomAccountStatus: String(row.opom_account_status || '').trim(),
     adsMatchStatus: adsMatchStatus(row) || '',
     ejhOrderNo: ejhOrderNo(row),
     purchasePlan: safePurchasePlan(row).mode,
     amount: row.amount || '',
     cardNo: cardNumber(row),
     cardLast4: cardLast4(cardNumber(row)),
+    cardProvider: cardProvider(row),
+    cardType: cardType(row),
+    cardExpiresAt: cardExpiresAt(row),
+    opomCardStatus: opomCardStatus(row),
   };
 }
 
@@ -290,6 +384,7 @@ export function dryRunResult(rowNumber, row, args) {
   const missing = validateRow(row, args);
   return {
     ...baseRowResult(rowNumber, row),
+    cardProvider: args.cardProvider || cardProvider(row) || '',
     executionScope: scopeSummary(args),
     autoTopup: executionScope(args).autoTopup ? safeAutoTopupPlan(row, args) : {threshold: '', amount: '', skipped: true},
     ready: missing.length === 0,
@@ -305,11 +400,16 @@ export function rowMetadata(row, extra = {}) {
     loginEmailMasked: loginEmail(row),
     adsPowerUserId: adsPowerUserId(row),
     adsPowerSerialNumber: adsPowerSerialNumber(row),
+    opomAccountStatus: extra.opomAccountStatus || String(row.opom_account_status || '').trim(),
     opomHealthStatus: extra.opomHealthStatus || opomHealthStatus(row) || '',
     opomHealthReason: extra.opomHealthReason || row.opom_health_reason || '',
-    adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerSerialNumber(row) || adsPowerUserId(row) ? 'not_verified' : ''),
+    opomCardStatus: extra.opomCardStatus || opomCardStatus(row) || '',
+    adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerUserId(row) || adsPowerSerialNumber(row) ? 'not_verified' : ''),
     ejhOrderNo: ejhOrderNo(row),
     cardNo: extra.cardNo || cardNumber(row),
+    cardProvider: extra.cardProvider || cardProvider(row),
+    cardType: extra.cardType || cardType(row),
+    cardExpiresAt: extra.cardExpiresAt || cardExpiresAt(row),
     opomCardWritebackStatus: extra.opomCardWritebackStatus || '',
     opomResultWritebackStatus: extra.opomResultWritebackStatus || '',
     adspowerTagStatus: extra.adspowerTagStatus || 'skipped_user_waived',
@@ -340,6 +440,9 @@ export function completionEvidence(status, details = {}) {
   if (purchaseStatus === 'skipped') {
     return {status: 'scope_complete_without_purchase', missing: ['purchase_not_in_scope']};
   }
+  if (purchaseStatus === 'skipped_by_balance_rule') {
+    return {status: 'purchase_skipped_by_balance_rule', missing: []};
+  }
 
   const missing = [];
   if (purchaseStatus !== 'verified') missing.push('purchase_status');
@@ -362,11 +465,15 @@ export function completionEvidence(status, details = {}) {
     missing.push('adspower_status_target');
   }
 
-  if (detailValue(details, 'opomAccountId')) {
-    if (detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
-    missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
-    if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
-    if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
+  if (detailValue(details, 'opomAccountId') && detailValue(details, 'opomWritebackEnabled') !== 'false') {
+    const adsMatchWaived = detailValue(details, 'adsMatchWaived') === 'true';
+    if (!adsMatchWaived && detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
+    if (detailValue(details, 'opomWritebackMode') === 'card_binding') {
+      missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
+      if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
+    } else {
+      if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
+    }
   }
 
   return {
@@ -383,7 +490,13 @@ export function successDetails(row, result, args) {
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
     ...rowMetadata(row),
-    purchaseStatus: scope.purchase ? (verification.verified ? 'verified' : 'purchase_unverified') : 'skipped',
+    adsMatchWaived: String(Boolean(args.skipAdsPowerMatch)),
+    executionScope: scopeSummary(args),
+    opomWritebackEnabled: String(Boolean(args.opomWriteback)),
+    opomWritebackMode: args.opomWriteback ? 'result' : 'disabled',
+    purchaseStatus: scope.purchase
+      ? (purchase.skippedByRule ? 'skipped_by_balance_rule' : (verification.verified ? 'verified' : 'purchase_unverified'))
+      : 'skipped',
     purchaseAmount: purchase.amount || purchase.ruleDecision?.selectedAmount || '',
     balanceBefore: verification.beforeBalance ?? purchase.beforeBalance?.balance ?? '',
     balanceAfter: verification.afterBalance ?? '',
@@ -393,6 +506,8 @@ export function successDetails(row, result, args) {
       : 'skipped',
     autoTopupThreshold: requestedAutoTopup.threshold || '',
     autoTopupAmount: requestedAutoTopup.amount || '',
+    opomCardWritebackStatus: result.opomCardWriteback?.cardStatus || result.opomCardWritebackStatus || (args.opomWriteback ? '' : 'skipped_user_disabled'),
+    opomResultWritebackStatus: result.opomCardWriteback?.resultStatus || result.opomResultWritebackStatus || (args.opomWriteback ? '' : 'skipped_user_disabled'),
   };
 }
 
@@ -413,11 +528,15 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'opom_account_id', details.opomAccountId || '');
   setCell(header, row, 'username', details.username || details.loginEmail || details.loginEmailMasked || '');
   setCell(header, row, 'login_email', details.loginEmail || details.username || details.loginEmailMasked || '');
-  setCell(header, row, 'ads_power_user_id', details.adsPowerUserId || '');
-  setCell(header, row, 'ads_power_serial_number', details.adsPowerSerialNumber || '');
+  const existing = rowObject(header, row);
+  setCell(header, row, 'ads_power_user_id', details.adsPowerUserId || adsPowerUserId(existing) || '');
+  setCell(header, row, 'ads_power_serial_number', details.adsPowerSerialNumber || adsPowerSerialNumber(existing) || '');
+  setCell(header, row, 'opom_account_status', details.opomAccountStatus || existing.opom_account_status || '');
   setCell(header, row, 'opom_health_status', details.opomHealthStatus || '');
   setCell(header, row, 'opom_health_reason', details.opomHealthReason || '');
+  setCell(header, row, 'opom_card_status', details.opomCardStatus || existing.opom_card_status || '');
   setCell(header, row, 'ads_match_status', details.adsMatchStatus || '');
+  setCell(header, row, 'ads_match_waived', details.adsMatchWaived || 'false');
   setCell(header, row, 'ejh_order_no', details.ejhOrderNo || '');
   setCell(header, row, 'cardno', details.cardNo || '');
   setCell(header, row, 'opom_card_writeback_status', details.opomCardWritebackStatus || '');

@@ -146,7 +146,14 @@ export class JobWorker {
     const heartbeat = this.startRowHeartbeat(job, row);
     let result;
     try {
-      result = await this.executeRowFn(csvText, row.raw_index, options);
+      result = await this.executeRowFn(csvText, row.raw_index, {
+        ...options,
+        runtimeLog: {
+          jobId: job.id,
+          rowId: row.id,
+          rowNumber: row.row_number,
+        },
+      });
     } catch (error) {
       result = this.resultFromUnexpectedRowError(error, row);
       await this.writeUnexpectedRowOpomResult(row, result, options);
@@ -172,8 +179,13 @@ export class JobWorker {
         UPDATE job_rows
         SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
           balance_before = ?, balance_after = ?,
+          ads_power_user_id = COALESCE(NULLIF(?, ''), ads_power_user_id),
+          ads_power_serial_number = COALESCE(NULLIF(?, ''), ads_power_serial_number),
           card_no = COALESCE(NULLIF(?, ''), card_no),
           card_last4 = COALESCE(NULLIF(?, ''), card_last4),
+          card_provider = COALESCE(NULLIF(?, ''), card_provider),
+          card_type = COALESCE(NULLIF(?, ''), card_type),
+          expires_at = COALESCE(NULLIF(?, ''), expires_at),
           auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
           opom_card_writeback_status = COALESCE(NULLIF(?, ''), opom_card_writeback_status),
           opom_result_writeback_status = COALESCE(NULLIF(?, ''), opom_result_writeback_status),
@@ -191,8 +203,13 @@ export class JobWorker {
         result.details?.purchaseAmount || '',
         String(result.details?.balanceBefore ?? ''),
         String(result.details?.balanceAfter ?? ''),
+        result.details?.adsPowerUserId || row.ads_power_user_id || '',
+        result.details?.adsPowerSerialNumber || row.ads_power_serial_number || '',
         result.details?.cardNo || '',
         result.details?.cardLast4 || '',
+        row.card_provider || result.details?.cardProvider || '',
+        result.details?.cardType || row.card_type || '',
+        result.details?.cardExpiresAt || row.expires_at || '',
         result.details?.autoTopupStatus || '',
         result.details?.autoTopupThreshold || '',
         result.details?.autoTopupAmount || '',
@@ -209,6 +226,7 @@ export class JobWorker {
       addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
         status: result.status,
         stage: result.stage,
+        logDir: result.details?.automationLogDir || '',
         profileStop: result.profileStop,
         adsPowerStatus,
       }, row.id);

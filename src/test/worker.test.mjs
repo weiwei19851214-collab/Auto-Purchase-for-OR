@@ -310,6 +310,52 @@ test('worker writes AdsPower status through injected fetch after row completion'
   }
 });
 
+test('worker lazily updates AdsPower user id and serial number from row outcome details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-adspower-lazy-id-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const csv = `status,login_email,ads_power_serial_number,ads_match_status,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
+,first@example.com,1415,matched,10,5257970000000001,06,28,456,97001,2,25
+`;
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: csv});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: csv,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async () => ({
+        status: 'completed',
+        stage: 'closed_loop.complete',
+        message: 'completed',
+        details: {
+          adsPowerUserId: 'profile_lazy_1',
+          adsPowerSerialNumber: '1415',
+          purchaseStatus: 'verified',
+          purchaseAmount: '10',
+          balanceBefore: '20',
+          balanceAfter: '30',
+          cardLast4: '0001',
+          autoTopupStatus: 'updated',
+          autoTopupThreshold: '2',
+          autoTopupAmount: '25',
+        },
+        safeToContinue: true,
+        stopProfile: true,
+        profileStop: {attempted: false},
+      }),
+    });
+
+    await worker.runJob(created.job.id);
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].adsPowerUserId, 'profile_lazy_1');
+    assert.equal(details.rows[0].adsPowerSerialNumber, '1415');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('recovery blocks interrupted running work and rewrites sanitized result CSV', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-recovery-'));
   try {

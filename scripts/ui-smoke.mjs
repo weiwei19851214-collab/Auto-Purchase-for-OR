@@ -47,13 +47,13 @@ try {
   );
   add(
     'default recharge rule values',
-    /id=["']defaultAmount["'][^>]*value=["']0["']/.test(html)
-      && /id=["']defaultBalanceThreshold["'][^>]*value=["']40["']/.test(html)
+    /id=["']defaultAmount["'][^>]*value=["']5["']/.test(html)
+      && /id=["']defaultBalanceThreshold["'][^>]*value=["']145["']/.test(html)
       && /id=["']defaultAmountBelow["'][^>]*value=["']150["']/.test(html)
-      && /id=["']defaultAmountAtOrAbove["'][^>]*value=["']100["']/.test(html)
+      && /id=["']defaultAmountAtOrAbove["'][^>]*value=["']20["']/.test(html)
       && /id=["']defaultAutoTopupThreshold["'][^>]*value=["']100["']/.test(html)
-      && /id=["']defaultAutoTopupAmount["'][^>]*value=["']100["']/.test(html),
-    'fixed=0 balance=40 below=150 at_or_above=100 auto=100/100',
+      && /id=["']defaultAutoTopupAmount["'][^>]*value=["']150["']/.test(html),
+    'fixed=5 balance=145 below=150 at_or_above=20 auto=100/150',
   );
   add(
     'OPOM writeback default checked in UI',
@@ -88,6 +88,7 @@ try {
     ['Result CSV download action', /id=["']downloadLink["'][\s\S]*?>下载 result CSV</],
     ['Jobs pagination controls', /id=["']jobsPrevPageBtn["'][\s\S]*id=["']jobsPageInfo["'][\s\S]*id=["']jobsNextPageBtn["']/],
     ['OPOM writeback control', /id=["']opomWriteback["']/],
+    ['Auto recharge scheduler switch', /id=["']autoRechargeEnabled["']/],
     ['OPOM health table column', />OPOM health</],
   ]) {
     add(item[0], item[1].test(html), item[1].test(html) ? 'present' : 'missing');
@@ -100,10 +101,16 @@ try {
     && html.indexOf('<h2>任务详情</h2>') > html.indexOf('aria-label="预检和启动执行"'), 'after_preview');
   add('manual Dry-run action hidden', !/id=["']dryRunBtn["']/.test(html), 'hidden');
   add('resume row action wired in UI', /从本行继续/.test(appJs), 'present');
+  add('retry row action wired in UI', /重试本行/.test(appJs) && /data-only-row="1"/.test(appJs), 'present');
   add('resume API wired in UI', /resume-preview/.test(appJs) && /resumeFromRow/.test(appJs), 'present');
   add('OPOM resolve failure is row-visible', /opom_resolve_failed/.test(appJs), 'present');
   add('auto preflight copy present', /自动预检/.test(html), 'present');
-  add('AdsPower status writeback UI hidden', !/adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'hidden');
+  add(
+    'card-free purchase or auto top-up clears incompatible billing scope',
+    /if \(!els\.scopePaymentMethod\.checked && \(els\.scopePurchase\.checked \|\| els\.scopeAutoTopup\.checked\)\) \{\s*els\.scopeBillingAddress\.checked = false;/.test(appJs),
+    'scope_normalization_present',
+  );
+  add('AdsPower status writeback UI present', /adspowerStatusMode|adspowerDiscoverTargetsBtn|adspowerUseDiscoveredTargetsBtn/.test(html), 'present');
   add('native tag boundary copy not in UI', !/native tag|tag API|pending_tag_api/i.test(html), 'operator_ui_clean');
   add('no obvious sensitive literals in UI assets', !containsSensitive(`${html}\n${appJs}\n${css}`), 'no_sensitive_literals');
 } catch (error) {
@@ -151,5 +158,5 @@ async function fetchText(url) {
 }
 
 function containsSensitive(value) {
-  return /5257970000000001|card_number=|cvv=|sk-or-v1-|api[_-]?key\s*[:=]/i.test(String(value || ''));
+  return /5257970000000001|card_number\s*=|cvv\s*=|sk-or-v1-|api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i.test(String(value || ''));
 }

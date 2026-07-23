@@ -13,6 +13,9 @@ const CANONICAL_HEADER = [
   'ads_match_status',
   'order_no',
   'card_no',
+  'card_provider',
+  'card_type',
+  'expires_at',
   'exp_month',
   'exp_year',
   'cvv',
@@ -94,7 +97,13 @@ export async function readyToRechargePayload(payload = {}) {
   const args = {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: payload.opomRechargeToken || process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomSecondaryBaseUrl: payload.opomSecondaryBaseUrl || process.env.OPOM_SECONDARY_BASE_URL || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: payload.opomSecondaryRechargeToken || process.env.OPOM_SECONDARY_RECHARGE_TOKEN || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN || '',
+    opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: payload.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
   };
   const {accounts, nextCursor} = await opom.fetchRechargeAccounts(args, {
     group: payload.group || 'recharge',
@@ -172,9 +181,9 @@ function candidateAccountsForRow(row, index) {
   };
   const accountId = String(row.opom_account_id || '').trim();
   if (accountId && index.byAccountId.has(accountId)) add([index.byAccountId.get(accountId)]);
+  add(index.byUserId.get(String(row.ads_power_user_id || '').trim().toLowerCase()));
   add(index.byEmail.get(String(row.login_email || '').trim().toLowerCase()));
   add(index.bySerial.get(String(row.ads_power_serial_number || '').trim().toLowerCase()));
-  add(index.byUserId.get(String(row.ads_power_user_id || '').trim().toLowerCase()));
 
   const byId = new Map();
   for (const candidate of candidates) {
@@ -224,22 +233,97 @@ function mergeResolvedOpomRow(row, canonical) {
     ads_power_user_id: row.ads_power_user_id || canonical.ads_power_user_id || '',
     ads_power_serial_number: row.ads_power_serial_number || canonical.ads_power_serial_number || '',
     ads_power_group_name: canonical.ads_power_group_name || row.ads_power_group_name || '',
+    opom_account_status: canonical.opom_account_status || row.opom_account_status || '',
     opom_health_status: canonical.opom_health_status || 'ok',
     opom_health_reason: canonical.opom_health_reason || '',
+    opom_card_status: canonical.opom_card_status || row.opom_card_status || '',
+    // 上传/分配卡 CSV 的卡号优先级更高；只有本地行没有卡时，才采用 OPOM resolve 返回的当前绑卡。
+    order_no: row.order_no || canonical.order_no || '',
+    card_no: row.card_no || canonical.card_no || '',
     idempotency_key: canonical.idempotency_key || row.idempotency_key || '',
   };
 }
 
-export async function resolveOpomAccountsPayload(payload = {}) {
-  const rows = Array.isArray(payload.rows) ? payload.rows : [];
-  if (!rows.length) {
-    return {ok: true, total: 0, matched: 0, failed: 0, rows: [], csvText: canonicalCsvFromRows([])};
-  }
-  const args = {
+function opomArgsFromPayload(payload = {}) {
+  return {
     ...opom.opomDefaults(),
     opomBaseUrl: payload.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    opomRechargeToken: payload.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: payload.opomRechargeToken || process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomSecondaryBaseUrl: payload.opomSecondaryBaseUrl || process.env.OPOM_SECONDARY_BASE_URL || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: payload.opomSecondaryRechargeToken || process.env.OPOM_SECONDARY_RECHARGE_TOKEN || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN || '',
+    opomRequestTimeoutMs: payload.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: payload.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: payload.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: payload.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
   };
+}
+
+function normalizeResolveStatus(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (value === 'matched') return 'matched';
+  if (value === 'not_found') return 'opom_not_found';
+  if (value === 'ambiguous') return 'opom_ambiguous';
+  if (value === 'identity_mismatch') return 'opom_identity_mismatch';
+  return value ? `opom_${value}` : 'opom_not_found';
+}
+
+function mergeBatchResolvedRow(row, result = {}) {
+  if (String(result.status || '').toLowerCase() === 'matched' && result.account) {
+    // OPOM 批量 resolve 把当前绑定卡放在结果顶层 cardBinding；合并后才能沿用统一的卡状态和全卡号映射。
+    const account = result.cardBinding
+      ? {...result.account, activeCard: result.cardBinding}
+      : result.account;
+    const canonical = opom.canonicalRowsFromOpomAccounts([account], {})[0] || {};
+    return mergeResolvedOpomRow(row, canonical);
+  }
+  const status = normalizeResolveStatus(result.status);
+  return {
+    ...row,
+    opom_health_status: status,
+    opom_health_reason: result.reason || result.message || 'OPOM batch resolve did not match this row',
+  };
+}
+
+async function resolveOpomAccountsBatch(args, rows, {group, status, includeAllStatus = false, fallbackAll = false} = {}) {
+  const body = await opom.resolveRechargeAccounts(args, {
+    rows,
+    group,
+    status,
+    includeAllStatus,
+    fallbackAll,
+  });
+  const resultByIndex = new Map();
+  for (const [fallbackIndex, item] of body.results.entries()) {
+    const index = Number.isInteger(item.index) ? item.index : fallbackIndex;
+    resultByIndex.set(index, item);
+  }
+  let matched = 0;
+  let failed = 0;
+  const resolvedRows = rows.map((row, index) => {
+    const result = resultByIndex.get(index);
+    if (!result) {
+      failed += 1;
+      return mergeBatchResolvedRow(row, {
+        status: 'not_found',
+        reason: 'OPOM batch resolve returned no result for this row',
+      });
+    }
+    if (String(result.status || '').toLowerCase() === 'matched' && result.account) matched += 1;
+    else failed += 1;
+    return mergeBatchResolvedRow(row, result);
+  });
+  return {
+    ok: true,
+    total: rows.length,
+    matched,
+    failed,
+    resolveSource: 'batch_resolve',
+    rows: resolvedRows,
+    csvText: canonicalCsvFromRows(resolvedRows),
+  };
+}
+
+async function resolveOpomAccountsLegacy(args, rows, payload = {}) {
   const group = payload.group || 'recharge';
   const status = payload.status || 'needs_recharge';
   const best = await loadBestResolveIndex(args, rows, {
@@ -283,4 +367,27 @@ export async function resolveOpomAccountsPayload(payload = {}) {
     rows: resolvedRows,
     csvText: canonicalCsvFromRows(resolvedRows),
   };
+}
+
+export async function resolveOpomAccountsPayload(payload = {}) {
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  if (!rows.length) {
+    return {ok: true, total: 0, matched: 0, failed: 0, rows: [], csvText: canonicalCsvFromRows([])};
+  }
+  const args = opomArgsFromPayload(payload);
+  try {
+    return await resolveOpomAccountsBatch(args, rows, {
+      group: payload.group || 'recharge',
+      status: payload.status || 'needs_recharge',
+      includeAllStatus: payload.includeAllStatus === true,
+      fallbackAll: payload.fallbackAll === true,
+    });
+  } catch (error) {
+    if (![404, 405].includes(Number(error?.httpStatus))) throw error;
+    const result = await resolveOpomAccountsLegacy(args, rows, payload);
+    return {
+      ...result,
+      resolveSource: `legacy:${result.resolveSource}`,
+    };
+  }
 }

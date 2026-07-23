@@ -81,6 +81,21 @@ h3 {
   gap: 2px;
 }
 
+.repo-info {
+  min-width: 168px;
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.repo-info span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .eyebrow {
   color: var(--muted);
   font-size: 11px;
@@ -168,8 +183,8 @@ h3 {
 }
 
 .control-rail {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: start;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr) minmax(0, .98fr);
+  align-items: stretch;
 }
 
 .control-rail > .optional-panel {
@@ -192,6 +207,7 @@ h3 {
 .step-panel {
   display: grid;
   gap: 12px;
+  align-content: start;
 }
 
 .step-head {
@@ -276,6 +292,126 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.runtime-config-panel {
+  grid-column: 1 / -1;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.config-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.rule-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rule-mode label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  cursor: pointer;
+}
+
+.rule-mode label:has(input:checked) {
+  border-color: #84caff;
+  background: #eff8ff;
+}
+
+.rule-mode input {
+  margin: 0;
+}
+
+.rule-mode strong {
+  font-size: 13px;
+}
+
+.rule-fields,
+.rule-subsection {
+  display: grid;
+  gap: 8px;
+}
+
+.address-tool {
+  padding-top: 4px;
+}
+
+.address-tool .action-row {
+  align-items: center;
+}
+
+.address-list {
+  display: block;
+  height: 112px;
+  overflow: auto;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.address-item {
+  display: grid;
+  grid-template-columns: 28px minmax(72px, .65fr) minmax(0, 1.35fr) 96px;
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 2px;
+  border-bottom: 1px solid #eef1f5;
+}
+
+.address-item:last-child {
+  border-bottom: 0;
+}
+
+.address-item strong,
+.address-item b {
+  color: #344054;
+  font-size: 12px;
+}
+
+.address-item span,
+.address-item small {
+  min-width: 0;
+  color: #475467;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.address-item b,
+.address-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.address-item small {
+  text-align: right;
+}
+
+.rule-explain {
+  padding: 7px 9px;
+  border: 1px solid #b2ddff;
+  border-radius: 6px;
+  background: #eff8ff;
+  color: #175cd3;
+  font-size: 12px;
+}
+
 .field {
   display: grid;
   gap: 5px;
@@ -305,6 +441,8 @@ input[type="file"] {
 input[type="text"],
 input[type="number"],
 input[type="date"],
+input[type="url"],
+input[type="password"],
 select,
 textarea {
   width: 100%;
@@ -391,7 +529,8 @@ button:disabled,
 }
 
 .summary,
-.preflight {
+.preflight,
+.save-state {
   padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -401,6 +540,18 @@ button:disabled,
 
 .summary.danger,
 .preflight.danger {
+  border-color: #fedf89;
+  background: #fffaeb;
+  color: var(--warning);
+}
+
+.save-state.success {
+  border-color: #abefc6;
+  background: #ecfdf3;
+  color: var(--success);
+}
+
+.save-state.warning {
   border-color: #fedf89;
   background: #fffaeb;
   color: var(--warning);
@@ -523,6 +674,14 @@ td {
 
 tr:hover td {
   background: #f8fbff;
+}
+
+.detail-row-failed td {
+  background: #ffe4e6;
+}
+
+.detail-row-failed:hover td {
+  background: #fecdd3;
 }
 
 tr.selected td {
@@ -649,12 +808,22 @@ tr[role="button"]:focus-visible td {
   .execute-bar {
     grid-template-columns: 1fr;
   }
+
+  .config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .repo-info {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .topbar-right {
@@ -674,6 +843,8 @@ tr[role="button"]:focus-visible td {
   .status-strip,
   .form-grid.two,
   .form-grid.three,
+  .config-grid,
+  .rule-mode,
   .check-group {
     grid-template-columns: 1fr;
   }

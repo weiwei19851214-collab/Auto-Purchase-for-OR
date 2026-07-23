@@ -74,7 +74,9 @@ test('worker records row exceptions and continues safe batches', async () => {
     assert.equal(details.job.status, 'completed');
     assert.equal(details.rows[0].status, 'failed');
     assert.equal(details.rows[0].stage, 'automation');
-    assert.match(details.rows[0].message, /simulated browser process exited/);
+    assert.equal(details.rows[0].errorCode, 'automation_failed');
+    assert.equal(details.rows[0].message, '自动化执行失败');
+    assert.match(details.rows[0].errorDetail, /simulated browser process exited/);
     assert.equal(details.rows[1].status, 'completed');
     assert.equal(details.events.some((event) => event.type === 'row.error'), true);
     assert.equal(existsSync(getJob(db, created.job.id).result_csv_path), true);
@@ -238,7 +240,8 @@ test('worker writes OPOM failure result when an unexpected row exception occurs'
     assert.equal(calls[0].url, `http://opom.local/api/v1/recharge/runs/${created.job.id}/results`);
     assert.equal(calls[0].body.opomAccountId, 'acct_1');
     assert.equal(calls[0].body.status, 'failed');
-    assert.equal(calls[0].body.errorCode, 'failed');
+    assert.equal(calls[0].body.errorCode, 'automation_failed');
+    assert.equal(calls[0].body.errorMessage, '自动化执行失败');
     assert.match(calls[0].body.idempotencyKey, new RegExp(`^recharge_result:${created.job.id}:2:1:failed:worker\\.exception$`));
     assert.equal(calls[0].body.card.cardNo, '5257970000000001');
     assert.doesNotMatch(JSON.stringify(calls[0].body), /cvv=456|token=secret/);
@@ -387,7 +390,9 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     assert.equal(details.job.status, 'blocked');
     assert.equal(details.rows[0].status, 'purchase_unverified');
     assert.equal(details.rows[0].stage, 'worker.interrupted');
-    assert.match(details.rows[0].message, /server restarted during row execution/);
+    assert.equal(details.rows[0].errorCode, 'worker_interrupted');
+    assert.equal(details.rows[0].message, '执行中断，结果待确认');
+    assert.match(details.rows[0].errorDetail, /server restarted during row execution/);
     assert.equal(details.events.some((event) => event.type === 'row.interrupted'), true);
     assert.equal(details.events.some((event) => event.type === 'job.recovered_blocked'), true);
 
@@ -396,7 +401,9 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     assert.equal(existsSync(job.result_csv_path), true);
     const resultCsv = readFileSync(job.result_csv_path, 'utf8');
     assert.match(resultCsv, /purchase_unverified/);
-    assert.match(resultCsv, /server restarted during row execution/);
+    assert.match(resultCsv, /worker_interrupted/);
+    assert.match(resultCsv, /执行中断，结果待确认/);
+    assert.doesNotMatch(resultCsv, /server restarted during row execution/);
     assert.doesNotMatch(resultCsv, /,456,|card_number|cvv/i);
   } finally {
     rmSync(dir, {recursive: true, force: true});

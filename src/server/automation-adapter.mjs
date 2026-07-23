@@ -9,6 +9,7 @@ import * as common from '../automation/lib/common.mjs';
 import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import * as status from '../automation/lib/status-contract.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import * as opom from './opom-client.mjs';
 
 const CHILD_OUTPUT_LIMIT = 10 * 1024 * 1024;
@@ -174,6 +175,9 @@ export async function makeJobFiles(jobId, fileName, csvText) {
 }
 
 export function rowInsertFromDryRun(jobId, row) {
+  const error = row.status === 'missing_fields'
+    ? simplifyError(row.message || (row.missing || []).join(','), {status: row.status, stage: 'input.missing_fields'})
+    : {errorCode: '', message: row.message || '', detail: ''};
   return {
     id: newId('row'),
     jobId,
@@ -196,7 +200,9 @@ export function rowInsertFromDryRun(jobId, row) {
     amount: row.amount || '',
     status: row.status === 'ready' ? 'queued' : row.status,
     stage: row.status === 'ready' ? 'queued' : 'input.missing_fields',
-    message: row.message || '',
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     missingJson: JSON.stringify(row.missing || []),
     updatedAt: nowIso(),
   };
@@ -278,7 +284,9 @@ export function publicRow(row) {
     amount: row.amount,
     status: row.status,
     stage: row.stage,
+    errorCode: row.error_code || '',
     message: row.message,
+    errorDetail: row.error_detail || '',
     missing: JSON.parse(row.missing_json || '[]'),
     purchaseStatus: row.purchase_status,
     purchaseAmount: row.purchase_amount,
@@ -366,7 +374,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
     const outcome = outcomeByRawIndex.get(index);
     if (outcome) {
       const normalized = normalizeCsvOutcome(outcome);
-      const details = outcome.details || {};
+      const details = {
+        ...(outcome.details || {}),
+        errorCode: outcome.errorCode || outcome.details?.errorCode || '',
+      };
       plan.writeOutcome(outputHeader, output, normalized.status, normalized.message, outcomeDetailsWithMetadata(details, metadata, runId));
     }
     return output;
@@ -486,17 +497,24 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
   const missing = plan.validateRow(row, args);
   if (missing.length) {
+    const error = simplifyError(missing.join(','), {
+      status: status.STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+    });
     const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
     await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
       rowNumber: rawIndex + 2,
       status: status.STATUSES.MISSING_FIELDS,
-      message: missing.join(','),
-      errorCode: status.STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+      message: error.message,
+      errorCode: error.errorCode,
     });
     return {
       status: status.STATUSES.MISSING_FIELDS,
       stage: 'input.missing_fields',
-      message: missing.join(','),
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
       details,
       safeToContinue: true,
       stopProfile: true,
@@ -532,6 +550,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         details.opomCardWritebackStatus = writeback.cardStatus;
         details.opomResultWritebackStatus = writeback.resultStatus;
       } catch (error) {
+        const simplified = simplifyError(error.message || 'OPOM writeback failed after verified purchase', {
+          status: status.STATUSES.FAILED,
+          stage: 'opom.writeback',
+        });
         completed = false;
         details.opomCardWritebackStatus = error.opomCardWritebackStatus || details.opomCardWritebackStatus || 'failed';
         details.opomResultWritebackStatus = error.opomResultWritebackStatus || details.opomResultWritebackStatus || 'failed';
@@ -539,14 +561,16 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           rowNumber: rawIndex + 2,
           status: status.STATUSES.FAILED,
           stage: 'opom.writeback',
-          message: commonAdapter.redact(error.message || 'OPOM writeback failed after verified purchase'),
-          errorCode: 'opom_writeback_failed',
+          message: simplified.message,
+          errorCode: simplified.errorCode,
         });
         if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
         return {
           status: status.STATUSES.FAILED,
           stage: 'opom.writeback',
-          message: commonAdapter.redact(error.message || 'OPOM writeback failed after verified purchase'),
+          errorCode: simplified.errorCode,
+          message: simplified.message,
+          errorDetail: simplified.detail,
           details,
           safeToContinue: true,
           stopProfile: true,
@@ -569,6 +593,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
 
   const contract = status.classifyError(outcome.error);
+  const error = simplifyError(outcome.error, {
+    status: contract.status,
+    stage: contract.stage,
+  });
   const failureDetails = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
   if (isOpomCardBindingFailure(outcome.error)) {
     failureDetails.opomCardWritebackStatus = 'failed';
@@ -577,8 +605,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     rowNumber: rawIndex + 2,
     status: contract.status,
     stage: contract.stage,
-    message: commonAdapter.redact(outcome.error),
-    errorCode: contract.status,
+    message: error.message,
+    errorCode: error.errorCode,
   });
   if (args.stopProfiles && contract.stopProfile) {
     profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
@@ -586,7 +614,9 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   return {
     status: contract.status,
     stage: contract.stage,
-    message: commonAdapter.redact(outcome.error),
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     details: failureDetails,
     safeToContinue: contract.safeToContinueBatch,
     stopProfile: contract.stopProfile,

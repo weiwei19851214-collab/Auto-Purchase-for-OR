@@ -103,6 +103,7 @@ export function requiredColumns() {
 export function resultColumns() {
   return [
     'task_status',
+    'task_error_code',
     'task_message',
     'purchase_status',
     'purchase_amount',
@@ -515,6 +516,7 @@ export function successDetails(row, result, args) {
 export function writeOutcome(header, row, status, message, details = {}) {
   const evidence = completionEvidence(status, details);
   setCell(header, row, 'task_status', status === 'completed' ? 'completed' : status);
+  setCell(header, row, 'task_error_code', details.errorCode || '');
   setCell(header, row, 'task_message', redact(message || ''));
   setCell(header, row, 'purchase_status', details.purchaseStatus || '');
   setCell(header, row, 'purchase_amount', details.purchaseAmount || '');

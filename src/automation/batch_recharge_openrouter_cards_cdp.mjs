@@ -19,6 +19,7 @@ import {adsPowerDefaults, stopProfile} from './lib/adspower.mjs';
 import {runClosedLoopChild} from './lib/child-runner.mjs';
 import {defaultOutputCsv, ensureColumns, padRows, parseCsv, rowObject, stringifyCsv} from './lib/csv.mjs';
 import {cardLast4, normalizeMoneyValue, redact} from './lib/common.mjs';
+import {simplifyError} from './lib/error-message-contract.mjs';
 import {
   baseRowResult,
   buildClosedLoopTask,
@@ -202,9 +203,23 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
   const missing = validateRow(row, args);
   const baseResult = baseRowResult(rowNumber, row);
   if (missing.length) {
+    const error = simplifyError(missing.join(','), {
+      status: STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+    });
     summary.blocked += 1;
-    summary.results.push({...baseResult, status: STATUSES.MISSING_FIELDS, missing});
-    writeOutcome(header, csvRow, STATUSES.MISSING_FIELDS, missing.join(','), {cardLast4: cardLast4(row.card_number)});
+    summary.results.push({
+      ...baseResult,
+      status: STATUSES.MISSING_FIELDS,
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
+      missing,
+    });
+    writeOutcome(header, csvRow, STATUSES.MISSING_FIELDS, error.message, {
+      errorCode: error.errorCode,
+      cardLast4: cardLast4(row.card_number),
+    });
     return;
   }
 
@@ -226,6 +241,12 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
       ...classifyError('purchase_unverified: purchase or auto top-up was not fully verified'),
       evidence: details,
     };
+    const error = completed
+      ? {errorCode: '', message: 'completed', detail: ''}
+      : simplifyError('purchase_unverified: purchase or auto top-up was not fully verified', {
+        status,
+        stage: statusContract.stage,
+      });
     summary.results.push({
       ...baseResult,
       status,
@@ -235,9 +256,15 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
       balanceBefore: details.balanceBefore,
       balanceAfter: details.balanceAfter,
       autoTopupStatus: details.autoTopupStatus,
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
       profileStop,
     });
-    writeOutcome(header, csvRow, status, completed ? 'completed' : 'purchase or auto top-up was not fully verified', details);
+    writeOutcome(header, csvRow, status, error.message, {
+      ...details,
+      errorCode: error.errorCode,
+    });
     return;
   }
 
@@ -248,15 +275,24 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
   if (statusContract.stopProfile && profileIdentifier.value) processedProfileNos.set(profileIdentifier.value, profileIdentifier);
 
   const redactedError = redact(outcome.error);
+  const error = simplifyError(redactedError, {
+    status: statusContract.status,
+    stage: statusContract.stage,
+  });
   summary.results.push({
     ...baseResult,
     status: statusContract.status,
     stage: statusContract.stage,
-    error: redactedError,
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     profileStop,
     ...(outcome.child ? {child: outcome.child} : {}),
   });
-  writeOutcome(header, csvRow, statusContract.status, redactedError, {cardLast4: cardLast4(row.card_number)});
+  writeOutcome(header, csvRow, statusContract.status, error.message, {
+    errorCode: error.errorCode,
+    cardLast4: cardLast4(row.card_number),
+  });
   if (!statusContract.safeToContinueBatch) {
     summary.halted = true;
   }

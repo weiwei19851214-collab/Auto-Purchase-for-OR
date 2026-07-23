@@ -35,12 +35,12 @@ function escapeHtml(value) {
   })[char]);
 }
 
-function sanitizeMessage(value) {
+function sanitizeMessage(value, limit = 800) {
   return String(value ?? '')
     .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted-key]')
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
     .replace(/\b(cvv|cvc)\s*[:=]\s*\d{3,4}\b/gi, '$1=[redacted]')
-    .slice(0, 800);
+    .slice(0, limit);
 }
 
 async function api(path, options = {}) {
@@ -143,7 +143,7 @@ function renderRows(rows, job) {
         <td data-label="余额">${escapeHtml(row.balanceBefore || '-')} → ${escapeHtml(row.balanceAfter || '-')}</td>
         <td data-label="Auto Top-Up">${escapeHtml(row.autoTopupStatus || '-')}${row.autoTopupThreshold || row.autoTopupAmount ? ` ${escapeHtml(row.autoTopupThreshold || '-')}/${escapeHtml(row.autoTopupAmount || '-')}` : ''}</td>
         <td data-label="卡 / OPOM">${cardOpomText(row)}</td>
-        <td class="message" data-label="消息">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(', ') || ''))}</td>
+        <td class="message" data-label="消息">${messageCell(row)}</td>
         <td data-label="操作"><div class="row-actions">
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="0" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>从本行继续</button>
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="1" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>重试本行</button>
@@ -177,13 +177,68 @@ function canRepairOpom(row, canOperate) {
     && row.purchaseStatus === 'verified';
 }
 
+function normalizeText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function simpleMessage(message, fallback = '-') {
+  const text = sanitizeMessage(normalizeText(message) || fallback);
+  return escapeHtml(text || '-');
+}
+
+function technicalDetail(item = {}) {
+  const raw = item.errorDetail
+    ?? item.error_detail
+    ?? item.data?.errorDetail
+    ?? item.data?.error_detail
+    ?? '';
+  if (!raw) return '';
+  const text = typeof raw === 'object'
+    ? JSON.stringify(raw, null, 2)
+    : String(raw);
+  return sanitizeMessage(text, 4000);
+}
+
+function errorCode(item = {}) {
+  return item.errorCode
+    ?? item.error_code
+    ?? item.data?.errorCode
+    ?? item.data?.error_code
+    ?? '';
+}
+
+function messageCell(row = {}) {
+  const fallback = Array.isArray(row.missing) && row.missing.length ? row.missing.join(', ') : '-';
+  const message = simpleMessage(row.message, fallback);
+  const code = normalizeText(errorCode(row));
+  const detail = technicalDetail(row);
+  const shouldShowDetail = detail && normalizeText(detail) !== normalizeText(row.message || fallback);
+  return [
+    `<span class="message-primary">${message}</span>`,
+    code ? `<span class="error-code">${escapeHtml(sanitizeMessage(code))}</span>` : '',
+    shouldShowDetail ? `<details class="message-detail"><summary>技术详情</summary><div class="detail-body">${escapeHtml(detail)}</div></details>` : '',
+  ].filter(Boolean).join('');
+}
+
+function eventMessage(event = {}) {
+  const message = simpleMessage(event.message, event.type || '-');
+  const code = normalizeText(errorCode(event));
+  const detail = technicalDetail(event);
+  const shouldShowDetail = detail && normalizeText(detail) !== normalizeText(event.message || event.type || '-');
+  return [
+    `<span class="message-primary">${message}</span>`,
+    code ? `<span class="error-code">${escapeHtml(sanitizeMessage(code))}</span>` : '',
+    shouldShowDetail ? `<details class="message-detail event-detail"><summary>技术详情</summary><div class="detail-body">${escapeHtml(detail)}</div></details>` : '',
+  ].filter(Boolean).join('');
+}
+
 function renderEvents(events) {
   const recent = [...events].slice(-80).reverse();
   els.eventsBody.innerHTML = recent.length ? recent.map((event) => `
     <div class="event-line">
       <span>${escapeHtml(formatTime(event.createdAt))}</span>
       <strong>${escapeHtml(event.type || '')}</strong>
-      <span>${escapeHtml(sanitizeMessage(event.message || ''))}</span>
+      <span>${eventMessage(event)}</span>
     </div>
   `).join('') : '暂无事件。';
 }

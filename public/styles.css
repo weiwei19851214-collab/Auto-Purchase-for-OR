@@ -960,6 +960,68 @@ body[data-page="execution"] .toolbar-inner {
   overflow-wrap: anywhere;
 }
 
+body[data-page="execution"] .message-primary {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body[data-page="execution"] .error-code {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  margin-top: 4px;
+  border: 1px solid color-mix(in srgb, var(--red) 28%, var(--separator));
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+body[data-page="execution"] .message-detail {
+  margin-top: 6px;
+  border-top: 0;
+  color: var(--secondary);
+}
+
+body[data-page="execution"] .message-detail summary {
+  display: inline-flex;
+  min-height: 44px;
+  padding: 8px 2px;
+  align-items: center;
+  color: var(--tint);
+  cursor: pointer;
+  font-weight: 700;
+  list-style-position: inside;
+}
+
+body[data-page="execution"] .message-detail summary:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid color-mix(in srgb, var(--tint) 72%, transparent);
+  outline-offset: 2px;
+}
+
+body[data-page="execution"] .detail-body {
+  margin-top: 4px;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--surface-secondary);
+  color: var(--secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+body[data-page="execution"] .event-detail {
+  margin-top: 4px;
+}
+
 .account-cell {
   display: grid;
   gap: 2px;
@@ -1064,6 +1126,11 @@ body[data-page="execution"] .toolbar-inner {
 .event-line span:first-child {
   color: var(--secondary);
   font-variant-numeric: tabular-nums;
+}
+
+body[data-page="execution"] .event-line span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {

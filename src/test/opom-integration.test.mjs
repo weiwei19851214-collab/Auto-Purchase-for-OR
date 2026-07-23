@@ -1550,7 +1550,8 @@ test('executeRow writes declined card result to OPOM with full card number', asy
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /\/api\/v1\/recharge\/runs\/run_1\/results$/);
     assert.equal(calls[0].body.status, 'payment_issue_card_declined');
-    assert.equal(calls[0].body.errorCode, 'payment_issue_card_declined');
+    assert.equal(calls[0].body.errorCode, 'card_declined');
+    assert.equal(calls[0].body.errorMessage, '卡被拒绝');
     assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
     assert.equal(calls[0].body.card.cardNo, '5257970000000001');
     assert.equal(calls[0].body.card.panLast4, '0001');

@@ -749,8 +749,10 @@ test('writeResultCsv appends result columns', async () => {
       'opom_account_id',
       'ads_power_user_id',
       'ads_power_serial_number',
+      'opom_account_status',
       'opom_health_status',
       'opom_health_reason',
+      'opom_card_status',
       'username',
       'login_email',
       'ejh_order_no',
@@ -814,8 +816,8 @@ test('writeResultCsv preserves source metadata when outcome details omit it', as
     assert.equal(firstRow.card_last4, '0001');
     assert.equal(firstRow.cardno, '5257970000000001');
     assert.equal(firstRow.completion_evidence_status, 'incomplete');
-    assert.match(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
-    assert.doesNotMatch(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
+    assert.match(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
+    assert.doesNotMatch(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
     assert.equal(firstRow.adspower_tag_status, 'skipped_user_waived');
     assert.equal(firstRow.adspower_status_target, 'waived_by_user');
     assert.doesNotMatch(firstRow.completion_evidence_missing, /adspower_tag_status/);
@@ -1254,12 +1256,14 @@ test('repairOpomWriteback completes verified opom writeback failures without rer
     assert.equal(repaired.rows[0].status, 'completed');
     assert.equal(repaired.rows[0].stage, 'closed_loop.complete');
     assert.equal(repaired.rows[0].opomCardWritebackStatus, 'written');
-    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'skipped');
-    assert.equal(calls.length, 1);
+    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
+    assert.equal(calls.length, 2);
     assert.match(calls[0].url, /\/card-binding$/);
     assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
     assert.equal(calls[0].body.card.cardNo, '5257970000000001');
     assert.equal(calls[0].body.card.cvv, undefined);
+    assert.match(calls[1].url, /\/results$/);
+    assert.equal(calls[1].body.status, 'completed');
     assert.doesNotMatch(JSON.stringify(calls), /"cvv"\s*:/i);
     const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
     assert.match(resultCsv, /completed/);

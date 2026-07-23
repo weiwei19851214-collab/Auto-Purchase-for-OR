@@ -60,7 +60,12 @@ export function opomHealthStatus(row) {
   return String(row.opom_health_status || '').trim().toLowerCase();
 }
 
+export function opomCardStatus(row) {
+  return String(row.opom_card_status || row.card_status || row.cardStatus || row.bank_card_status || row.bankCardStatus || '').trim();
+}
+
 const HEALTHY_OPOM_STATUSES = new Set(['ok', 'local_selector', 'completed']);
+const ACTIVE_CARD_STATUSES = new Set(['active', '激活', '1']);
 
 export function isHealthyOpomStatus(value) {
   const status = String(value || '').trim().toLowerCase();
@@ -68,6 +73,12 @@ export function isHealthyOpomStatus(value) {
   // "completed". The queue filter has already selected it for recharge;
   // do not turn that healthy status into a local preflight blocker.
   return !status || HEALTHY_OPOM_STATUSES.has(status);
+}
+
+export function inactiveOpomCardStatus(row) {
+  const status = opomCardStatus(row);
+  if (!status) return '';
+  return ACTIVE_CARD_STATUSES.has(status.toLowerCase()) ? '' : status;
 }
 
 export function requiredColumns() {
@@ -108,8 +119,10 @@ export function resultColumns() {
     'login_email',
     'ads_power_user_id',
     'ads_power_serial_number',
+    'opom_account_status',
     'opom_health_status',
     'opom_health_reason',
+    'opom_card_status',
     'ads_match_status',
     'ads_match_waived',
     'ejh_order_no',
@@ -353,6 +366,7 @@ export function baseRowResult(rowNumber, row) {
     username: loginEmail(row),
     adsPowerUserId: adsPowerUserId(row),
     adsPowerSerialNumber: adsPowerSerialNumber(row),
+    opomAccountStatus: String(row.opom_account_status || '').trim(),
     adsMatchStatus: adsMatchStatus(row) || '',
     ejhOrderNo: ejhOrderNo(row),
     purchasePlan: safePurchasePlan(row).mode,
@@ -362,6 +376,7 @@ export function baseRowResult(rowNumber, row) {
     cardProvider: cardProvider(row),
     cardType: cardType(row),
     cardExpiresAt: cardExpiresAt(row),
+    opomCardStatus: opomCardStatus(row),
   };
 }
 
@@ -385,8 +400,10 @@ export function rowMetadata(row, extra = {}) {
     loginEmailMasked: loginEmail(row),
     adsPowerUserId: adsPowerUserId(row),
     adsPowerSerialNumber: adsPowerSerialNumber(row),
+    opomAccountStatus: extra.opomAccountStatus || String(row.opom_account_status || '').trim(),
     opomHealthStatus: extra.opomHealthStatus || opomHealthStatus(row) || '',
     opomHealthReason: extra.opomHealthReason || row.opom_health_reason || '',
+    opomCardStatus: extra.opomCardStatus || opomCardStatus(row) || '',
     adsMatchStatus: extra.adsMatchStatus || adsMatchStatus(row) || (adsPowerUserId(row) || adsPowerSerialNumber(row) ? 'not_verified' : ''),
     ejhOrderNo: ejhOrderNo(row),
     cardNo: extra.cardNo || cardNumber(row),
@@ -451,11 +468,11 @@ export function completionEvidence(status, details = {}) {
   if (detailValue(details, 'opomAccountId') && detailValue(details, 'opomWritebackEnabled') !== 'false') {
     const adsMatchWaived = detailValue(details, 'adsMatchWaived') === 'true';
     if (!adsMatchWaived && detailValue(details, 'adsMatchStatus') !== 'matched') missing.push('ads_match_status');
-    if (detailValue(details, 'opomWritebackMode') === 'result') {
-      if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
-    } else {
+    if (detailValue(details, 'opomWritebackMode') === 'card_binding') {
       missingIfEmpty(details, missing, 'ejhOrderNo', 'ejh_order_no');
       if (detailValue(details, 'opomCardWritebackStatus') !== 'written') missing.push('opom_card_writeback_status');
+    } else {
+      if (detailValue(details, 'opomResultWritebackStatus') !== 'written') missing.push('opom_result_writeback_status');
     }
   }
 
@@ -476,7 +493,7 @@ export function successDetails(row, result, args) {
     adsMatchWaived: String(Boolean(args.skipAdsPowerMatch)),
     executionScope: scopeSummary(args),
     opomWritebackEnabled: String(Boolean(args.opomWriteback)),
-    opomWritebackMode: args.opomWriteback ? (scope.paymentMethod ? 'card_binding' : 'result') : 'disabled',
+    opomWritebackMode: args.opomWriteback ? 'result' : 'disabled',
     purchaseStatus: scope.purchase
       ? (purchase.skippedByRule ? 'skipped_by_balance_rule' : (verification.verified ? 'verified' : 'purchase_unverified'))
       : 'skipped',
@@ -514,8 +531,10 @@ export function writeOutcome(header, row, status, message, details = {}) {
   const existing = rowObject(header, row);
   setCell(header, row, 'ads_power_user_id', details.adsPowerUserId || adsPowerUserId(existing) || '');
   setCell(header, row, 'ads_power_serial_number', details.adsPowerSerialNumber || adsPowerSerialNumber(existing) || '');
+  setCell(header, row, 'opom_account_status', details.opomAccountStatus || existing.opom_account_status || '');
   setCell(header, row, 'opom_health_status', details.opomHealthStatus || '');
   setCell(header, row, 'opom_health_reason', details.opomHealthReason || '');
+  setCell(header, row, 'opom_card_status', details.opomCardStatus || existing.opom_card_status || '');
   setCell(header, row, 'ads_match_status', details.adsMatchStatus || '');
   setCell(header, row, 'ads_match_waived', details.adsMatchWaived || 'false');
   setCell(header, row, 'ejh_order_no', details.ejhOrderNo || '');

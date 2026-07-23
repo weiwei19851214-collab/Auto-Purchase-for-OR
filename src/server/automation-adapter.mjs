@@ -26,8 +26,10 @@ const OPTIONAL_COLUMNS = [
   'ads_power_user_id',
   'ads_power_serial_number',
   'ads_power_group_name',
+  'opom_account_status',
   'opom_health_status',
   'opom_health_reason',
+  'opom_card_status',
   'order_no',
   'ejh_order_no',
   'card_no',
@@ -319,8 +321,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
     'ads_power_serial_number',
     'username',
     'login_email',
+    'opom_account_status',
     'opom_health_status',
     'opom_health_reason',
+    'opom_card_status',
     'ejh_order_no',
     'cardno',
     'purchase_plan',
@@ -345,8 +349,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
       metadata.adsPowerSerialNumber,
       metadata.username,
       metadata.loginEmail,
+      metadata.opomAccountStatus,
       metadata.opomHealthStatus,
       metadata.opomHealthReason,
+      metadata.opomCardStatus,
       metadata.ejhOrderNo,
       metadata.cardNo,
       plan.safePurchasePlan(source).mode || '',
@@ -395,8 +401,10 @@ function outcomeDetailsWithMetadata(details, metadata, runId) {
     loginEmailMasked: firstPresent(details.loginEmailMasked, metadata.loginEmailMasked),
     adsPowerUserId: firstPresent(details.adsPowerUserId, metadata.adsPowerUserId),
     adsPowerSerialNumber: firstPresent(details.adsPowerSerialNumber, metadata.adsPowerSerialNumber),
+    opomAccountStatus: firstPresent(details.opomAccountStatus, metadata.opomAccountStatus),
     opomHealthStatus: firstPresent(details.opomHealthStatus, metadata.opomHealthStatus),
     opomHealthReason: firstPresent(details.opomHealthReason, metadata.opomHealthReason),
+    opomCardStatus: firstPresent(details.opomCardStatus, metadata.opomCardStatus),
     adsMatchStatus: firstPresent(details.adsMatchStatus, metadata.adsMatchStatus),
     ejhOrderNo: firstPresent(details.ejhOrderNo, metadata.ejhOrderNo),
     cardNo: firstPresent(details.cardNo, metadata.cardNo),
@@ -452,6 +460,30 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
   const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
+  const inactiveCardStatus = plan.inactiveOpomCardStatus(row);
+  if (inactiveCardStatus) {
+    const message = `OPOM card status ${inactiveCardStatus} is not ACTIVE; skipped recharge`;
+    const details = {
+      ...plan.rowMetadata(row, {automationLogDir}),
+      automationLogDir,
+      cardLast4: commonAdapter.cardLast4(plan.cardNumber(row)),
+    };
+    await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
+      rowNumber: rawIndex + 2,
+      status: status.STATUSES.FAILED,
+      stage: 'opom.card_status',
+      message,
+      errorCode: 'opom_card_not_active',
+    });
+    return {
+      status: 'skipped',
+      stage: 'opom.card_status',
+      message,
+      details,
+      safeToContinue: true,
+      stopProfile: false,
+    };
+  }
   const missing = plan.validateRow(row, args);
   if (missing.length) {
     const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
@@ -493,9 +525,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
     let completed = purchaseOk && autoTopupOk;
-    const opomWritebackComplete = args.scopePaymentMethod
-      ? details.opomCardWritebackStatus === 'written'
-      : details.opomResultWritebackStatus === 'written';
+    const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
     if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
       try {
         const writeback = await opomAdapter.writeCompletedRow(args, row, details, {rowNumber: rawIndex + 2});
@@ -542,15 +572,14 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const failureDetails = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
   if (isOpomCardBindingFailure(outcome.error)) {
     failureDetails.opomCardWritebackStatus = 'failed';
-    failureDetails.opomResultWritebackStatus = 'skipped';
-  } else {
-    await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
-      rowNumber: rawIndex + 2,
-      status: contract.status,
-      message: commonAdapter.redact(outcome.error),
-      errorCode: contract.status,
-    });
   }
+  await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
+    rowNumber: rawIndex + 2,
+    status: contract.status,
+    stage: contract.stage,
+    message: commonAdapter.redact(outcome.error),
+    errorCode: contract.status,
+  });
   if (args.stopProfiles && contract.stopProfile) {
     profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }

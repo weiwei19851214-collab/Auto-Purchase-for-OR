@@ -467,14 +467,14 @@ function syncActionButtons() {
   setButtonAvailability(els.opomReady, hasOpomConfig, '请先在本地配置中填写 OPOM_BASE_URL 和 RECHARGE_API_TOKEN（或使用 .recharge.local.env 后重新启动）。');
   setButtonAvailability(els.adsPowerMatch, hasRows && hasAdsPowerConfig, hasRows
     ? '请先在本地配置中填写 AdsPower API 地址和 API key'
-    : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
-  setButtonAvailability(els.generateAddresses, hasRows, '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
+    : '请先从 OPOM 拉取需要充值的账号');
+  setButtonAvailability(els.generateAddresses, hasRows, '请先从 OPOM 拉取需要充值的账号');
   setButtonAvailability(els.allocateCards, hasRows && adsMatchApproved && hasCardsCsv, hasRows
     ? (adsMatchApproved ? '请先上传 EJH cards CSV，或使用 Create EJH cards' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
-    : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
+    : '请先从 OPOM 拉取需要充值的账号');
   setButtonAvailability(els.createCards, hasRows && adsMatchApproved && hasCreateInputs, hasRows
     ? (adsMatchApproved ? '真实开卡需要填写 amount、active date、cardholder' : '请先 Match AdsPower，或勾选已人工确认 AdsPower mapping')
-    : '请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
+    : '请先从 OPOM 拉取需要充值的账号');
   setButtonAvailability(els.adspowerDiscoverTargets, hasAdsPowerConfig, '请先在本地配置中填写 AdsPower API 地址和 API key');
   syncExecutionAvailability();
 }
@@ -928,7 +928,7 @@ function renderGeneratedAddressList() {
     els.addressGeneratorSummary.textContent = opomRows.length
       ? `当前清单 ${opomRows.length} 行，还未生成地址。`
       : '还未生成地址。';
-    els.generatedAddressList.innerHTML = '<div class="muted">上传账号 CSV 或拉取 OPOM 后，点击生成地址即可预览。</div>';
+    els.generatedAddressList.innerHTML = '<div class="muted">从 OPOM 拉取账号后，点击生成地址即可预览。</div>';
     return;
   }
   els.addressGeneratorSummary.textContent = `已生成并应用 ${generatedAddressMappings.length} 个美国地址。`;
@@ -945,7 +945,7 @@ function renderGeneratedAddressList() {
 }
 
 function applyGeneratedAddressesToRows() {
-  if (!opomRows.length) throw new Error('请先上传账号选择 CSV，或从 OPOM 拉取待充值账号');
+  if (!opomRows.length) throw new Error('请先从 OPOM 拉取需要充值的账号');
   generatedAddressMappings = generateAddressMappings(opomRows.length, els.addressPreset?.value || 'oregon');
   opomRows = applyAddressMappings(opomRows, generatedAddressMappings);
   syncSelectedCsv();
@@ -1183,14 +1183,14 @@ async function loadOpomPage({append = false} = {}) {
   invalidateDryRun(append
     ? `已追加 OPOM ${incomingRows.length} 行，累计 ${opomRows.length} 行，请重新 AdsPower 匹配。`
     : `已从 OPOM 拉取 ${data.count || 0} 行，请先执行 AdsPower 匹配。`);
-  els.file.value = '';
+  if (els.file) els.file.value = '';
   els.opomSummary.textContent = `group=${group} status=${status} rows=${opomRows.length} pageRows=${incomingRows.length} addressMaps=${data.addressMappingCount || 0}${opomNextCursor ? ' hasMore=true' : ''}`;
   els.dryRunSummary.textContent = `已生成 ${selectedFile.name}，请先 Match AdsPower；启动执行时会自动预检。`;
   syncOpomPagination();
 }
 
 async function matchAdsPower() {
-  if (!opomRows.length) throw new Error('请先从 OPOM 拉取待充值账号，或上传账号选择 CSV');
+  if (!opomRows.length) throw new Error('请先从 OPOM 拉取需要充值的账号');
   syncRowsWithCurrentDefaults();
   const needsOpomResolve = opomRows.some((row) => !row.opom_account_id && (
     row.login_email || row.ads_power_user_id || row.ads_power_serial_number
@@ -1323,7 +1323,7 @@ async function useDiscoveredAdsPowerTargets() {
 }
 
 async function allocateCards({createCards = false} = {}) {
-  if (!opomRows.length) throw new Error('请先从 OPOM 拉取待充值账号，或上传账号选择 CSV');
+  if (!opomRows.length) throw new Error('请先从 OPOM 拉取需要充值的账号');
   await applyUploadedAddressCsvToRows();
   syncRowsWithCurrentDefaults();
   const uploadedCardCsv = els.ejhSafeCsv.files?.[0] ? await els.ejhSafeCsv.files[0].text() : '';
@@ -1418,7 +1418,7 @@ async function runDryRun() {
   await applyUploadedAddressCsvToRows();
   syncRowsWithCurrentDefaults();
   if (!selectedOpomRows().length) throw new Error('请至少勾选一行后再预检');
-  if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
+  if (!selectedCsvText.trim()) throw new Error('请先从 OPOM 拉取需要充值的账号');
   if (selectedScopeLabels().length === 0) throw new Error('请至少选择一个执行范围');
   syncExecutionCopy();
   lastDryRun = await api('/api/jobs/dry-run', {
@@ -1451,7 +1451,7 @@ async function runDryRun() {
 
 async function createLiveJob() {
   if (!selectedOpomRows().length) throw new Error('请至少勾选一行后再启动执行');
-  if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
+  if (!selectedCsvText.trim()) throw new Error('请先从 OPOM 拉取需要充值的账号');
   const mode = executionMode();
   if (!els.confirmLive.checked) throw new Error(mode.requireText);
   if (!lastDryRun || dryRunSignature !== currentSignature()) {
@@ -1741,7 +1741,7 @@ async function downloadSelectedResult(event) {
   URL.revokeObjectURL(objectUrl);
 }
 
-els.file.addEventListener('change', () => readSelectedFile().catch(showError));
+els.file?.addEventListener('change', () => readSelectedFile().catch(showError));
 els.opomPreviewBody.addEventListener('change', (event) => {
   const input = event.target;
   if (!(input instanceof HTMLInputElement) || !input.matches('.row-execute')) return;

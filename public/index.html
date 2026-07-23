@@ -171,7 +171,7 @@
                 <span class="step-index">1</span>
                 <div>
                   <h2>任务来源</h2>
-                  <p class="muted">从 OPOM group 或本地 CSV 生成待执行清单。</p>
+                  <p class="muted">从 OPOM 查询需要充值的账号生成待执行清单。</p>
                 </div>
               </div>
 
@@ -185,9 +185,7 @@
                 <label class="field">
                   <span>队列状态</span>
                   <select id="opomStatus">
-                    <option value="card_switch">低余额账号（CARD_SWITCH）</option>
-                    <option value="overdue">欠费账号（OVERDUE）</option>
-                    <option value="needs_recharge">按余额阈值待充值（兼容旧队列）</option>
+                    <option value="needs_recharge">需要充值的账号（CARD_SWITCH / OVERDUE）</option>
                     <option value="failed_retryable">失败后可重试</option>
                     <option value="all">组内全部账号（仅查看）</option>
                   </select>
@@ -207,11 +205,6 @@
                   <button id="adsPowerMatchBtn" type="button" class="primary" disabled>Match AdsPower</button>
                 </div>
               </div>
-
-              <label class="field file-field">
-                <span>或上传账号选择 CSV</span>
-                <input id="csvFile" type="file" accept=".csv,text/csv" />
-              </label>
 
               <div id="opomSummary" class="summary muted" role="status" aria-live="polite">未从 OPOM 拉取。</div>
             </section>

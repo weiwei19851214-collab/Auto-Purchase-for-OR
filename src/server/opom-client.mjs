@@ -274,6 +274,7 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
     const policy = account.rechargePolicy || {};
     const ads = account.adsPower || {};
     const health = account.health || {};
+    const activeCard = account.activeCard || account.card || account.bankCard || {};
     return {
       status: '',
       opom_account_id: account.opomAccountId || account.id || '',
@@ -281,11 +282,14 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
       ads_power_user_id: ads.userId || account.ads_power_user_id || '',
       ads_power_serial_number: ads.serialNumber || account.ads_power_serial_number || '',
       ads_power_group_name: ads.groupName || '',
+      opom_account_status: account.status || account.accountStatus || '',
       opom_health_status: health.status || (health.eligible === false ? 'unknown_blocked' : 'ok'),
       opom_health_reason: health.reason || '',
+      opom_card_status: activeCard.status || account.cardStatus || account.bankCardStatus || account.bank_card_status || '',
       ads_match_status: 'not_verified',
-      order_no: '',
-      card_no: '',
+      // OPOM 查询账号可能直接返回当前绑定卡；后续结果回调要用 orderNo + 完整卡号匹配禁卡。
+      order_no: activeCard.orderNo || activeCard.order_no || account.orderNo || account.order_no || '',
+      card_no: activeCard.cardNo || activeCard.card_no || account.cardNo || account.card_no || '',
       exp_month: '',
       exp_year: '',
       cvv: '',
@@ -407,6 +411,7 @@ export async function writeCardBinding(args, row, details, context = {}) {
 }
 
 export async function writeCompletedRow(args, row, details, context = {}) {
+  if (!args.opomWriteback || !plan.opomAccountId(row)) return {cardStatus: 'skipped', resultStatus: 'skipped'};
   if (args.scopePaymentMethod === false) {
     const result = await writeRowResult(args, row, details, {
       ...context,
@@ -415,8 +420,28 @@ export async function writeCompletedRow(args, row, details, context = {}) {
     });
     return {cardStatus: 'skipped', resultStatus: result.resultStatus};
   }
-  // 换卡范围保留现有绑卡写回合同，避免重复改变 OPOM 充值状态。
-  return writeCardBinding(args, row, details, context);
+  let cardStatus = 'skipped';
+  const secondaryFailures = [];
+  try {
+    const binding = await writeCardBinding(args, row, details, context);
+    cardStatus = binding.cardStatus;
+    if (binding.secondaryFailures?.length) secondaryFailures.push(...binding.secondaryFailures);
+  } catch (error) {
+    // 新 OPOM 合同以充值结果回传为准；绑卡写回失败不能阻止 completed 结果进入 OPOM recharge_record。
+    cardStatus = error.opomCardWritebackStatus || 'failed';
+  }
+  const result = await writeRowResult(args, row, details, {
+    ...context,
+    status: 'completed',
+    stage: 'closed_loop.complete',
+  });
+  return {
+    cardStatus,
+    resultStatus: result.resultStatus,
+    ...(secondaryFailures.length || result.secondaryFailures?.length
+      ? {secondaryFailures: [...secondaryFailures, ...(result.secondaryFailures || [])]}
+      : {}),
+  };
 }
 
 export async function writeRowResult(args, row, details, context = {}) {
@@ -473,8 +498,11 @@ function omitNegativeBalances(body) {
 function resultCard(row, details = {}) {
   const card = {};
   const orderNo = plan.ejhOrderNo(row);
+  // OPOM 充值结果需要完整卡号做卡状态处理；优先使用执行行里的安全卡 CSV 全卡号，details 仅作兜底。
+  const cardNo = plan.cardNumber(row) || String(details.cardNo || '').trim();
   const panLast4 = details.cardLast4 || cardLast4FromRow(row);
   if (orderNo) card.orderNo = orderNo;
+  if (cardNo) card.cardNo = cardNo;
   if (/^\d{4}$/.test(panLast4)) card.panLast4 = panLast4;
   return Object.keys(card).length ? card : null;
 }

@@ -22,6 +22,8 @@ const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
 const DEFAULT_CREDITS_ENTRY_WAIT_MS = 60000;
 const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
 const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000;
+// 新增银行卡页面已出现后，给 Stripe iframe 最多 20 秒完成挂载。
+const PAYMENT_TARGET_WAIT_MS = 20000;
 const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000;
 const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 60000;
 const DEFAULT_NAVIGATION_RETRIES = 3;
@@ -5147,7 +5149,7 @@ async function run() {
       billingAddress = await runLoggedStep('fill-billing-address-before-card-fill-retry', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
     }
 
-    let paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
+    let paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
     payment = await cdp(paymentWs);
     await installNetworkDiagnostics(payment);
     await payment.send('Runtime.enable');
@@ -5166,7 +5168,7 @@ async function run() {
       }), page);
       billingEntry = await runLoggedStep('open-billing-address-form-after-card-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
       billingAddress = await runLoggedStep('fill-billing-address-after-card-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
-      paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
+      paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
       payment = await cdp(paymentWs);
       await installNetworkDiagnostics(payment);
       await payment.send('Runtime.enable');
@@ -5191,7 +5193,7 @@ async function run() {
       }), page);
       billingEntry = await runLoggedStep('open-billing-address-form-after-save-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
       billingAddress = await runLoggedStep('fill-billing-address-after-save-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
-      paymentWs = await waitForPaymentTarget(input.debugPort, 15000);
+      paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
       payment = await cdp(paymentWs);
       await installNetworkDiagnostics(payment);
       await payment.send('Runtime.enable');

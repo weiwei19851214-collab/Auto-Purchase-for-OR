@@ -335,6 +335,24 @@ test('browser path can click icon-only add payment method button in Purchase Cre
   assert.match(script, /Total due/);
 });
 
+test('card save waits for the Saving state to finish before opening Purchase Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const saveWaitBody = script.slice(script.indexOf('async function waitUntilSaveModalCloses'), script.indexOf('async function verifyByPurchaseModal'));
+  assert.match(script, /const SAVE_PAYMENT_METHOD_WAIT_MS = 30000/);
+  assert.match(saveWaitBody, /Save payment method\|\\\\bSaving\\\\b/);
+  assert.match(saveWaitBody, /Save modal did not close after/);
+});
+
+test('stalled card-save recovery refreshes and verifies the existing card without another Save click', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const cardSaveBody = script.slice(script.indexOf("runLoggedStep('wait-save-modal-closes'"), script.indexOf("const purchaseResult = input.purchase.confirmed", script.indexOf("runLoggedStep('wait-save-modal-closes'")));
+  assert.match(script, /const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 30000/);
+  assert.match(cardSaveBody, /refresh-after-stalled-card-save/);
+  assert.match(cardSaveBody, /verify-saved-card-after-stalled-save/);
+  assert.match(cardSaveBody, /refreshOnTimeout:\s*false/);
+  assert.doesNotMatch(cardSaveBody, /click-save-payment-method-retry/);
+});
+
 test('browser path no longer disables Auto top-up before opening Add Credits', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.doesNotMatch(script, /disableExistingAutoTopupBeforeAddCredits/);

@@ -24,6 +24,12 @@ const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
 const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000;
 // 新增银行卡页面已出现后，给 Stripe iframe 最多 20 秒完成挂载。
 const PAYMENT_TARGET_WAIT_MS = 20000;
+// Credits 页新版金额卡片可能晚于操作按钮渲染，余额读取等待该金额进入 DOM。
+const CREDIT_BALANCE_READ_WAIT_MS = 20000;
+// 保存银行卡通常数秒完成；超过该时长仍显示 Saving 时停止本行，避免占满整行 180 秒超时。
+const SAVE_PAYMENT_METHOD_WAIT_MS = 30000;
+// 保存页卡在 Saving 时，只给刷新后的卡片回读一次短窗口，避免再次耗尽整行超时。
+const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 30000;
 const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000;
 const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 60000;
 const DEFAULT_NAVIGATION_RETRIES = 3;
@@ -531,10 +537,9 @@ async function dismissInterferingOverlays(page) {
         if (!hasCloseOrOk) return false;
         const protectedFlow = flowBlocker.test(item.text) && !/You must add a verified email to access this feature/i.test(item.text);
         if (protectedFlow) return false;
-        const isRealOverlay = item.role === 'dialog'
-          || item.modal === 'true'
-          || (item.stylePosition === 'fixed' && item.zIndex >= 10);
-        return allowedNonFlowOverlay.test(item.text) || isRealOverlay;
+        // 侧栏工作空间等布局容器也可能是 fixed，不能仅凭样式把它们当弹窗点击。
+        const isRealOverlay = item.role === 'dialog' || item.modal === 'true';
+        return isRealOverlay && allowedNonFlowOverlay.test(item.text);
       })
       .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
     const dialog = dialogs[0];
@@ -2630,28 +2635,33 @@ async function dismissBrowserChromeBubbles(page) {
   return {attempted: true, escapes, clickAway};
 }
 
-async function waitUntilSaveModalCloses(page) {
-  for (let i = 0; i < 60; i += 1) {
+async function waitUntilSaveModalCloses(page, timeoutMs = SAVE_PAYMENT_METHOD_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
     const state = await evaluate(page, `(() => {
       const text = document.body?.innerText || '';
       return {
-        stillSave: /Save payment method/.test(text),
+        // 按钮点击后文案会从 Save payment method 变为 Saving，二者都代表卡尚未持久化完成。
+        stillSaving: /Save payment method|\\bSaving\\b/i.test(text),
         challenge: /hCaptcha|3D Secure|complete the security|security code|bank verification|SMS|passkey|suspicious/i.test(text),
         hasAddCredits: /Add Credits/.test(text),
         tail: text.slice(-1500),
       };
     })()`);
+    lastState = state;
     if (state.challenge) throw new Error(`Security challenge visible: ${state.tail}`);
-    if (!state.stillSave && state.hasAddCredits) return state;
+    if (!state.stillSaving && state.hasAddCredits) return state;
     await sleep(SLOW_DOM_POLL_MS);
   }
-  const state = await evaluate(page, `(() => ({tail:(document.body?.innerText || '').slice(-2000)}))()`);
-  throw new Error(`Save modal did not close: ${state.tail}`);
+  throw new Error(`Save modal did not close after ${timeoutMs}ms: ${lastState?.tail || ''}`);
 }
 
-async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
-  return waitForPurchaseCard(page, expectedLast4, expectedExpiry, DEFAULT_DOM_WAIT_MS, {refreshOnTimeout: true});
+async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || DEFAULT_DOM_WAIT_MS);
+  const refreshOnTimeout = options.refreshOnTimeout !== false;
+  await waitForExactText(page, 'Add Credits', timeoutMs, {refreshOnTimeout});
+  return waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs, {refreshOnTimeout});
 }
 
 async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
@@ -2665,7 +2675,7 @@ async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutM
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
       return {
         purchase: /Purchase Credits/.test(text),
-        stillSaving: /Save payment method/.test(text),
+        stillSaving: /Save payment method|\\bSaving\\b/i.test(text),
         hasAddCredits: /Add Credits/.test(text),
         verified: brandAndLast4.test(text) || new RegExp(last4 + '[\\\\s\\\\S]*' + expiry.replace('/', '\\\\/') + '|' + expiry.replace('/', '\\\\/') + '[\\\\s\\\\S]*' + last4, 'i').test(text),
         tail: text.slice(-2000),
@@ -2845,8 +2855,11 @@ async function getPurchaseModalState(page) {
   })()`);
 }
 
-async function getCurrentCreditBalance(page) {
-  const state = await evaluate(page, `(() => {
+async function getCurrentCreditBalance(page, timeoutMs = CREDIT_BALANCE_READ_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const state = await evaluate(page, `(() => {
     const text = document.body?.innerText || '';
     const ariaBalance = [...document.querySelectorAll('[aria-label]')]
       .map((node) => node.getAttribute('aria-label') || '')
@@ -2855,6 +2868,29 @@ async function getCurrentCreditBalance(page) {
     const normalized = text.replace(/\\s+/g, ' ');
     const beforeBuy = normalized.split(/\\b(?:Buy|Add)\\s+Credits\\b|\\bAuto\\s*Top[- ]?Up\\b/i)[0] || normalized;
     const fromCreditsBlock = beforeBuy.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
+    const nodeValue = (node) => {
+      const attributes = ['aria-label', 'aria-valuetext', 'data-value', 'data-amount', 'data-balance', 'title']
+        .map((name) => node.getAttribute?.(name) || '');
+      const before = getComputedStyle(node, '::before').content || '';
+      const after = getComputedStyle(node, '::after').content || '';
+      return [node.innerText, node.textContent, node.value, ...attributes, before, after]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\\s+/g, ' ');
+    };
+    const totalAvailableLabel = [...document.querySelectorAll('main *, body *')]
+      .find((node) => /^TOTAL AVAILABLE$/i.test((node.innerText || node.textContent || '').trim()));
+    let totalAvailableCard = null;
+    for (let node = totalAvailableLabel; node && node !== document.body; node = node.parentElement) {
+      if (/Pay-as-you-go balance/i.test(nodeValue(node))) {
+        totalAvailableCard = node;
+        break;
+      }
+    }
+    const totalAvailableText = totalAvailableCard
+      ? [totalAvailableCard, ...totalAvailableCard.querySelectorAll('*')].map(nodeValue).join(' ')
+      : '';
+    const totalAvailableMatch = totalAvailableText.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -2878,20 +2914,23 @@ async function getCurrentCreditBalance(page) {
       })
       .filter(Boolean)
       .sort((a, b) => b.fontSize - a.fontSize || a.rect.y - b.rect.y)[0] || null;
-    const raw = ariaMatch?.[1] || fromCreditsBlock?.[1] || elementCandidate?.rawAmount || '';
+    const raw = ariaMatch?.[1] || totalAvailableMatch?.[1] || fromCreditsBlock?.[1] || elementCandidate?.rawAmount || '';
     const balance = raw ? Number(raw.replace(/[\\s,]/g, '')) : null;
     return {
       balance: Number.isFinite(balance) ? balance : null,
       raw,
-      source: ariaMatch ? 'aria_remaining_credits' : (fromCreditsBlock ? 'credits_text_block' : (elementCandidate ? 'visible_element' : 'not_found')),
+      source: ariaMatch
+        ? 'aria_remaining_credits'
+        : (totalAvailableMatch ? 'total_available_card' : (fromCreditsBlock ? 'credits_text_block' : (elementCandidate ? 'visible_element' : 'not_found'))),
       account: (text.match(/Personal Account:\\s*([^\\n]+)/) || [])[1] || '',
       tail: text.slice(-1800),
     };
-  })()`);
-  if (!Number.isFinite(state.balance)) {
-    throw new Error(`Could not parse current OpenRouter credit balance: ${state.tail}`);
+    })()`);
+    lastState = state;
+    if (Number.isFinite(state.balance)) return state;
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-  return state;
+  throw new Error(`Could not parse current OpenRouter credit balance after ${timeoutMs}ms: ${lastState?.tail || ''}`);
 }
 
 async function resolvePurchasePlan(page, purchase) {
@@ -5206,16 +5245,34 @@ async function run() {
     }
     await sleep(2000);
     await declineStripeLinkPrompts(input.debugPort);
-    const postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page), page);
+    let postSave;
+    let savedCardAfterStalledSave = null;
+    try {
+      postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page), page);
+    } catch (error) {
+      if (!/Save modal did not close after/i.test(error.message || '') || !input.openPurchaseForVerification) throw error;
+
+      // 某些账号保存卡后 UI 会长期停在 Saving。此处不重填、不重复点击保存，只刷新后核验该卡是否已落库。
+      await runLoggedStep('refresh-after-stalled-card-save', debugDir, () => refreshCreditsPageForRetry(page), page);
+      savedCardAfterStalledSave = await runLoggedStep('verify-saved-card-after-stalled-save', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry, {
+        timeoutMs: SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      postSave = {hasAddCredits: true, recoveredAfterStalledSave: true};
+    }
     let verified;
     if (input.openPurchaseForVerification) {
-      try {
-        verified = await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
-      } catch (error) {
-        if (/refreshed once/i.test(error.message || '')) throw error;
-        if (!isRetryablePageLoadError(error)) throw error;
-        await runLoggedStep('refresh-after-purchase-modal-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
-        verified = await runLoggedStep('verify-by-purchase-modal-retry', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+      if (savedCardAfterStalledSave) {
+        verified = savedCardAfterStalledSave;
+      } else {
+        try {
+          verified = await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+        } catch (error) {
+          if (/refreshed once/i.test(error.message || '')) throw error;
+          if (!isRetryablePageLoadError(error)) throw error;
+          await runLoggedStep('refresh-after-purchase-modal-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+          verified = await runLoggedStep('verify-by-purchase-modal-retry', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+        }
       }
     } else {
       verified = {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};

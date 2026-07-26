@@ -16,6 +16,8 @@ AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Aut
 - 绑定或替换 OpenRouter 支付卡。
 - 在账号要求时补充 billing address。
 - 配置并回读 Auto top-up。
+- 可选在充值前关闭 OpenRouter Workspace Guardrail 的 ZDR 策略，并保存后回读确认。
+- “仅关闭 ZDR，不执行其他操作”模式会关闭充值、绑卡、Billing、Auto Top-Up 和 OPOM 写回 scope，只运行账号校验与 ZDR 保存回读。
 - 在 no-purchase 测试模式下填写 Purchase Credits 金额，但不点击 `Purchase`。
 - 在基于 SQLite 的本地存储中记录 job 行、事件和已脱敏的结果 CSV。
 - 当启用 `opomWriteback` 时，可选择将已完成的绑卡信息和逐行执行结果写回 OPOM。
@@ -57,16 +59,17 @@ http://127.0.0.1:4100
 当前浏览器自动化以 OpenRouter Credits 页面为中心，打开 AdsPower 环境并进入
 Credits 页后，按下面顺序处理单个账号：
 
-1. 读取余额：如果低于 `145`，充值 `150`；否则充值 `20`。
-2. 确认当前 OpenRouter 登录账号和任务行邮箱一致。
-3. 处理支付方式：老账号直接添加或替换新卡，新账号先补充 billing address。
-4. 在 Stripe 卡表单里填写卡号、有效期、CVC、邮编等信息。
-5. 点击 `Save payment method`，等待支付方式保存完成。
-6. 打开或确认 Purchase Credits，点击购买并处理确认弹框。
-7. 回到 Credits 页刷新读取余额，确认余额已经增加。
-8. 按任务配置确认 Auto Top-Up 是否开启、金额和阈值是否正确。
-9. 如果启用 OPOM 写回，先写回卡绑定，再写回充值结果。
-10. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
+1. 确认当前 OpenRouter 登录账号和任务行邮箱一致。
+2. 如果任务启用了“关闭 ZDR”，先独立修改 Guardrails、保存并回读确认；该结果不依赖余额读取。
+3. 读取余额：如果低于 `145`，充值 `150`；否则充值 `20`。
+4. 处理支付方式：老账号直接添加或替换新卡，新账号先补充 billing address。
+5. 在 Stripe 卡表单里填写卡号、有效期、CVC、邮编等信息。
+6. 点击 `Save payment method`，等待支付方式保存完成。
+7. 打开或确认 Purchase Credits，点击购买并处理确认弹框。
+8. 回到 Credits 页刷新读取余额，确认余额已经增加。
+9. 按任务配置确认 Auto Top-Up 是否开启、金额和阈值是否正确。
+10. 如果启用 OPOM 写回，先写回卡绑定，再写回充值结果。
+11. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
 
 ## CSV 模板
 

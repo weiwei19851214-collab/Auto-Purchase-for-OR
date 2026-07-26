@@ -110,6 +110,8 @@ export function resultColumns() {
     'balance_before',
     'balance_after',
     'card_last4',
+    'zdr_status',
+    'zdr_changed',
     'auto_topup_status',
     'auto_topup_threshold',
     'auto_topup_amount',
@@ -227,6 +229,7 @@ export function safeAutoTopupPlan(row, args) {
 
 export function executionScope(args = {}) {
   return {
+    zdr: !!args.disableZdr,
     billingAddress: args.scopeBillingAddress !== false,
     paymentMethod: args.scopePaymentMethod !== false,
     purchase: args.scopePurchase !== false,
@@ -237,7 +240,7 @@ export function executionScope(args = {}) {
 export function validateScope(args = {}) {
   const scope = executionScope(args);
   const missing = [];
-  if (!scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
+  if (!scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
     missing.push('execution_scope');
   }
   if (scope.billingAddress && !scope.paymentMethod && (scope.purchase || scope.autoTopup)) {
@@ -249,6 +252,7 @@ export function validateScope(args = {}) {
 export function scopeSummary(args = {}) {
   const scope = executionScope(args);
   const labels = [];
+  if (scope.zdr) labels.push('zdr');
   if (scope.billingAddress) labels.push('billing_address');
   if (scope.paymentMethod) labels.push('payment_method');
   if (scope.purchase) labels.push(args.confirmPurchase === false ? 'purchase_prepare' : 'purchase');
@@ -294,11 +298,14 @@ export function buildClosedLoopTask(row, args) {
   const billingAddressOnly = scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
   const autoTopupOnly = scope.autoTopup && !scope.paymentMethod && !scope.purchase && !scope.billingAddress;
   const purchaseOnly = scope.purchase && !scope.paymentMethod;
+  const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
   const purchase = scope.purchase ? purchasePlan(row).purchase : {confirmed: false};
   return {
     profileNo: adsPowerSerialNumber(row) || undefined,
     profileId: adsPowerUserId(row) || undefined,
     expectedAccount: loginEmail(row),
+    disableZdr: scope.zdr,
+    zdrOnly,
     removeExistingPaymentMethod: scope.paymentMethod && args.removeExisting,
     existingBillingAddress: !scope.billingAddress || !billingComplete,
     billingAddressOnly,
@@ -488,6 +495,7 @@ export function successDetails(row, result, args) {
   const purchase = result.purchase || {};
   const verification = purchase.balanceVerification || {};
   const autoTopup = result.autoTopup || {};
+  const zdr = result.zdr || {};
   const scope = executionScope(args);
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
@@ -503,6 +511,8 @@ export function successDetails(row, result, args) {
     balanceBefore: verification.beforeBalance ?? purchase.beforeBalance?.balance ?? '',
     balanceAfter: verification.afterBalance ?? '',
     cardLast4: result.card?.last4 || cardLast4(cardNumber(row)),
+    zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? 'disabled' : 'not_configured')) : 'skipped',
+    zdrChanged: scope.zdr ? String(Boolean(zdr.changed)) : 'false',
     autoTopupStatus: scope.autoTopup
       ? (autoTopup.configured ? (autoTopup.changed ? 'updated' : 'unchanged') : 'not_configured')
       : 'skipped',
@@ -523,6 +533,8 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'balance_before', details.balanceBefore ?? '');
   setCell(header, row, 'balance_after', details.balanceAfter ?? '');
   setCell(header, row, 'card_last4', details.cardLast4 || '');
+  setCell(header, row, 'zdr_status', details.zdrStatus || '');
+  setCell(header, row, 'zdr_changed', details.zdrChanged || '');
   setCell(header, row, 'auto_topup_status', details.autoTopupStatus || '');
   setCell(header, row, 'auto_topup_threshold', details.autoTopupThreshold || '');
   setCell(header, row, 'auto_topup_amount', details.autoTopupAmount || '');

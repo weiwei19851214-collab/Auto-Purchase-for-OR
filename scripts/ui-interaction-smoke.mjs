@@ -97,6 +97,19 @@ try {
   add('CSV source is default', await page.locator('[data-source="csv"].is-selected').count() === 1, 'csv_default');
   add('OPOM source option visible', await page.locator('[data-source="opom"]').isVisible(), 'visible');
   add('AdsPower match button visible', await page.locator('#matchButton').isVisible(), 'visible');
+  add('ZDR-only switch is visible and defaults off', await page.locator('#zdrOnly').isVisible()
+    && !(await page.locator('#zdrOnly').isChecked()), 'default_off');
+  await page.click('label.zdr-only-row');
+  const disabledScopeControls = await page.locator(
+    '#balanceThreshold:disabled, #amountBelow:disabled, #amountAtOrAbove:disabled, #autoTopupEnableOnly:disabled, #autoTopupThreshold:disabled, #autoTopupAmount:disabled, #cardFileButton:disabled, #billingState:disabled',
+  ).count();
+  add('ZDR-only forces ZDR on and disables recharge controls', await page.locator('#disableZdr').isChecked()
+    && await page.locator('#disableZdr').isDisabled()
+    && disabledScopeControls === 8, `disabled=${disabledScopeControls}`);
+  await page.click('label.zdr-only-row');
+  add('leaving ZDR-only restores normal controls', !(await page.locator('#disableZdr').isChecked())
+    && !(await page.locator('#disableZdr').isDisabled())
+    && !(await page.locator('#balanceThreshold').isDisabled()), 'restored');
 
   await page.setInputFiles('#accountFile', csvPath);
   await page.waitForFunction(() => /1 个账号/.test(document.querySelector('#detailTitle')?.textContent || ''));
@@ -114,9 +127,39 @@ try {
   const previewAfterMatch = await page.locator('#matchBody').textContent();
   add('AdsPower mismatch visible as error not percent', /失败/.test(previewAfterMatch || '') && !/%/.test(previewAfterMatch || ''), 'match_error');
 
-  const bodyText = await page.locator('body').textContent();
   add('start remains disabled for failed match', await page.locator('#startButton').isDisabled(), 'disabled');
   add('confirmation dialog not opened for blocked row', !(await page.locator('#confirmDialog').evaluate((node) => node.open)), 'dialog_closed');
+  let zdrOnlyOptions = null;
+  await page.route('**/api/jobs/dry-run', async (route) => {
+    zdrOnlyOptions = route.request().postDataJSON?.()?.options || null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        planned: 1,
+        ready: 1,
+        blocked: 0,
+        skipped: 0,
+        liveConfirmationToken: 'ui-zdr-only-token',
+        rows: [],
+      }),
+    });
+  });
+  await page.click('label[for="skipMatch"], label.switch-row:has(#skipMatch)');
+  await page.click('label.zdr-only-row');
+  await page.click('#startButton');
+  await page.waitForFunction(() => document.querySelector('#confirmDialog')?.open === true);
+  add('ZDR-only dry-run payload skips every other scope', Boolean(zdrOnlyOptions)
+    && zdrOnlyOptions.disableZdr === true
+    && zdrOnlyOptions.scopeBillingAddress === false
+    && zdrOnlyOptions.scopePaymentMethod === false
+    && zdrOnlyOptions.scopePurchase === false
+    && zdrOnlyOptions.scopeAutoTopup === false
+    && zdrOnlyOptions.confirmPurchase === false
+    && zdrOnlyOptions.opomWriteback === false, JSON.stringify(zdrOnlyOptions || {}));
+  await page.locator('#confirmDialog .close-button').click();
+  const bodyText = await page.locator('body').textContent();
   add('UI text redaction after auto dry-run', !containsSensitive(bodyText), 'no_sensitive_values');
   add('no browser console errors', consoleErrors.length === 0, consoleErrors.length ? redact(consoleErrors.join(' | ')) : 'none');
   add('no page runtime errors', pageErrors.length === 0, pageErrors.length ? redact(pageErrors.join(' | ')) : 'none');

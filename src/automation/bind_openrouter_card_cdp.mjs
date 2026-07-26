@@ -13,6 +13,8 @@ import {isRechargeBalanceIncreaseVerified} from './lib/balance-verification.mjs'
 import {writeCardBinding} from '../server/opom-client.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
+const OPENROUTER_GUARDRAILS_URL = 'https://openrouter.ai/workspaces/default/guardrails';
+const OPENROUTER_GUARDRAILS_MODELS_URL = 'https://openrouter.ai/workspaces/default/guardrails/default/models';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
 // AdsPower can take longer to create a browser profile when several profiles
@@ -651,7 +653,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'zdr-only') {
       args[key] = true;
       continue;
     }
@@ -724,6 +726,16 @@ function readStdin() {
   }
 }
 
+function normalizeBooleanInput(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return false;
+  if (/^(false|0|no|off|null|undefined)$/i.test(normalized)) return false;
+  return true;
+}
+
 function normalizeInput(args) {
   if (args.help) {
     console.log(usage());
@@ -767,6 +779,12 @@ function normalizeInput(args) {
     || purchase.aboveAmount
     || process.env.PURCHASE_AMOUNT_AT_OR_ABOVE_THRESHOLD
     || '';
+  const disableZdrInput = args['disable-zdr'] !== undefined
+    ? args['disable-zdr']
+    : (json.disableZdr ?? json.disable_zdr ?? process.env.DISABLE_ZDR);
+  const zdrOnlyInput = args['zdr-only'] !== undefined
+    ? args['zdr-only']
+    : (json.zdrOnly ?? json.disableZdrOnly ?? json.disable_zdr_only ?? process.env.ZDR_ONLY);
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -792,6 +810,8 @@ function normalizeInput(args) {
     creditsStatusOnly: !!(args['credits-status-only'] || json.creditsStatusOnly),
     purchaseOnly: !!(args['purchase-only'] || json.purchaseOnly),
     existingBillingAddress: !!(args['existing-billing-address'] || json.existingBillingAddress),
+    disableZdr: normalizeBooleanInput(disableZdrInput),
+    zdrOnly: normalizeBooleanInput(zdrOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
     purchase: {
@@ -843,14 +863,17 @@ function normalizeInput(args) {
   };
 
   if (!input.expectedAccount) throw new Error('expectedAccount is required');
-  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly].filter(Boolean).length > 1) {
-    throw new Error('autoTopupOnly, billingAddressOnly, and creditsStatusOnly cannot be combined');
+  if (input.zdrOnly && !input.disableZdr) {
+    throw new Error('zdrOnly requires disableZdr');
   }
-  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly) && input.purchase.confirmed) {
-    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, or creditsStatusOnly');
+  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly].filter(Boolean).length > 1) {
+    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, and zdrOnly cannot be combined');
   }
-  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly)) {
-    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, or creditsStatusOnly');
+  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly) && input.purchase.confirmed) {
+    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, or zdrOnly');
+  }
+  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly)) {
+    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, or zdrOnly');
   }
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
@@ -862,7 +885,7 @@ function normalizeInput(args) {
     throw new Error('purchase.amount/--purchase-amount or a complete purchase.rule is required when purchase is confirmed or prepared');
   }
   if (input.purchase.confirmed || input.preparePurchaseOnly) input.openPurchaseForVerification = true;
-  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly;
+  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly;
   if (needsCard && (!input.card.number || !input.card.expiry || !input.card.cvc)) {
     throw new Error('card.number, card.expiry, and card.cvc are required');
   }
@@ -1363,6 +1386,404 @@ async function navigatePage(client, url, options = {}) {
   }
 
   throw new Error(`CDP navigation failed after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
+}
+
+function initialZdrResult(requested) {
+  return {
+    requested: !!requested,
+    configured: null,
+    changed: false,
+    status: requested ? 'pending' : 'skipped',
+    enabledBefore: null,
+    enabledAfter: null,
+    total: 0,
+    skipped: !requested,
+    reason: requested ? 'pending' : 'not_requested',
+  };
+}
+
+async function clickGuardrailsVisibleControl(page, pattern, label = pattern, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const rx = new RegExp(${JSON.stringify(pattern)}, 'i');
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+        .trim()
+        .replace(/\\s+/g, ' ');
+      const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true';
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const interactiveSelector = 'button,a,[role="button"],[role="tab"],[role="menuitem"],[role="link"]';
+      const direct = [...document.querySelectorAll(interactiveSelector)]
+        .filter((node) => visible(node) && !disabled(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .find((item) => rx.test(item.text));
+      if (direct) {
+        activate(direct.node);
+        return {clicked:true, label:direct.text, method:'interactive_text'};
+      }
+      const owner = [...document.querySelectorAll('body *')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .find((item) => rx.test(item.text) && item.text.length <= 260);
+      const target = owner?.node.closest?.(interactiveSelector);
+      if (target && visible(target) && !disabled(target)) {
+        activate(target);
+        return {clicked:true, label:textOf(target), method:'closest_interactive_text'};
+      }
+      return {clicked:false, tail:textOf(document.body).slice(-1600)};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Guardrails control not clickable: ${label}; ${last?.error || last?.tail || ''}`);
+}
+
+function zdrDomExpression(action = 'read') {
+  return `(() => {
+    const action = ${JSON.stringify(action)};
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    const checkedState = (node) => {
+      const aria = node.getAttribute?.('aria-checked');
+      if (/^(true|false)$/i.test(aria || '')) return aria === 'true';
+      const dataState = node.getAttribute?.('data-state') || '';
+      if (/^(checked|on|true)$/i.test(dataState)) return true;
+      if (/^(unchecked|off|false)$/i.test(dataState)) return false;
+      const input = node.matches?.('input') ? node : node.querySelector?.('input[type="checkbox"],input[role="switch"]');
+      if (input && typeof input.checked === 'boolean') return input.checked;
+      return null;
+    };
+    const disabled = (node) => (
+      node.disabled
+      || node.getAttribute?.('aria-disabled') === 'true'
+      || node.getAttribute?.('data-disabled') === 'true'
+    );
+    const activate = (node) => {
+      node.scrollIntoView?.({block:'center', inline:'center'});
+      node.focus?.({preventScroll:true});
+      if (typeof node.click === 'function') node.click();
+      else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    };
+    const labelForSwitch = (node) => {
+      let best = '';
+      let current = node;
+      for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        const rect = current.getBoundingClientRect();
+        if (text && text.length <= 260 && rect.height <= 170 && !/Zero\\s+Data\\s+Retention/i.test(text)) best = text;
+      }
+      return best || node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '';
+    };
+    const switchSelector = '[role="switch"],button[aria-checked],input[type="checkbox"][role="switch"],input[type="checkbox"][aria-checked]';
+    const allSwitchesIn = (root, heading) => [...root.querySelectorAll(switchSelector)]
+      .filter((node) => visible(node))
+      .filter((node) => {
+        if (!heading) return true;
+        const relation = heading.compareDocumentPosition(node);
+        return heading.contains(node) || !!(relation & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+    const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"],p,div,span')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text: textOf(node)}))
+      .filter((item) => /\\bZero\\s+Data\\s+Retention\\b/i.test(item.text) && item.text.length <= 260)
+      .sort((a, b) => a.text.length - b.text.length);
+    const candidates = [];
+    for (const heading of headings) {
+      let current = heading.node;
+      for (let depth = 0; current && depth < 11; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        if (!/Zero\\s+Data\\s+Retention/i.test(text)) continue;
+        const switches = allSwitchesIn(current, heading.node);
+        if (!switches.length) continue;
+        const rect = current.getBoundingClientRect();
+        const hasDataTraining = /\\bData\\s+Training\\b/i.test(text);
+        candidates.push({
+          node: current,
+          heading: heading.node,
+          text,
+          switches,
+          hasDataTraining,
+          score: (hasDataTraining ? -100000 : 0) + (switches.length * 10000) - Math.min(text.length, 6000) - Math.round((rect.width * rect.height) / 10000),
+        });
+      }
+    }
+    const section = candidates
+      .filter((candidate) => !candidate.hasDataTraining)
+      .sort((a, b) => b.score - a.score)[0];
+    if (!section) {
+      return {
+        found: false,
+        reason: candidates.length ? 'zdr_section_not_isolated_from_data_training' : 'zdr_section_not_found',
+        candidateCount: candidates.length,
+        href: location.href,
+        pageHasGuardrails: /Workspace\\s+Guardrail|Model\\s+&\\s+Provider\\s+Access|Zero\\s+Data\\s+Retention/i.test(textOf(document.body)),
+        tail: textOf(document.body).slice(-1600),
+      };
+    }
+    const switches = section.switches.map((node, index) => ({
+      node,
+      index,
+      checked: checkedState(node),
+      disabled: disabled(node),
+      label: labelForSwitch(node).slice(0, 260),
+    }));
+    let clicked = null;
+    if (action === 'disable-first-enabled') {
+      const target = switches.find((item) => item.checked === true && !item.disabled);
+      if (target) {
+        activate(target.node);
+        clicked = {index: target.index, label: target.label || String(target.index)};
+      }
+    }
+    return {
+      found: true,
+      href: location.href,
+      sectionText: section.text.slice(0, 1200),
+      total: switches.length,
+      switches: switches.map(({index, checked, disabled, label}) => ({index, checked, disabled, label})),
+      enabled: switches.filter((item) => item.checked === true).map((item) => item.label || String(item.index)),
+      unknown: switches.filter((item) => item.checked == null).map((item) => item.label || String(item.index)),
+      disabledEnabled: switches.filter((item) => item.checked === true && item.disabled).map((item) => item.label || String(item.index)),
+      clicked,
+    };
+  })()`;
+}
+
+async function readZdrSwitchState(page) {
+  const state = await evaluate(page, zdrDomExpression('read'), 15000);
+  if (!state.found) {
+    throw new Error(`Zero Data Retention section not found or isolated: ${state.reason}; tail=${state.tail || ''}`);
+  }
+  if (!state.total) throw new Error('Zero Data Retention section has no switches');
+  if (state.unknown?.length) {
+    throw new Error(`Zero Data Retention switch state cannot be established: ${state.unknown.join(', ')}`);
+  }
+  if (state.disabledEnabled?.length) {
+    throw new Error(`Zero Data Retention has enabled switches that cannot be changed: ${state.disabledEnabled.join(', ')}`);
+  }
+  return state;
+}
+
+async function waitForZdrPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await readZdrSwitchState(page);
+    } catch (error) {
+      lastError = error;
+      await sleep(DEFAULT_DOM_POLL_MS);
+    }
+  }
+  throw lastError || new Error('Zero Data Retention panel did not load');
+}
+
+async function openZdrGuardrailsPanel(page, options = {}) {
+  if (!options.skipNavigate) {
+    await navigatePage(page, OPENROUTER_GUARDRAILS_MODELS_URL);
+    await sleep(PAGE_SETTLE_MS);
+  }
+  const initial = await readZdrSwitchState(page).catch(() => null);
+  if (initial) {
+    return {
+      navigated: !options.skipNavigate,
+      directUrl: !options.skipNavigate ? OPENROUTER_GUARDRAILS_MODELS_URL : '',
+      alreadyOpen: true,
+      state: initial,
+    };
+  }
+  if (!options.skipNavigate) {
+    await navigatePage(page, OPENROUTER_GUARDRAILS_URL);
+    await sleep(PAGE_SETTLE_MS);
+  }
+  const workspace = await clickGuardrailsVisibleControl(page, '\\bWorkspace\\s+Guardrail\\b', 'Workspace Guardrail');
+  await sleep(1000);
+  const tab = await clickGuardrailsVisibleControl(page, '\\bModel\\s*&\\s*Provider\\s+Access\\b', 'Model & Provider Access');
+  await sleep(PAGE_SETTLE_MS);
+  const state = await waitForZdrPanel(page);
+  return {navigated: !options.skipNavigate, workspace, tab, state};
+}
+
+async function waitForZdrSwitchProgress(page, previousEnabledCount, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readZdrSwitchState(page);
+    if (lastState.enabled.length < previousEnabledCount) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Zero Data Retention switch did not transition off after click; still enabled: ${(lastState?.enabled || []).join(', ')}`);
+}
+
+async function clickEnabledZdrSwitches(page) {
+  const before = await readZdrSwitchState(page);
+  if (!before.enabled.length) return {changed: false, before, afterClick: before, clicks: []};
+  const guardLimit = before.total + 3;
+  const clicks = [];
+  let current = before;
+  for (let attempt = 1; attempt <= guardLimit && current.enabled.length; attempt += 1) {
+    const previousEnabledCount = current.enabled.length;
+    const clicked = await evaluate(page, zdrDomExpression('disable-first-enabled'), 15000);
+    if (!clicked?.clicked) {
+      throw new Error(`Zero Data Retention enabled switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+    }
+    current = await waitForZdrSwitchProgress(page, previousEnabledCount);
+    clicks.push({
+      attempt,
+      clicked: clicked.clicked,
+      enabledBefore: previousEnabledCount,
+      enabledAfter: current.enabled.length,
+    });
+  }
+  if (current.enabled.length) {
+    throw new Error(`Zero Data Retention disable loop exceeded guard limit ${guardLimit}; still enabled: ${current.enabled.join(', ')}`);
+  }
+  return {changed: true, before, afterClick: current, clicks};
+}
+
+async function clickGuardrailsSave(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '').trim().replace(/\\s+/g, ' ');
+      const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true' || node.getAttribute?.('data-disabled') === 'true';
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const buttons = [...document.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node), disabled:disabled(node), rect:node.getBoundingClientRect()}))
+        .filter((item) => /^Save$/i.test(item.text) || /^Save\\s+Changes$/i.test(item.text));
+      const target = buttons
+        .filter((item) => !item.disabled)
+        .sort((a, b) => a.rect.top - b.rect.top || b.rect.right - a.rect.right)[0];
+      if (!target) {
+        return {clicked:false, found:buttons.length, disabled:buttons.filter((item) => item.disabled).map((item) => item.text), tail:textOf(document.body).slice(-1200)};
+      }
+      activate(target.node);
+      return {clicked:true, text:target.text, method:'top_right_save', x:target.rect.right, y:target.rect.top};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Zero Data Retention Save button not clickable: ${JSON.stringify(last)}`);
+}
+
+async function clickGuardrailsConfirmationIfPresent(page, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '').trim().replace(/\\s+/g, ' ');
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"]')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}));
+      const dialog = dialogs.find((item) => /Confirm\\s+Eligibility\\s+Changes|Confirm|Eligibility/i.test(item.text));
+      if (!dialog) return {found:false};
+      const button = [...dialog.node.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node))
+        .find((node) => /Confirm\\s*&\\s*Save|Confirm|Save/i.test(textOf(node)) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+      if (!button) return {found:true, clicked:false, reason:'confirm_button_not_found', text:dialog.text.slice(0, 600)};
+      const text = textOf(button);
+      activate(button);
+      return {found:true, clicked:true, text};
+    })()`, 15000).catch((error) => ({found: false, clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    if (!last.found) {
+      await sleep(500);
+      continue;
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  return last?.found ? last : {found: false, clicked: false};
+}
+
+async function configureOpenRouterZdr(page) {
+  const opened = await openZdrGuardrailsPanel(page);
+  const initial = opened.state || await readZdrSwitchState(page);
+  const enabledBefore = initial.enabled || [];
+  if (!enabledBefore.length) {
+    return {
+      requested: true,
+      configured: true,
+      changed: false,
+      status: 'already_disabled',
+      enabledBefore,
+      enabledAfter: [],
+      total: initial.total,
+      switches: initial.switches,
+      opened,
+    };
+  }
+  const toggled = await clickEnabledZdrSwitches(page);
+  const save = await clickGuardrailsSave(page);
+  const confirmation = await clickGuardrailsConfirmationIfPresent(page);
+  await sleep(PAGE_SETTLE_MS);
+  const reopened = await openZdrGuardrailsPanel(page, {skipNavigate: false});
+  const verified = reopened.state || await waitForZdrPanel(page);
+  const enabledAfter = verified.enabled || [];
+  if (enabledAfter.length) {
+    throw new Error(`Zero Data Retention verification failed; still enabled: ${enabledAfter.join(', ')}`);
+  }
+  return {
+    requested: true,
+    configured: true,
+    changed: true,
+    status: 'disabled',
+    enabledBefore,
+    enabledAfter,
+    total: verified.total,
+    switches: verified.switches,
+    opened,
+    save,
+    confirmation,
+    reopened,
+    toggledCount: toggled.before.enabled.length,
+    toggledClicks: toggled.clicks,
+  };
 }
 
 async function ensureCreditsPage(page) {
@@ -4906,14 +5327,16 @@ async function run() {
       autoTopupOnly: rawInput.autoTopupOnly,
       creditsStatusOnly: rawInput.creditsStatusOnly,
       purchaseOnly: rawInput.purchaseOnly,
+      zdrOnly: rawInput.zdrOnly,
       preparePurchaseOnly: rawInput.preparePurchaseOnly,
       purchaseConfirmed: rawInput.purchase?.confirmed,
       autoTopupEnabled: rawInput.autoTopup?.enabled,
+      disableZdr: rawInput.disableZdr,
     },
   });
   const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
   input.debugPort ||= debugPortFromWs(input.browserWs);
-  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly;
+  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly;
   const {last4, masked} = bindsCard ? maskCard(input.card.number) : {last4: '', masked: ''};
   const expectedExpiry = bindsCard ? displayExpiry(input.card.expiry) : '';
   if (bindsCard && !last4) throw new Error('Could not determine card last4');
@@ -4925,7 +5348,9 @@ async function run() {
   let payment;
   let accountForRecovery = '';
   let purchasePlanForRecovery = null;
+  let purchaseSideEffectStarted = false;
   let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
+  let zdrResult = initialZdrResult(input.disableZdr);
 
   try {
     await page.send('Runtime.enable');
@@ -4934,16 +5359,41 @@ async function run() {
     writeDiagnostic(debugDir, 'network-diagnostics', {kind: 'network_diagnostics', page: pageNetworkDiagnostics});
     writeDiagnostic(debugDir, 'dialog-auto-accept', {kind: 'dialog_auto_accept', dialogAutoAccept});
 	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
-	    const accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
-      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+	    let accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
+      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly,
     }), page);
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
 	    }
 	    if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
 	      throw new Error(`OpenRouter account mismatch: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
-	    }
+    }
     accountForRecovery = accountState.account;
+
+    if (input.disableZdr) {
+      zdrResult = await runLoggedStep('disable-openrouter-zdr', debugDir, () => configureOpenRouterZdr(page), page);
+      if (input.zdrOnly) {
+        return {
+          ok: true,
+          status: zdrResult.changed ? 'zdr_configured' : 'zdr_unchanged',
+          account: accountState.account,
+          launch: input.launch,
+          zdr: zdrResult,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      await runLoggedStep('navigate-credits-page-after-zdr', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+      accountState = await runLoggedStep('wait-account-state-after-zdr', debugDir, () => waitForAccountState(page, {
+        requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+      }), page);
+      if (accountState.signin || !accountState.account) {
+        throw new Error(`login_required: OpenRouter credits page is not logged in after ZDR configuration; tail=${accountState.tail || ''}`);
+      }
+      if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
+        throw new Error(`OpenRouter account mismatch after ZDR configuration: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
+      }
+      accountForRecovery = accountState.account;
+    }
 
     if (!input.creditsStatusOnly && !input.autoTopupOnly && !accountState.canAddCredits && !accountState.canAddPaymentMethod) {
       throw new Error(`Payment entry not ready after waiting: neither Add Credits nor Add a Payment Method is clickable; disabled=${(accountState.disabledEntryButtons || []).join(',')}; tail=${accountState.tail}`);
@@ -4959,6 +5409,7 @@ async function run() {
         status: 'credits_status',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         balance,
         autoTopup,
         elapsedMs: Date.now() - startedAt,
@@ -4999,6 +5450,7 @@ async function run() {
         status: autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentMethod,
         autoTopup: autoTopupResult,
         elapsedMs: Date.now() - startedAt,
@@ -5008,9 +5460,15 @@ async function run() {
       await runLoggedStep('open-add-credits-purchase-only', debugDir, () => openPurchaseCreditsModal(page), page);
       await sleep(PAGE_SETTLE_MS);
       const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
-      const purchaseResult = input.purchase.confirmed
-        ? await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
+      let purchaseResult;
+      if (input.purchase.confirmed) {
+        purchaseSideEffectStarted = true;
+        purchaseResult = await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+      } else {
+        purchaseResult = input.preparePurchaseOnly
+          ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page)
+          : skippedPurchaseResult;
+      }
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
@@ -5023,6 +5481,7 @@ async function run() {
           : (input.preparePurchaseOnly ? 'prepared_purchase_existing' : (autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged')),
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentMethod,
         preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
@@ -5066,9 +5525,15 @@ async function run() {
       }), page);
     }
     if (paymentPath.alreadyBound) {
-      const purchaseResult = input.purchase.confirmed
-        ? await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-        : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
+      let purchaseResult;
+      if (input.purchase.confirmed) {
+        purchaseSideEffectStarted = true;
+        purchaseResult = await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+      } else {
+        purchaseResult = input.preparePurchaseOnly
+          ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page)
+          : skippedPurchaseResult;
+      }
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
@@ -5084,6 +5549,7 @@ async function run() {
         account: accountState.account,
         card: {last4, masked, expiry: expectedExpiry},
         launch: input.launch,
+        zdr: zdrResult,
         removal,
         preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
@@ -5131,6 +5597,7 @@ async function run() {
         status: 'billing_address_ready_for_card',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentPath: {
           entry: paymentPath.entry,
           clicked: paymentPath.clicked?.label || '',
@@ -5158,6 +5625,7 @@ async function run() {
           account: accountState.account,
           card: {last4, masked, expiry: expectedExpiry},
           launch: input.launch,
+          zdr: zdrResult,
           removal,
           paymentPath,
           billingEntry,
@@ -5277,9 +5745,15 @@ async function run() {
     } else {
       verified = {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
     }
-    const purchaseResult = input.purchase.confirmed
-      ? await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page)
-      : (input.preparePurchaseOnly ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page) : skippedPurchaseResult);
+    let purchaseResult;
+    if (input.purchase.confirmed) {
+      purchaseSideEffectStarted = true;
+      purchaseResult = await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+    } else {
+      purchaseResult = input.preparePurchaseOnly
+        ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page)
+        : skippedPurchaseResult;
+    }
     if (input.preparePurchaseOnly) purchaseResult.submitted = false;
     if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
     if (input.openPurchaseForVerification && !input.purchase.confirmed) await closePurchaseModal(page);
@@ -5292,6 +5766,7 @@ async function run() {
       account: accountState.account,
       card: {last4, masked, expiry: expectedExpiry},
       launch: input.launch,
+      zdr: zdrResult,
       removal,
       autoTopup: autoTopupResult,
       purchase: purchaseResult,
@@ -5305,7 +5780,7 @@ async function run() {
       ...(input.verbose ? {stripeValues: stripeState.values} : {}),
     };
   } catch (error) {
-    if (input.purchase.confirmed && /CDP command timeout|Runtime\.evaluate|Runtime\.enable/i.test(error.message || '') && input.debugPort) {
+    if (purchaseSideEffectStarted && input.purchase.confirmed && /CDP command timeout|Runtime\.evaluate|Runtime\.enable/i.test(error.message || '') && input.debugPort) {
       const recovery = await recoverPurchaseAfterAutomationTimeout(page, purchasePlanForRecovery, input.debugPort, input.confirmationDebugDir).catch((recoveryError) => {
         throw recoveryError;
       });
@@ -5327,6 +5802,7 @@ async function run() {
           account: accountForRecovery || input.expectedAccount,
           card: {last4, masked, expiry: expectedExpiry},
           launch: input.launch,
+          zdr: zdrResult,
           preAddCreditsAutoTopup,
           autoTopup: autoTopupResult,
           purchase: recoveredPurchase,

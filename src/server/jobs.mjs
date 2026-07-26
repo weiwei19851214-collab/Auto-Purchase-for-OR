@@ -229,6 +229,7 @@ function publicOptions(options) {
     scopePaymentMethod: args.scopePaymentMethod,
     scopePurchase: args.scopePurchase,
     scopeAutoTopup: args.scopeAutoTopup,
+    disableZdr: args.disableZdr,
     autoTopupThreshold: args.autoTopupThreshold,
     autoTopupAmount: args.autoTopupAmount,
     rowTimeoutMs: args.rowTimeoutMs,
@@ -249,6 +250,7 @@ function publicOptions(options) {
 
 function runnerScope(args) {
   const labels = [];
+  if (args.disableZdr) labels.push('zdr');
   if (args.scopeBillingAddress) labels.push('billing_address');
   if (args.scopePaymentMethod) labels.push('payment_method');
   if (args.scopePurchase) labels.push(args.confirmPurchase ? 'purchase' : 'purchase_prepare');

@@ -37,6 +37,15 @@ try {
     && /id=["']autoTopupThreshold["'][^>]*value=["']100["']/.test(html)
     && /id=["']autoTopupAmount["'][^>]*value=["']150["']/.test(html), '145/150/20 auto=100/150');
   add('auto top-up enable-only switch present', /id=["']autoTopupEnableOnly["'][^>]*role=["']switch["']/.test(html), 'present');
+  add('ZDR switch defaults off and is wired', /id=["']disableZdr["'][^>]*role=["']switch["']/.test(html)
+    && /disableZdr:\s*zdrOnly\s*\|\|\s*el\.disableZdr\.checked/.test(appJs)
+    && !/id=["']disableZdr["'][^>]*checked/.test(html), 'default_off');
+  add('ZDR-only switch disables all other execution scopes', /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
+    && /scopeBillingAddress:\s*zdrOnly\s*\?\s*false/.test(appJs)
+    && /scopePaymentMethod:\s*zdrOnly\s*\?\s*false/.test(appJs)
+    && /scopePurchase:\s*!zdrOnly/.test(appJs)
+    && /scopeAutoTopup:\s*!zdrOnly/.test(appJs)
+    && /opomWriteback:\s*!zdrOnly/.test(appJs), 'zdr_only_scope');
   add('auto recharge scheduler switch present', /id=["']autoRechargeEnabled["'][^>]*role=["']switch["']/.test(html)
     && /\/api\/scheduler/.test(appJs), 'present');
   add('mapping and concurrency controls present', /id=["']matchButton["']/.test(html) && /id=["']skipMatch["']/.test(html) && /id=["']concurrency["'][^>]*max=["']10["']/.test(html), 'present');
@@ -44,7 +53,8 @@ try {
   add('execution page job recovery wired', /URLSearchParams\(location\.search\)\.get\(['"]job/.test(executionJs) && /resume-preview/.test(executionJs) && /opom-writeback-repair/.test(executionJs), 'wired');
   add('result CSV download uses session header', /X-Runner-Session/.test(executionJs), 'session_header');
   add('deprecated UI controls removed from main page', !/createCardsBtn|noPurchaseMode|adspowerStatusMode|adspowerDiscoverTargetsBtn|addressMappingCsv|EJH_APP_KEY|EJH_APP_SECRET|Python/.test(html), 'removed');
-  add('OPOM writeback is backend default, not a page checkbox', !/id=["']opomWriteback["']/.test(html) && /opomWriteback:\s*true/.test(appJs), 'backend_default');
+  add('OPOM writeback is enabled for recharge and skipped for ZDR-only', !/id=["']opomWriteback["']/.test(html)
+    && /opomWriteback:\s*!zdrOnly/.test(appJs), 'scope_aware');
   add('AdsPower status writeback forced disabled', /adspowerStatusMode:\s*['"]disabled['"]/.test(appJs) && !/group_move|remark_append|Discover groups/.test(html), 'disabled');
   add('light/dark/high-contrast tokens present', /color-scheme:\s*light dark/.test(css) && /body\.high-contrast/.test(css), 'themes');
   add('44px controls retained', /--control:\s*44px/.test(css), '44px');

@@ -28,6 +28,7 @@ export function normalizedOptions(options = {}) {
     scopePaymentMethod: args.scopePaymentMethod,
     scopePurchase: args.scopePurchase,
     scopeAutoTopup: args.scopeAutoTopup,
+    disableZdr: args.disableZdr,
     autoTopupThreshold: args.autoTopupThreshold,
     autoTopupAmount: args.autoTopupAmount,
     rowTimeoutMs: args.rowTimeoutMs,

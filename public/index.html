@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>OpenRouter 充值准备</title>
-    <link rel="stylesheet" href="/styles.css?v=20260723-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260726-1" />
   </head>
   <body>
     <header class="toolbar">
@@ -94,6 +94,16 @@
                 <input id="amountAtOrAbove" type="number" min="0" step="1" value="20" inputmode="decimal" />
               </label>
             </div>
+            <label class="switch-row zdr-row">
+              <span><strong>关闭 ZDR</strong></span>
+              <input id="disableZdr" type="checkbox" role="switch" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+            <label class="switch-row zdr-only-row">
+              <span><strong>仅关闭 ZDR，不执行其他操作</strong></span>
+              <input id="zdrOnly" type="checkbox" role="switch" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
           </article>
 
           <article class="control-card auto-card">
@@ -230,6 +240,7 @@
           <div><span>账号来源</span><strong id="confirmSource">CSV</strong></div>
           <div><span>子任务</span><strong id="confirmRows">0</strong></div>
           <div><span>充值规则</span><strong id="confirmRule">145/150/20</strong></div>
+          <div><span>ZDR</span><strong id="confirmZdr">保持现状</strong></div>
           <div><span>安全检查</span><strong id="confirmReadiness">—</strong></div>
         </div>
         <p class="confirmation-warning">将创建正常执行任务。任务创建后即使关闭页面，后台 Worker 仍会继续处理。</p>
@@ -317,6 +328,6 @@
       <a id="executionFallbackLink" href="/execution.html" target="_blank" rel="noopener">打开执行页</a>
     </div>
 
-    <script src="/app.js?v=20260723-2"></script>
+    <script src="/app.js?v=20260726-1"></script>
   </body>
 </html>

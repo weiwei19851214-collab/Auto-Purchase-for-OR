@@ -934,6 +934,45 @@ test('writeCompletedRow writes an OPOM result without binding a card for card-fr
   });
 });
 
+test('writeCompletedRow preserves an existing card without writing the unused CSV card to OPOM', async () => {
+  const calls = [];
+  await withFetch(async (url, options) => {
+    calls.push({url: String(url), body: JSON.parse(options.body)});
+    return Response.json({data: {ok: true}});
+  }, async () => {
+    const result = await writeCompletedRow({
+      opomWriteback: true,
+      scopePaymentMethod: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      runId: 'run_preserve_1',
+      opomWritebackRetries: 1,
+    }, {
+      opom_account_id: 'acct_1',
+      login_email: 'user@example.com',
+      ads_power_user_id: 'profile_ok',
+      ads_power_serial_number: '1415',
+      order_no: 'unused_csv_order',
+      card_no: '5257970000000001',
+      exp_month: '06',
+      exp_year: '28',
+    }, {
+      purchaseStatus: 'verified',
+      purchaseAmount: '10',
+      balanceBefore: '20',
+      balanceAfter: '30',
+      cardLast4: '4321',
+      paymentMethodAction: 'existing_preserved',
+    }, {rowNumber: 2});
+
+    assert.deepEqual(result, {cardStatus: 'skipped_existing_preserved', resultStatus: 'written'});
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/results$/);
+    assert.equal(Object.hasOwn(calls[0].body, 'card'), false);
+    assert.doesNotMatch(JSON.stringify(calls), /unused_csv_order|5257970000000001/);
+  });
+});
+
 test('writeCompletedRow writes OPOM card binding and final recharge result without CVV value', async () => {
   const calls = [];
   await withFetch(async (url, options) => {

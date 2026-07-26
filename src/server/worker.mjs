@@ -226,6 +226,7 @@ export class JobWorker {
           ads_power_serial_number = COALESCE(NULLIF(?, ''), ads_power_serial_number),
           card_no = COALESCE(NULLIF(?, ''), card_no),
           card_last4 = COALESCE(NULLIF(?, ''), card_last4),
+          payment_method_action = COALESCE(NULLIF(?, ''), payment_method_action),
           card_provider = COALESCE(NULLIF(?, ''), card_provider),
           card_type = COALESCE(NULLIF(?, ''), card_type),
           expires_at = COALESCE(NULLIF(?, ''), expires_at),
@@ -253,6 +254,7 @@ export class JobWorker {
         result.details?.adsPowerSerialNumber || row.ads_power_serial_number || '',
         result.details?.cardNo || '',
         result.details?.cardLast4 || '',
+        result.details?.paymentMethodAction || '',
         row.card_provider || result.details?.cardProvider || '',
         result.details?.cardType || row.card_type || '',
         result.details?.cardExpiresAt || row.expires_at || '',
@@ -271,6 +273,17 @@ export class JobWorker {
         finishedAt,
         row.id,
       );
+      if (result.details?.paymentMethodAction === 'existing_preserved') {
+        this.db.prepare(`
+          UPDATE job_rows
+          SET ejh_order_no = '',
+            card_no = '',
+            card_provider = '',
+            card_type = '',
+            expires_at = ''
+          WHERE id = ?
+        `).run(row.id);
+      }
       addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
         status: result.status,
         stage: result.stage,
@@ -384,6 +397,7 @@ export class JobWorker {
       details: {
         cardLast4: row.card_last4 || '',
         cardNo: row.card_no || '',
+        paymentMethodAction: row.payment_method_action || '',
         opomAccountId: row.opom_account_id || '',
         username: row.username_masked || row.login_email_masked || '',
         loginEmail: row.login_email_masked || row.username_masked || '',
@@ -476,6 +490,7 @@ export class JobWorker {
           balanceAfter: row.balance_after,
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          paymentMethodAction: row.payment_method_action || '',
           zdrStatus: row.zdr_status || '',
           zdrChanged: row.zdr_changed || '',
           autoTopupStatus: row.auto_topup_status,

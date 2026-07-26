@@ -429,13 +429,16 @@ export async function writeCardBinding(args, row, details, context = {}) {
 
 export async function writeCompletedRow(args, row, details, context = {}) {
   if (!args.opomWriteback || !plan.opomAccountId(row)) return {cardStatus: 'skipped', resultStatus: 'skipped'};
-  if (args.scopePaymentMethod === false) {
+  if (args.scopePaymentMethod === false || details.paymentMethodAction === 'existing_preserved') {
     const result = await writeRowResult(args, row, details, {
       ...context,
       status: 'completed',
       stage: 'closed_loop.complete',
     });
-    return {cardStatus: 'skipped', resultStatus: result.resultStatus};
+    return {
+      cardStatus: details.paymentMethodAction === 'existing_preserved' ? 'skipped_existing_preserved' : 'skipped',
+      resultStatus: result.resultStatus,
+    };
   }
   let cardStatus = 'skipped';
   const secondaryFailures = [];
@@ -513,6 +516,7 @@ function omitNegativeBalances(body) {
 }
 
 function resultCard(row, details = {}) {
+  if (details.paymentMethodAction === 'existing_preserved') return null;
   const card = {};
   const orderNo = plan.ejhOrderNo(row);
   // OPOM 充值结果需要完整卡号做卡状态处理；优先使用执行行里的安全卡 CSV 全卡号，details 仅作兜底。

@@ -93,6 +93,16 @@ test('runnerArgs carries the explicit AdsPower match waiver', () => {
   assert.equal(runnerArgs({}).skipAdsPowerMatch, false);
 });
 
+test('runnerArgs keeps replacement as default and makes preserve-existing mutually exclusive', () => {
+  const defaults = runnerArgs({});
+  assert.equal(defaults.removeExisting, true);
+  assert.equal(defaults.preserveExistingPaymentMethod, false);
+
+  const preserve = runnerArgs({removeExisting: true, preserveExistingPaymentMethod: true});
+  assert.equal(preserve.removeExisting, false);
+  assert.equal(preserve.preserveExistingPaymentMethod, true);
+});
+
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {
   const args = runnerArgs({scopePurchase: false, confirmPurchase: true, preparePurchaseOnly: true});
   assert.equal(args.scopePurchase, false);
@@ -262,6 +272,42 @@ test('buildClosedLoopTask maps scoped purchase without card to purchaseOnly mode
   assert.equal(task.autoTopup.enabled, true);
   assert.equal(task.removeExistingPaymentMethod, false);
   assert.equal(task.card.number || '', '');
+});
+
+test('buildClosedLoopTask passes preserve-existing card policy to the browser task', () => {
+  const task = rechargePlan.buildClosedLoopTask({
+    ID: '1415',
+    username: 'user@example.com',
+    amount: '10',
+    card_number: '5257970000000001',
+    exp_month: '06',
+    exp_year: '28',
+    cvv: '456',
+    postal_code: '97001',
+  }, runnerArgs({
+    scopePaymentMethod: true,
+    preserveExistingPaymentMethod: true,
+    scopeAutoTopup: false,
+  }));
+  assert.equal(task.preserveExistingPaymentMethod, true);
+  assert.equal(task.removeExistingPaymentMethod, false);
+  assert.equal(task.card.number, '5257970000000001');
+});
+
+test('preserve-existing browser policy inspects any saved card before the removal and add-card path', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const preserveStart = script.indexOf('if (input.preserveExistingPaymentMethod)');
+  const removalStart = script.indexOf('const removal = input.removeExistingPaymentMethod', preserveStart);
+  assert.ok(preserveStart > 0);
+  assert.ok(removalStart > preserveStart);
+  assert.match(script.slice(preserveStart, removalStart), /inspectSavedPaymentMethod/);
+  assert.match(script.slice(preserveStart, removalStart), /paymentMethodAction = 'existing_preserved'/);
+  assert.match(script, /paymentMethodAction:\s*recoveryPaymentMethodAction/);
+  assert.match(script, /card:\s*recoveryCard/);
+  const uiInspectionStart = script.indexOf('async function verifySavedPaymentMethodFromCreditsUi');
+  const nextFunction = script.indexOf('async function openPurchaseCreditsModal', uiInspectionStart);
+  assert.doesNotMatch(script.slice(uiInspectionStart, nextFunction), /Add a Payment Method|Add Payment Method/);
+  assert.match(script, /const customerNotFound = \/Customer not found\/i/);
 });
 
 test('billing-address-only browser path refuses Add Credits fallback', () => {
@@ -690,6 +736,29 @@ test('createJob rejects stale dry-run confirmation when options change', async (
         fileName: 'account.csv',
         csvText: VALID_CSV,
         options: {removeExisting: false},
+        liveConfirmationToken: dryRun.liveConfirmationToken,
+      }),
+      /CSV or options changed after dry-run/i,
+    );
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('createJob rejects stale dry-run confirmation when preserve-existing policy changes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-stale-preserve-token-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({
+      fileName: 'account.csv',
+      csvText: VALID_CSV,
+      options: {removeExisting: true, preserveExistingPaymentMethod: false},
+    });
+    await assert.rejects(
+      () => createJob(db, {
+        fileName: 'account.csv',
+        csvText: VALID_CSV,
+        options: {removeExisting: false, preserveExistingPaymentMethod: true},
         liveConfirmationToken: dryRun.liveConfirmationToken,
       }),
       /CSV or options changed after dry-run/i,
@@ -1358,6 +1427,69 @@ test('repairOpomWriteback completes verified opom writeback failures without rer
     const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
     assert.match(resultCsv, /completed/);
     assert.match(resultCsv, /OPOM writeback repaired without rerunning purchase/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('repairOpomWriteback preserves the existing-card decision and never binds the unused CSV card', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-opom-repair-preserved-card-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, options) => {
+      calls.push({url: String(url), body: JSON.parse(options.body)});
+      return Response.json({data: {ok: true}});
+    };
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      preserveExistingPaymentMethod: true,
+    };
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_CANONICAL_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_CANONICAL_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const row = jobDetails(db, created.job.id).rows[0];
+    db.prepare(`
+      UPDATE job_rows
+      SET status = 'failed',
+        stage = 'opom.writeback',
+        message = 'OPOM result request failed',
+        purchase_status = 'verified',
+        purchase_amount = '10',
+        balance_before = '20',
+        balance_after = '30',
+        card_last4 = '4321',
+        payment_method_action = 'existing_preserved',
+        opom_card_writeback_status = 'skipped_existing_preserved',
+        opom_result_writeback_status = 'failed'
+      WHERE id = ?
+    `).run(row.id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+
+    const repaired = await repairOpomWriteback(db, created.job.id, {rowNumber: 2});
+
+    assert.equal(repaired.rows[0].status, 'completed');
+    assert.equal(repaired.rows[0].paymentMethodAction, 'existing_preserved');
+    assert.equal(repaired.rows[0].cardNo, '');
+    assert.equal(repaired.rows[0].ejhOrderNo, '');
+    assert.equal(repaired.rows[0].opomCardWritebackStatus, 'skipped_existing_preserved');
+    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/results$/);
+    assert.equal(calls[0].body.card, undefined);
+    assert.doesNotMatch(JSON.stringify(calls), /5257970000000001|ejh_order_1/);
+    const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.match(resultCsv, /payment_method_action/);
+    assert.match(resultCsv, /existing_preserved/);
+    assert.doesNotMatch(resultCsv, /5257970000000001|ejh_order_1/);
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(dir, {recursive: true, force: true});

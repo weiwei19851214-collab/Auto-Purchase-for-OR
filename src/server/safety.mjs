@@ -21,6 +21,7 @@ export function normalizedOptions(options = {}) {
   const args = runnerArgs(options);
   return {
     removeExisting: args.removeExisting,
+    preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
     stopProfiles: args.stopProfiles,
     confirmPurchase: args.confirmPurchase,
     preparePurchaseOnly: args.preparePurchaseOnly,

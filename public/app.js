@@ -666,6 +666,7 @@
   function renderControls() {
     const opom = state.source === 'opom';
     const zdrOnly = el.zdrOnly.checked;
+    const cardFile = el.cardFile.files?.[0];
     if (zdrOnly) el.disableZdr.checked = true;
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
@@ -680,6 +681,10 @@
     el.autoTopupAmount.disabled = zdrOnly || el.autoTopupEnableOnly.checked;
     el.cardFileButton.disabled = zdrOnly;
     el.cardFile.disabled = zdrOnly;
+    el.preserveExistingCard.disabled = zdrOnly || !cardFile;
+    el.cardFileLabel.textContent = cardFile
+      ? `${el.preserveExistingCard.checked ? '有卡保留 · 无卡新增' : '替换'} · ${cardFile.name}`
+      : '未选择';
     el.billingState.disabled = zdrOnly;
     document.querySelector('.three-inputs')?.classList.toggle('scope-control-disabled', zdrOnly);
     document.querySelector('.auto-card')?.classList.toggle('scope-control-disabled', zdrOnly);
@@ -783,14 +788,16 @@
 
   function optionsPayload() {
     const zdrOnly = el.zdrOnly.checked;
-    const replaceCard = Boolean(el.cardFile.files?.length);
+    const hasCardCsv = Boolean(el.cardFile.files?.length);
+    const preserveExistingPaymentMethod = !zdrOnly && hasCardCsv && el.preserveExistingCard.checked;
     return {
-      scopeBillingAddress: zdrOnly ? false : replaceCard,
-      scopePaymentMethod: zdrOnly ? false : replaceCard,
+      scopeBillingAddress: zdrOnly ? false : hasCardCsv,
+      scopePaymentMethod: zdrOnly ? false : hasCardCsv,
       scopePurchase: !zdrOnly,
       scopeAutoTopup: !zdrOnly,
       disableZdr: zdrOnly || el.disableZdr.checked,
-      removeExisting: zdrOnly ? false : replaceCard,
+      removeExisting: !zdrOnly && hasCardCsv && !preserveExistingPaymentMethod,
+      preserveExistingPaymentMethod,
       stopProfiles: true,
       skipAdsPowerMatch: el.skipMatch.checked,
       concurrency: String(clampInteger(el.concurrency, 1, 10, 1)),
@@ -874,6 +881,7 @@
       file: [file.name, file.size, file.lastModified],
       rows: selectedRows().map((row) => rowKeys(row)[0] || ''),
       skip: el.skipMatch.checked,
+      preserveExistingPaymentMethod: el.preserveExistingCard.checked,
     });
   }
 
@@ -1189,7 +1197,9 @@
     el.accountFile.value = '';
     el.cardFile.value = '';
     el.accountFileLabel.textContent = '未选择';
-    el.cardFileLabel.textContent = '不替换卡片';
+    el.cardFileLabel.textContent = '未选择';
+    el.preserveExistingCard.checked = false;
+    el.preserveExistingCard.disabled = true;
     el.opomGroup.value = 'VIP';
     el.opomStatus.value = 'card_switch&overdue';
     el.opomLimit.value = '50';
@@ -1238,13 +1248,18 @@
     el.cardFileButton.addEventListener('click', () => el.cardFile.click());
     el.cardFile.addEventListener('change', () => {
       const file = el.cardFile.files?.[0];
-      el.cardFileLabel.textContent = file ? `替换 · ${file.name}` : '不替换卡片';
+      if (!file) el.preserveExistingCard.checked = false;
       state.cardAllocationSignature = '';
       invalidatePreparation();
-      renderRows();
+      renderControls();
       if (file && state.rows.length && canStart()) {
         withBusy(el.cardFileButton, '分配中…', ensureCardsAllocated).catch(showError);
       }
+    });
+    el.preserveExistingCard.addEventListener('change', () => {
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderControls();
     });
 
     ['opomGroup', 'opomStatus', 'opomLimit'].forEach((key) => {

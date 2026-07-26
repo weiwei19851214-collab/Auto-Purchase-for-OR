@@ -64,8 +64,10 @@ function normalizeCardProvider(value) {
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
   const concurrency = Math.min(10, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
+  const preserveExistingPaymentMethod = !!options.preserveExistingPaymentMethod;
   return {
-    removeExisting: options.removeExisting !== false,
+    removeExisting: !preserveExistingPaymentMethod && options.removeExisting !== false,
+    preserveExistingPaymentMethod,
     stopProfiles: options.stopProfiles !== false,
     skipAdsPowerMatch: !!options.skipAdsPowerMatch,
     concurrency,
@@ -221,6 +223,7 @@ export function publicJob(row) {
     resultCsvReady: existsSync(row.result_csv_path),
     options: {
       removeExisting: args.removeExisting,
+      preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
       stopProfiles: args.stopProfiles,
       concurrency: args.concurrency,
       confirmPurchase: args.confirmPurchase,
@@ -279,6 +282,7 @@ export function publicRow(row) {
     ejhOrderNo: row.ejh_order_no,
     cardNo: row.card_no,
     cardLast4: row.card_last4,
+    paymentMethodAction: row.payment_method_action || '',
     cardProvider: row.card_provider,
     cardType: row.card_type,
     cardExpiresAt: row.expires_at,
@@ -407,6 +411,7 @@ function uniqueColumns(columns) {
 }
 
 function outcomeDetailsWithMetadata(details, metadata, runId) {
+  const existingPreserved = details.paymentMethodAction === 'existing_preserved';
   return {
     ...details,
     runId: firstPresent(details.runId, runId),
@@ -421,8 +426,8 @@ function outcomeDetailsWithMetadata(details, metadata, runId) {
     opomHealthReason: firstPresent(details.opomHealthReason, metadata.opomHealthReason),
     opomCardStatus: firstPresent(details.opomCardStatus, metadata.opomCardStatus),
     adsMatchStatus: firstPresent(details.adsMatchStatus, metadata.adsMatchStatus),
-    ejhOrderNo: firstPresent(details.ejhOrderNo, metadata.ejhOrderNo),
-    cardNo: firstPresent(details.cardNo, metadata.cardNo),
+    ejhOrderNo: existingPreserved ? '' : firstPresent(details.ejhOrderNo, metadata.ejhOrderNo),
+    cardNo: existingPreserved ? '' : firstPresent(details.cardNo, metadata.cardNo),
     opomCardWritebackStatus: firstPresent(details.opomCardWritebackStatus, metadata.opomCardWritebackStatus),
     opomResultWritebackStatus: firstPresent(details.opomResultWritebackStatus, metadata.opomResultWritebackStatus),
     adspowerTagStatus: firstPresent(details.adspowerTagStatus, metadata.adspowerTagStatus),
@@ -710,6 +715,7 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
     balanceBefore: result.purchase?.beforeBalance?.balance ?? '',
     balanceAfter: '',
     cardLast4: result.card?.last4 || commonModule.cardLast4(planModule.cardNumber(row)),
+    paymentMethodAction: result.paymentMethodAction || '',
     zdrStatus: args.disableZdr
       ? (result.zdr?.status || (result.zdr?.configured ? 'disabled' : 'not_configured'))
       : 'skipped',

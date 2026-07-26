@@ -220,6 +220,7 @@ function publicOptions(options) {
   const args = runnerArgs(options);
   return {
     removeExisting: args.removeExisting,
+    preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
     stopProfiles: args.stopProfiles,
     concurrency: args.concurrency,
     confirmPurchase: args.confirmPurchase,
@@ -332,6 +333,7 @@ export async function cancelJob(db, jobId) {
         details: {
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          paymentMethodAction: row.payment_method_action || '',
           cardProvider: row.card_provider,
           cardType: row.card_type,
           cardExpiresAt: row.expires_at,
@@ -537,6 +539,7 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
     balanceBefore: row.balance_before,
     balanceAfter: row.balance_after,
     cardLast4: row.card_last4 || plan.cardLast4(plan.cardNumber(originalRow)),
+    paymentMethodAction: row.payment_method_action || '',
     autoTopupStatus: row.auto_topup_status || 'skipped',
     autoTopupThreshold: row.auto_topup_threshold,
     autoTopupAmount: row.auto_topup_amount,
@@ -564,6 +567,17 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
         updated_at = ?
       WHERE id = ?
     `).run(writeback.cardStatus, writeback.resultStatus, now, now, row.id);
+    if (row.payment_method_action === 'existing_preserved') {
+      db.prepare(`
+        UPDATE job_rows
+        SET ejh_order_no = '',
+          card_no = '',
+          card_provider = '',
+          card_type = '',
+          expires_at = ''
+        WHERE id = ?
+      `).run(row.id);
+    }
     addEvent(db, jobId, 'opom.writeback_repaired', `row ${rowNumber}: OPOM writeback repaired without rerunning purchase`, {
       rowNumber,
       opomCardWritebackStatus: writeback.cardStatus,
@@ -663,6 +677,12 @@ export async function resumeJob(db, jobId, payload = {}) {
       purchase_amount = '',
       balance_before = '',
       balance_after = '',
+      ejh_order_no = ?,
+      card_no = ?,
+      card_provider = ?,
+      card_type = ?,
+      expires_at = ?,
+      payment_method_action = '',
       auto_topup_status = '',
       auto_topup_threshold = '',
       auto_topup_amount = '',
@@ -677,7 +697,19 @@ export async function resumeJob(db, jobId, payload = {}) {
       updated_at = ?
     WHERE id = ?
   `);
-  for (const rowId of queueIds) resetRow.run(now, rowId);
+  for (const rowId of queueIds) {
+    const rowState = rows.find((row) => row.id === rowId);
+    const originalRow = originalRowFromJobCsv(job, rowState.raw_index);
+    resetRow.run(
+      plan.ejhOrderNo(originalRow),
+      plan.cardNumber(originalRow),
+      plan.cardProvider(originalRow),
+      plan.cardType(originalRow),
+      plan.cardExpiresAt(originalRow),
+      now,
+      rowId,
+    );
+  }
   db.prepare(`
     UPDATE jobs
     SET status = 'queued',
@@ -731,6 +763,7 @@ async function rewriteResumeResult(db, jobId) {
         balanceAfter: row.balance_after,
         cardLast4: row.card_last4,
         cardNo: row.card_no,
+        paymentMethodAction: row.payment_method_action || '',
         cardProvider: row.card_provider,
         cardType: row.card_type,
         cardExpiresAt: row.expires_at,

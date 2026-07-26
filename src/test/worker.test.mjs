@@ -85,6 +85,57 @@ test('worker records row exceptions and continues safe batches', async () => {
   }
 });
 
+test('worker clears the unused CSV card from preserved-card row state and result CSV', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-preserved-card-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {preserveExistingPaymentMethod: true};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_STATUS_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_STATUS_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async () => ({
+        status: 'completed',
+        stage: 'closed_loop.complete',
+        message: 'completed',
+        details: {
+          purchaseStatus: 'verified',
+          purchaseAmount: '10',
+          balanceBefore: '20',
+          balanceAfter: '30',
+          cardLast4: '4321',
+          paymentMethodAction: 'existing_preserved',
+          autoTopupStatus: 'updated',
+          autoTopupThreshold: '2',
+          autoTopupAmount: '25',
+        },
+        safeToContinue: true,
+        stopProfile: true,
+        profileStop: {attempted: false},
+      }),
+    });
+
+    await worker.runJob(created.job.id);
+
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].status, 'completed');
+    assert.equal(details.rows[0].paymentMethodAction, 'existing_preserved');
+    assert.equal(details.rows[0].cardNo, '');
+    assert.equal(details.rows[0].ejhOrderNo, '');
+    assert.equal(details.rows[0].cardLast4, '4321');
+    const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.match(resultCsv, /existing_preserved/);
+    assert.doesNotMatch(resultCsv, /5257970000000001|order_1/);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('worker continues later rows after manual security blocker', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-security-continue-'));
   try {

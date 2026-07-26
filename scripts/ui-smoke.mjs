@@ -37,6 +37,9 @@ try {
     && /id=["']autoTopupThreshold["'][^>]*value=["']100["']/.test(html)
     && /id=["']autoTopupAmount["'][^>]*value=["']150["']/.test(html), '145/150/20 auto=100/150');
   add('auto top-up enable-only switch present', /id=["']autoTopupEnableOnly["'][^>]*role=["']switch["']/.test(html), 'present');
+  add('preserve existing payment card switch present', /id=["']preserveExistingCard["'][^>]*role=["']switch["'][^>]*disabled/.test(html)
+    && /preserveExistingPaymentMethod/.test(appJs)
+    && /有卡保留 · 无卡新增/.test(appJs), 'default_replace_optional_preserve');
   add('ZDR switch defaults off and is wired', /id=["']disableZdr["'][^>]*role=["']switch["']/.test(html)
     && /disableZdr:\s*zdrOnly\s*\|\|\s*el\.disableZdr\.checked/.test(appJs)
     && !/id=["']disableZdr["'][^>]*checked/.test(html), 'default_off');

@@ -809,6 +809,7 @@ function normalizeInput(args) {
     billingAddressOnly: !!(args['billing-address-only'] || json.billingAddressOnly),
     creditsStatusOnly: !!(args['credits-status-only'] || json.creditsStatusOnly),
     purchaseOnly: !!(args['purchase-only'] || json.purchaseOnly),
+    preserveExistingPaymentMethod: !!json.preserveExistingPaymentMethod,
     existingBillingAddress: !!(args['existing-billing-address'] || json.existingBillingAddress),
     disableZdr: normalizeBooleanInput(disableZdrInput),
     zdrOnly: normalizeBooleanInput(zdrOnlyInput),
@@ -1843,6 +1844,7 @@ async function verifySavedPaymentMethodFromCreditsUi(page, timeoutMs = DEFAULT_D
       const last4 = match?.match?.[2] || match?.match?.[1] || '';
       return {
         verified: /^\\d{4}$/.test(last4),
+        absenceVerified: false,
         paymentMethodCount: /^\\d{4}$/.test(last4) ? 1 : 0,
         paymentMethods: /^\\d{4}$/.test(last4) ? [{type:'card', brand:'', last4}] : [],
         source: 'credits_ui',
@@ -1851,7 +1853,7 @@ async function verifySavedPaymentMethodFromCreditsUi(page, timeoutMs = DEFAULT_D
     if (state.verified) return state;
     await sleep(DEFAULT_DOM_POLL_MS);
   }
-  return state || {verified: false, paymentMethodCount: 0, paymentMethods: [], source: 'credits_ui'};
+  return state || {verified: false, absenceVerified: false, paymentMethodCount: 0, paymentMethods: [], source: 'credits_ui'};
 }
 
 async function openPurchaseCreditsModal(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
@@ -1873,34 +1875,44 @@ async function openPurchaseCreditsModal(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   throw new Error(`Add Credits was clicked but Purchase Credits amount modal did not open after ${timeoutMs}ms: ${state?.tail || ''}`);
 }
 
-async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
+async function inspectSavedPaymentMethod(page, expectedAccount) {
   const stripe = await fetchStripeData(page);
   if (!stripe.ok) {
     if (stripe.status === 404) {
+      await openPurchaseCreditsModal(page).catch(() => null);
       const uiFallback = await verifySavedPaymentMethodFromCreditsUi(page);
-      if (uiFallback.verified) {
+      const customerNotFound = /Customer not found/i.test(stripe.text || '');
+      if (uiFallback.verified || customerNotFound) {
         return {
           ...uiFallback,
+          absenceVerified: customerNotFound,
           source: 'stripe_data_404_ui_fallback',
         };
       }
-      throw new Error(`Could not verify saved payment method before Auto top-up: ${stripe.status} ${stripe.text}; Credits UI fallback found no saved payment method`);
+      throw new Error(`Could not determine whether a saved payment method exists: ${stripe.status} ${stripe.text}`);
     }
-    throw new Error(`Could not verify saved payment method before Auto top-up: ${stripe.status} ${stripe.text}`);
+    throw new Error(`Could not inspect saved payment method: ${stripe.status} ${stripe.text}`);
   }
   const expected = String(expectedAccount || '').trim().toLowerCase();
   const customerEmail = String(stripe.customerEmail || '').trim().toLowerCase();
   if (expected && customerEmail && expected !== customerEmail) {
-    throw new Error(`Stripe customer mismatch before Auto top-up: expected ${expectedAccount}, got ${stripe.customerEmail}`);
-  }
-  if (!stripe.paymentMethods.length) {
-    throw new Error('Saved payment method is required before Auto top-up configuration');
+    throw new Error(`Stripe customer mismatch while inspecting saved payment method: expected ${expectedAccount}, got ${stripe.customerEmail}`);
   }
   return {
-    verified: true,
+    verified: stripe.paymentMethods.length > 0,
+    absenceVerified: stripe.paymentMethods.length === 0,
     paymentMethodCount: stripe.paymentMethods.length,
     paymentMethods: stripe.paymentMethods.map(maskPaymentMethod),
+    source: 'stripe_data',
   };
+}
+
+async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
+  const paymentMethod = await inspectSavedPaymentMethod(page, expectedAccount);
+  if (!paymentMethod.verified) {
+    throw new Error('Could not verify saved payment method before Auto top-up: Credits UI fallback found no saved payment method');
+  }
+  return paymentMethod;
 }
 
 async function clearDefaultPaymentMethod(page) {
@@ -5245,6 +5257,13 @@ async function writeOpomCardBindingAfterPurchase(input, purchaseResult, cardSumm
   if (input.purchaseOnly) {
     return {cardStatus: 'skipped', resultStatus: 'skipped', reason: 'card_binding_out_of_scope'};
   }
+  if (cardSummary?.paymentMethodAction === 'existing_preserved') {
+    return {
+      cardStatus: 'skipped',
+      resultStatus: 'skipped',
+      reason: 'existing_payment_method_preserved',
+    };
+  }
   const {row: opomRow = {}, ...opomArgs} = input.opom;
   const row = {
     ...opomRow,
@@ -5349,6 +5368,8 @@ async function run() {
   let accountForRecovery = '';
   let purchasePlanForRecovery = null;
   let purchaseSideEffectStarted = false;
+  let recoveryCard = {last4, masked, expiry: expectedExpiry};
+  let recoveryPaymentMethodAction = 'uploaded_card_added';
   let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
   let zdrResult = initialZdrResult(input.disableZdr);
 
@@ -5491,6 +5512,58 @@ async function run() {
         purchaseModalOpened: input.purchase.confirmed || input.preparePurchaseOnly,
         elapsedMs: Date.now() - startedAt,
       };
+    }
+    if (input.preserveExistingPaymentMethod) {
+      const paymentMethod = await runLoggedStep(
+        'inspect-saved-payment-method-preserve-mode',
+        debugDir,
+        () => inspectSavedPaymentMethod(page, input.expectedAccount),
+        page,
+      );
+      if (paymentMethod.verified) {
+        await runLoggedStep('open-add-credits-preserved-card', debugDir, () => openPurchaseCreditsModal(page), page);
+        await sleep(PAGE_SETTLE_MS);
+        const existingCard = paymentMethod.paymentMethods[0] || {};
+        const paymentMethodAction = 'existing_preserved';
+        recoveryCard = existingCard;
+        recoveryPaymentMethodAction = paymentMethodAction;
+        let purchaseResult;
+        if (input.purchase.confirmed) {
+          purchaseSideEffectStarted = true;
+          purchaseResult = await runLoggedStep('execute-confirmed-purchase-preserved-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+        } else {
+          purchaseResult = input.preparePurchaseOnly
+            ? await runLoggedStep('prepare-purchase-preserved-card', debugDir, () => preparePurchase(page, purchasePlan), page)
+            : skippedPurchaseResult;
+        }
+        if (input.preparePurchaseOnly) purchaseResult.submitted = false;
+        if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
+        if (!input.purchase.confirmed) await closePurchaseModal(page);
+        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {
+          last4: existingCard.last4 || '',
+          paymentMethodAction,
+        }, debugDir);
+        const autoTopupResult = await runLoggedStep('configure-auto-topup-preserved-card', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
+        return {
+          ok: true,
+          status: input.purchase.confirmed
+            ? 'purchased_existing_preserved'
+            : (input.preparePurchaseOnly ? 'prepared_purchase_existing_preserved' : (autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged')),
+          account: accountState.account,
+          card: existingCard,
+          launch: input.launch,
+          zdr: zdrResult,
+          paymentMethod,
+          paymentMethodAction,
+          preAddCreditsAutoTopup,
+          autoTopup: autoTopupResult,
+          purchase: purchaseResult,
+          opomCardWriteback,
+          verified: true,
+          purchaseModalOpened: input.purchase.confirmed || input.preparePurchaseOnly,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
     }
     const removal = input.removeExistingPaymentMethod
       ? await clearDefaultPaymentMethod(page)
@@ -5771,6 +5844,7 @@ async function run() {
       autoTopup: autoTopupResult,
       purchase: purchaseResult,
       opomCardWriteback,
+      paymentMethodAction: 'uploaded_card_added',
       linkCheckedAfterUncheck: stripeState.linkChecked,
       postSave: {hasAddCredits: postSave.hasAddCredits},
       preAddCreditsAutoTopup,
@@ -5794,15 +5868,19 @@ async function run() {
           result: {submitted: true, state: {timeoutRecovery: true}},
           balanceVerification: recovery.balanceVerification,
         };
-        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, recoveredPurchase, {last4}, debugDir);
+        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, recoveredPurchase, {
+          last4: recoveryCard.last4 || '',
+          paymentMethodAction: recoveryPaymentMethodAction,
+        }, debugDir);
         const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
         return {
           ok: true,
           status: 'purchased_after_timeout_recovery',
           account: accountForRecovery || input.expectedAccount,
-          card: {last4, masked, expiry: expectedExpiry},
+          card: recoveryCard,
           launch: input.launch,
           zdr: zdrResult,
+          paymentMethodAction: recoveryPaymentMethodAction,
           preAddCreditsAutoTopup,
           autoTopup: autoTopupResult,
           purchase: recoveredPurchase,

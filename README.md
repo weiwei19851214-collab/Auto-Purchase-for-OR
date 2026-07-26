@@ -62,7 +62,7 @@ Credits 页后，按下面顺序处理单个账号：
 1. 确认当前 OpenRouter 登录账号和任务行邮箱一致。
 2. 如果任务启用了“关闭 ZDR”，先独立修改 Guardrails、保存并回读确认；该结果不依赖余额读取。
 3. 读取余额：如果低于 `145`，充值 `150`；否则充值 `20`。
-4. 处理支付方式：老账号直接添加或替换新卡，新账号先补充 billing address。
+4. 处理支付方式：上传支付卡 CSV 时默认替换账号原卡；开启“只新增不替换”后，已有卡的账号继续使用原卡，只有完全没有支付卡的账号才新增 CSV 卡。新账号按需先补充 billing address。
 5. 在 Stripe 卡表单里填写卡号、有效期、CVC、邮编等信息。
 6. 点击 `Save payment method`，等待支付方式保存完成。
 7. 打开或确认 Purchase Credits，点击购买并处理确认弹框。
@@ -248,7 +248,7 @@ Feishu 的临时交接物。表头保持唯一，因此电子表格工具和 Fei
 稳定交接列包括：
 
 ```csv
-run_id,row_number,opom_account_id,profile_id,ads_power_user_id,ads_power_serial_number,username,login_email,opom_health_status,opom_health_reason,ejh_order_no,cardno,task_status,task_message,purchase_status,purchase_amount,balance_before,balance_after,card_last4,auto_topup_status,auto_topup_threshold,auto_topup_amount,opom_card_writeback_status,opom_result_writeback_status,adspower_tag_status,adspower_status_mode,adspower_status_target,adspower_status_reason,completion_evidence_status,completion_evidence_missing
+run_id,row_number,opom_account_id,profile_id,ads_power_user_id,ads_power_serial_number,username,login_email,opom_health_status,opom_health_reason,ejh_order_no,cardno,task_status,task_message,purchase_status,purchase_amount,balance_before,balance_after,card_last4,payment_method_action,auto_topup_status,auto_topup_threshold,auto_topup_amount,opom_card_writeback_status,opom_result_writeback_status,adspower_tag_status,adspower_status_mode,adspower_status_target,adspower_status_reason,completion_evidence_status,completion_evidence_missing
 ```
 
 结果 CSV 可以在 `cardno` 中包含短期使用的完整卡号，用于线下对账。它不得包含

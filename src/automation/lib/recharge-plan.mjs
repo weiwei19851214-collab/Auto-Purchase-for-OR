@@ -110,6 +110,7 @@ export function resultColumns() {
     'balance_before',
     'balance_after',
     'card_last4',
+    'payment_method_action',
     'zdr_status',
     'zdr_changed',
     'auto_topup_status',
@@ -307,6 +308,7 @@ export function buildClosedLoopTask(row, args) {
     disableZdr: scope.zdr,
     zdrOnly,
     removeExistingPaymentMethod: scope.paymentMethod && args.removeExisting,
+    preserveExistingPaymentMethod: scope.paymentMethod && args.preserveExistingPaymentMethod,
     existingBillingAddress: !scope.billingAddress || !billingComplete,
     billingAddressOnly,
     autoTopupOnly,
@@ -511,6 +513,7 @@ export function successDetails(row, result, args) {
     balanceBefore: verification.beforeBalance ?? purchase.beforeBalance?.balance ?? '',
     balanceAfter: verification.afterBalance ?? '',
     cardLast4: result.card?.last4 || cardLast4(cardNumber(row)),
+    paymentMethodAction: result.paymentMethodAction || '',
     zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? 'disabled' : 'not_configured')) : 'skipped',
     zdrChanged: scope.zdr ? String(Boolean(zdr.changed)) : 'false',
     autoTopupStatus: scope.autoTopup
@@ -533,6 +536,7 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'balance_before', details.balanceBefore ?? '');
   setCell(header, row, 'balance_after', details.balanceAfter ?? '');
   setCell(header, row, 'card_last4', details.cardLast4 || '');
+  setCell(header, row, 'payment_method_action', details.paymentMethodAction || '');
   setCell(header, row, 'zdr_status', details.zdrStatus || '');
   setCell(header, row, 'zdr_changed', details.zdrChanged || '');
   setCell(header, row, 'auto_topup_status', details.autoTopupStatus || '');

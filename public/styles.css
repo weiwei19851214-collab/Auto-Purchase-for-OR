@@ -474,6 +474,68 @@ select { padding-right: 28px; }
 
 .support-stack .control-card { min-height: 0; }
 .mini-card { padding: 10px 12px; gap: 6px; }
+.mini-card-heading {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mini-card label.mini-switch {
+  position: relative;
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  gap: 5px;
+  color: var(--secondary);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.mini-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.mini-switch-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border: 1px solid var(--separator);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tertiary) 22%, var(--surface-solid));
+  transition: background-color 160ms ease, opacity 160ms ease;
+}
+
+.mini-switch-track::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  content: "";
+  transition: transform 160ms ease;
+}
+
+.mini-switch input:checked + .mini-switch-track { background: var(--green); }
+.mini-switch input:checked + .mini-switch-track::after { transform: translateX(14px); }
+.mini-switch input:focus-visible + .mini-switch-track {
+  outline: 3px solid color-mix(in srgb, var(--blue) 72%, transparent);
+  outline-offset: 2px;
+}
+.mini-switch:has(input:disabled) {
+  cursor: default;
+  opacity: 0.48;
+}
+
 .mini-card .file-button { min-height: 50px; }
 .mini-card select { min-height: var(--control); }
 .mapping-card { grid-template-rows: auto 44px 50px 44px; }

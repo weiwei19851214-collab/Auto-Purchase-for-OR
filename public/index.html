@@ -132,10 +132,17 @@
 
           <div class="support-stack">
             <article class="control-card mini-card">
-              <span class="field-title">支付卡</span>
+              <div class="mini-card-heading">
+                <span class="field-title">支付卡</span>
+                <label class="mini-switch" title="只新增不替换：已有支付卡时保留原卡；仅在没有任何卡时新增 CSV 卡">
+                  <span>只新增不替换</span>
+                  <input id="preserveExistingCard" type="checkbox" role="switch" disabled />
+                  <span class="mini-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
               <button class="file-button" id="cardFileButton" type="button">
                 <span>支付卡 CSV</span>
-                <small id="cardFileLabel">不替换卡片</small>
+                <small id="cardFileLabel">未选择</small>
               </button>
             </article>
             <article class="control-card mini-card">

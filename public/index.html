@@ -170,7 +170,6 @@
             <span><strong id="blockedCount">0</strong> 需处理</span>
           </div>
           <div class="detail-actions">
-            <button class="secondary-button" id="selectReadyButton" type="button">选择就绪</button>
             <button class="secondary-button" id="resetButton" type="button">重置</button>
             <button class="primary-button" id="startButton" type="button" disabled>开始执行</button>
           </div>
@@ -192,7 +191,9 @@
             </colgroup>
             <thead>
               <tr>
-                <th scope="col">执行</th>
+                <th class="select-column" scope="col">
+                  <input id="selectAllRows" class="select-all-rows" type="checkbox" aria-label="全选或取消全选账号" title="全选或取消全选" />
+                </th>
                 <th scope="col">账号</th>
                 <th scope="col">OPOM health</th>
                 <th scope="col">AdsPower</th>

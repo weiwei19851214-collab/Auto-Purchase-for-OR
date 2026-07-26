@@ -161,13 +161,14 @@ function renderRows(rows, job) {
 }
 
 function cardOpomText(row) {
-  const card = row.cardLast4 || String(row.cardNo || '').slice(-4);
-  const parts = [];
-  if (card) parts.push(`卡 ••••${card}`);
-  if (row.opomCardWritebackStatus) parts.push(`绑卡 ${row.opomCardWritebackStatus}`);
-  if (row.opomResultWritebackStatus) parts.push(`结果 ${row.opomResultWritebackStatus}`);
-  if (row.adspowerTagStatus) parts.push(`AdsPower ${row.adspowerTagStatus}`);
-  return escapeHtml(parts.join(' · ') || '-');
+  const cardNo = String(row.cardNo || '').trim();
+  const card = cardNo || (row.cardLast4 ? `••••${row.cardLast4}` : '');
+  const statusParts = [];
+  if (row.opomCardWritebackStatus) statusParts.push(`绑卡 ${row.opomCardWritebackStatus}`);
+  if (row.opomResultWritebackStatus) statusParts.push(`结果 ${row.opomResultWritebackStatus}`);
+  if (row.adspowerTagStatus) statusParts.push(`AdsPower ${row.adspowerTagStatus}`);
+  if (!card && !statusParts.length) return '-';
+  return `<span class="card-opom-cell">${card ? `<span class="card-number">${escapeHtml(`卡 ${card}`)}</span>` : ''}${statusParts.length ? `<small>${escapeHtml(statusParts.join(' · '))}</small>` : ''}</span>`;
 }
 
 function canRepairOpom(row, canOperate) {

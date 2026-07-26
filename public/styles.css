@@ -577,6 +577,20 @@ select { padding-right: 28px; }
   white-space: nowrap;
 }
 
+.match-table th.select-column {
+  padding: 0;
+  text-align: center;
+}
+
+.select-all-rows {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.select-all-rows:disabled { cursor: not-allowed; }
+
 .match-table td {
   height: 44px;
   border-bottom: 1px solid color-mix(in srgb, var(--separator) 72%, transparent);
@@ -934,17 +948,17 @@ body[data-page="execution"] .toolbar-inner {
   white-space: nowrap;
 }
 
-.execution-table th:nth-child(1) { width: 7%; }
+.execution-table th:nth-child(1) { width: 5%; }
 .execution-table th:nth-child(2) { width: 3%; }
-.execution-table th:nth-child(3) { width: 14%; }
-.execution-table th:nth-child(4) { width: 8%; }
-.execution-table th:nth-child(5) { width: 10%; }
-.execution-table th:nth-child(6) { width: 8%; }
-.execution-table th:nth-child(7) { width: 8%; }
-.execution-table th:nth-child(8) { width: 10%; }
-.execution-table th:nth-child(9) { width: 12%; }
+.execution-table th:nth-child(3) { width: 16%; }
+.execution-table th:nth-child(4) { width: 6%; }
+.execution-table th:nth-child(5) { width: 9%; }
+.execution-table th:nth-child(6) { width: 7%; }
+.execution-table th:nth-child(7) { width: 7%; }
+.execution-table th:nth-child(8) { width: 8%; }
+.execution-table th:nth-child(9) { width: 17%; }
 .execution-table th:nth-child(10) { width: 10%; }
-.execution-table th:nth-child(11) { width: 10%; }
+.execution-table th:nth-child(11) { width: 12%; }
 
 .execution-table td {
   height: 48px;
@@ -957,6 +971,26 @@ body[data-page="execution"] .toolbar-inner {
 
 .execution-table .message {
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.card-opom-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.card-number {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card-opom-cell small {
+  color: var(--secondary);
+  font-size: 10px;
+  line-height: 1.25;
   overflow-wrap: anywhere;
 }
 

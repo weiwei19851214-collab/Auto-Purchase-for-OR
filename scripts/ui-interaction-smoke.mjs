@@ -101,11 +101,18 @@ try {
   await page.setInputFiles('#accountFile', csvPath);
   await page.waitForFunction(() => /1 个账号/.test(document.querySelector('#detailTitle')?.textContent || ''));
   add('local account CSV creates one canonical row', await page.locator('#matchBody tr').count() === 1, 'rows=1');
+  const previewBeforeMatch = await page.locator('#matchBody').textContent();
+  add('unmatched CSV row is neutral before AdsPower match', /-/.test(previewBeforeMatch || '') && await page.locator('#matchBody .pill.error').count() === 0, 'neutral_before_match');
+
+  await page.click('#selectAllRows');
+  add('header checkbox can cancel all selections', await page.locator('#matchBody .row-check:checked').count() === 0, 'cleared');
+  await page.click('#selectAllRows');
+  add('header checkbox can select all rows', await page.locator('#matchBody .row-check:checked').count() === 1, 'selected');
 
   await page.click('#matchButton');
-  await page.waitForFunction(() => /报错/.test(document.querySelector('#matchBody')?.textContent || ''));
+  await page.waitForFunction(() => /失败/.test(document.querySelector('#matchBody')?.textContent || ''));
   const previewAfterMatch = await page.locator('#matchBody').textContent();
-  add('AdsPower mismatch visible as error not percent', /报错/.test(previewAfterMatch || '') && !/%/.test(previewAfterMatch || ''), 'match_error');
+  add('AdsPower mismatch visible as error not percent', /失败/.test(previewAfterMatch || '') && !/%/.test(previewAfterMatch || ''), 'match_error');
 
   const bodyText = await page.locator('body').textContent();
   add('start remains disabled for failed match', await page.locator('#startButton').isDisabled(), 'disabled');

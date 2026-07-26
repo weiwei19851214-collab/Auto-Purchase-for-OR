@@ -525,6 +525,21 @@
     return row.ads_match_status === 'matched';
   }
 
+  function adsMatchPill(row) {
+    if (el.skipMatch.checked) return pill('warning', '人工确认');
+    if (row.ads_match_status === 'matched') return pill('ok', '成功');
+    // CSV 刚导入时尚未调用 AdsPower，不能把未执行的状态渲染成匹配失败。
+    if (!row.ads_match_status || row.ads_match_status === 'not_verified') return pill('neutral', '-');
+    return pill('error', '失败');
+  }
+
+  function syncSelectAllRows(rows = state.rows) {
+    const selectedCount = selectedRows().length;
+    el.selectAllRows.checked = rows.length > 0 && selectedCount === rows.length;
+    el.selectAllRows.indeterminate = selectedCount > 0 && selectedCount < rows.length;
+    el.selectAllRows.disabled = !rows.length;
+  }
+
   function rowReady(row) {
     return Boolean(
       row.login_email
@@ -553,6 +568,10 @@
   function renderRows() {
     const rows = state.rows;
     if (!rows.length) {
+      el.selectAllRows.checked = false;
+      el.selectAllRows.indeterminate = false;
+      el.selectAllRows.disabled = true;
+      el.selectAllRows.onchange = null;
       el.matchBody.innerHTML = '<tr><td class="empty-row" colspan="11">选择账号来源后开始准备</td></tr>';
       el.detailTitle.textContent = state.source === 'opom' && !state.opomConfirmed
         ? '等待确认 OPOM 参数'
@@ -563,15 +582,10 @@
 
     el.detailTitle.textContent = `${rows.length} 个账号 · ${state.source === 'opom' ? 'OPOM' : state.fileName || 'CSV'}`;
     el.matchBody.innerHTML = rows.map((row, index) => {
-      const ready = rowReady(row);
       const health = healthOk(row)
         ? pill('ok', row.opom_health_status || 'ok')
         : pill('error', row.opom_health_status || 'error');
-      const match = el.skipMatch.checked
-        ? pill('warning', '人工确认')
-        : ready
-          ? pill('ok', '成功')
-          : pill('error', '报错');
+      const match = adsMatchPill(row);
       const billing = addressReady(row) ? pill('ok', 'OR · 就绪') : pill('error', '缺失');
       const last4 = cardLast4(row);
       const card = el.cardFile.files?.length
@@ -598,12 +612,21 @@
       `;
     }).join('');
 
+    syncSelectAllRows(rows);
+    el.selectAllRows.onchange = () => {
+      state.rows.forEach((row) => { row.execute = el.selectAllRows.checked; });
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderRows();
+    };
+
     for (const checkbox of el.matchBody.querySelectorAll('.row-check')) {
       checkbox.addEventListener('change', () => {
         const row = state.rows[Number(checkbox.dataset.index)];
         if (row) row.execute = checkbox.checked;
         state.cardAllocationSignature = '';
         invalidatePreparation();
+        syncSelectAllRows();
         renderCounts();
       });
     }
@@ -1235,12 +1258,6 @@
       if (el.confirmDialog.returnValue !== 'created') closePendingWindow();
     });
 
-    el.selectReadyButton.addEventListener('click', () => {
-      state.rows.forEach((row) => { row.execute = rowReady(row); });
-      state.cardAllocationSignature = '';
-      invalidatePreparation();
-      renderRows();
-    });
     el.resetButton.addEventListener('click', resetPreparation);
     el.dismissError.addEventListener('click', clearError);
 

@@ -2616,7 +2616,7 @@ async function dismissSaveCardOverlays(page, debugPort = '') {
 
 async function dismissBrowserChromeBubbles(page) {
   if (!page) return {attempted: false};
-  await page.send('Page.bringToFront').catch(() => {});
+  // Auto Top-Up 全程通过 CDP 操作目标页，不抢占 macOS 前台窗口，避免影响用户处理其他应用。
   const escapes = [];
   for (let i = 0; i < 4; i += 1) {
     const down = await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).then(() => true).catch(() => false);

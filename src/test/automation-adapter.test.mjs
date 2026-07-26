@@ -399,6 +399,14 @@ test('Auto top-up refresh and input fill do not use macOS Command shortcuts', ()
   assert.doesNotMatch(fillInputBody, /dispatchEvent|setNativeValue|input\.setSelectionRange|input\.select\(\)|\\.value\\s*=/);
 });
 
+test('Auto top-up popup cleanup does not bring the AdsPower browser to the foreground', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const popupCleanup = script.slice(script.indexOf('async function dismissBrowserChromeBubbles'), script.indexOf('async function waitUntilSaveModalCloses'));
+  assert.match(popupCleanup, /Input\.dispatchKeyEvent/);
+  assert.match(popupCleanup, /Input\.dispatchMouseEvent/);
+  assert.doesNotMatch(popupCleanup, /Page\.bringToFront/);
+});
+
 test('Auto top-up retries one save when overview text does not match requested values', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const configureBody = script.slice(script.indexOf('async function configureAutoTopupAttempt'), script.indexOf('async function configureAutoTopup(page'));

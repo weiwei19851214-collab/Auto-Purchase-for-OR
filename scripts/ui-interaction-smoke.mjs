@@ -110,6 +110,13 @@ try {
   add('leaving ZDR-only restores normal controls', !(await page.locator('#disableZdr').isChecked())
     && !(await page.locator('#disableZdr').isDisabled())
     && !(await page.locator('#balanceThreshold').isDisabled()), 'restored');
+  add('ZDR enable-only switch is visible and defaults off', await page.locator('#enableZdrOnly').isVisible()
+    && !(await page.locator('#enableZdrOnly').isChecked()), 'default_off');
+  await page.click('#enableZdrOnly');
+  add('ZDR enable-only disables recharge controls without enabling the close action', !(await page.locator('#disableZdr').isChecked())
+    && await page.locator('#disableZdr').isDisabled()
+    && await page.locator('#balanceThreshold').isDisabled(), 'enable_only_scope');
+  await page.click('#enableZdrOnly');
 
   await page.setInputFiles('#accountFile', csvPath);
   await page.waitForFunction(() => /1 个账号/.test(document.querySelector('#detailTitle')?.textContent || ''));
@@ -158,6 +165,36 @@ try {
     && zdrOnlyOptions.scopeAutoTopup === false
     && zdrOnlyOptions.confirmPurchase === false
     && zdrOnlyOptions.opomWriteback === false, JSON.stringify(zdrOnlyOptions || {}));
+  await page.locator('#confirmDialog .close-button').click();
+  let enableZdrOnlyOptions = null;
+  await page.route('**/api/jobs/dry-run', async (route) => {
+    enableZdrOnlyOptions = route.request().postDataJSON?.()?.options || null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        planned: 1,
+        ready: 1,
+        blocked: 0,
+        skipped: 0,
+        liveConfirmationToken: 'ui-zdr-enable-only-token',
+        rows: [],
+      }),
+    });
+  });
+  await page.click('#enableZdrOnly');
+  await page.click('#startButton');
+  await page.waitForFunction(() => document.querySelector('#confirmDialog')?.open === true);
+  add('ZDR enable-only dry-run payload skips every other scope', Boolean(enableZdrOnlyOptions)
+    && enableZdrOnlyOptions.disableZdr === false
+    && enableZdrOnlyOptions.enableZdr === true
+    && enableZdrOnlyOptions.scopeBillingAddress === false
+    && enableZdrOnlyOptions.scopePaymentMethod === false
+    && enableZdrOnlyOptions.scopePurchase === false
+    && enableZdrOnlyOptions.scopeAutoTopup === false
+    && enableZdrOnlyOptions.confirmPurchase === false
+    && enableZdrOnlyOptions.opomWriteback === false, JSON.stringify(enableZdrOnlyOptions || {}));
   await page.locator('#confirmDialog .close-button').click();
   const bodyText = await page.locator('body').textContent();
   add('UI text redaction after auto dry-run', !containsSensitive(bodyText), 'no_sensitive_values');

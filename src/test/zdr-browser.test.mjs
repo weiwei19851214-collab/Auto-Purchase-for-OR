@@ -5,14 +5,17 @@ import {join} from 'node:path';
 
 const script = () => readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
 
-test('browser ZDR option is explicit, default-off, and supports ZDR-only mode', () => {
+test('browser ZDR options are explicit, default-off, and support both ZDR-only modes', () => {
   const source = script();
   assert.match(source, /key === 'disable-zdr'/);
+  assert.match(source, /key === 'enable-zdr'/);
   assert.match(source, /key === 'zdr-only'/);
   assert.match(source, /disableZdr: normalizeBooleanInput\(disableZdrInput\)/);
+  assert.match(source, /enableZdr: normalizeBooleanInput\(enableZdrInput\)/);
   assert.match(source, /zdrOnly: normalizeBooleanInput\(zdrOnlyInput\)/);
-  assert.match(source, /zdrOnly requires disableZdr/);
-  assert.match(source, /initialZdrResult\(input\.disableZdr\)/);
+  assert.match(source, /zdrOnly requires disableZdr or enableZdr/);
+  assert.match(source, /disableZdr and enableZdr cannot be combined/);
+  assert.match(source, /initialZdrResult\(input\.disableZdr \|\| input\.enableZdr, input\.enableZdr\)/);
   assert.match(source, /reason: requested \? 'pending' : 'not_requested'/);
   assert.match(source, /status: requested \? 'pending' : 'skipped'/);
   assert.match(source, /&& !input\.zdrOnly/);
@@ -22,7 +25,7 @@ test('browser ZDR task runs after account identity check and before account side
   const source = script();
   const waitAccount = source.indexOf("runLoggedStep('wait-account-state'");
   const accountMismatch = source.indexOf('OpenRouter account mismatch: expected', waitAccount);
-  const zdrStep = source.indexOf("runLoggedStep('disable-openrouter-zdr'", accountMismatch);
+  const zdrStep = source.indexOf("const zdrStepName = input.enableZdr ? 'enable-openrouter-zdr' : 'disable-openrouter-zdr'", accountMismatch);
   const paymentReadiness = source.indexOf('Payment entry not ready after waiting', zdrStep);
   const creditsStatus = source.indexOf('if (input.creditsStatusOnly)', zdrStep);
   const autoTopupOnly = source.indexOf('if (input.autoTopupOnly)', zdrStep);
@@ -40,7 +43,7 @@ test('browser ZDR task runs after account identity check and before account side
 
 test('browser ZDR-only mode exits after ZDR without reading balance or opening purchase surfaces', () => {
   const source = script();
-  const start = source.indexOf('if (input.disableZdr)');
+  const start = source.indexOf('if (input.disableZdr || input.enableZdr)');
   const end = source.indexOf('if (!input.creditsStatusOnly', start);
   const body = source.slice(start, end);
   assert.match(body, /if \(input\.zdrOnly\)/);
@@ -62,7 +65,7 @@ test('browser ZDR automation uses Guardrails visible navigation and scoped switc
   assert.ok(source.includes('Data\\\\s+Training'));
 });
 
-test('browser ZDR automation disables switches one at a time and fail-closes on no progress', () => {
+test('browser ZDR automation toggles switches one at a time toward the requested state', () => {
   const source = script();
   assert.match(source, /disable-first-enabled/);
   assert.doesNotMatch(source, /disable-enabled/);
@@ -71,8 +74,11 @@ test('browser ZDR automation disables switches one at a time and fail-closes on 
   assert.match(source, /const guardLimit = before\.total \+ 3/);
   assert.match(source, /Zero Data Retention disable loop exceeded guard limit/);
   assert.match(source, /toggledClicks: toggled\.clicks/);
-  assert.match(source, /status: 'already_disabled'/);
-  assert.match(source, /status: 'disabled'/);
+  assert.match(source, /status: targetEnabled \? 'already_enabled' : 'already_disabled'/);
+  assert.match(source, /enable-first-disabled/);
+  assert.match(source, /async function waitForZdrSwitchEnableProgress/);
+  assert.match(source, /Zero Data Retention enable loop exceeded guard limit/);
+  assert.match(source, /status: targetEnabled \? 'enabled' : 'disabled'/);
 });
 
 test('browser ZDR automation saves, handles confirmation, and reopens Guardrails for verification', () => {

@@ -17,7 +17,7 @@ AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Aut
 - 在账号要求时补充 billing address。
 - 配置并回读 Auto top-up。
 - 可选在充值前关闭 OpenRouter Workspace Guardrail 的 ZDR 策略，并保存后回读确认。
-- “仅关闭 ZDR，不执行其他操作”模式会关闭充值、绑卡、Billing、Auto Top-Up 和 OPOM 写回 scope，只运行账号校验与 ZDR 保存回读。
+- “仅关闭 ZDR，不执行其他操作”和“仅开启 ZDR，不执行其他操作”模式都会关闭充值、绑卡、Billing、Auto Top-Up 和 OPOM 写回 scope，只运行账号校验与 ZDR 保存回读。
 - 在 no-purchase 测试模式下填写 Purchase Credits 金额，但不点击 `Purchase`。
 - 在基于 SQLite 的本地存储中记录 job 行、事件和已脱敏的结果 CSV。
 - 当启用 `opomWriteback` 时，可选择将已完成的绑卡信息和逐行执行结果写回 OPOM。

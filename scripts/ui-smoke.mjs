@@ -41,9 +41,11 @@ try {
     && /preserveExistingPaymentMethod/.test(appJs)
     && /有卡保留 · 无卡新增/.test(appJs), 'default_replace_optional_preserve');
   add('ZDR switch defaults off and is wired', /id=["']disableZdr["'][^>]*role=["']switch["']/.test(html)
-    && /disableZdr:\s*zdrOnly\s*\|\|\s*el\.disableZdr\.checked/.test(appJs)
+    && /disableZdr:\s*el\.zdrOnly\.checked\s*\|\|\s*\(!enableZdr\s*&&\s*el\.disableZdr\.checked\)/.test(appJs)
     && !/id=["']disableZdr["'][^>]*checked/.test(html), 'default_off');
-  add('ZDR-only switch disables all other execution scopes', /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
+  add('ZDR-only switches disable all other execution scopes', /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
+    && /id=["']enableZdrOnly["'][^>]*role=["']switch["']/.test(html)
+    && /enableZdr,/.test(appJs)
     && /scopeBillingAddress:\s*zdrOnly\s*\?\s*false/.test(appJs)
     && /scopePaymentMethod:\s*zdrOnly\s*\?\s*false/.test(appJs)
     && /scopePurchase:\s*!zdrOnly/.test(appJs)

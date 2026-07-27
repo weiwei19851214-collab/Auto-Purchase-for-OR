@@ -653,7 +653,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'zdr-only') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only') {
       args[key] = true;
       continue;
     }
@@ -782,6 +782,9 @@ function normalizeInput(args) {
   const disableZdrInput = args['disable-zdr'] !== undefined
     ? args['disable-zdr']
     : (json.disableZdr ?? json.disable_zdr ?? process.env.DISABLE_ZDR);
+  const enableZdrInput = args['enable-zdr'] !== undefined
+    ? args['enable-zdr']
+    : (json.enableZdr ?? json.enable_zdr ?? process.env.ENABLE_ZDR);
   const zdrOnlyInput = args['zdr-only'] !== undefined
     ? args['zdr-only']
     : (json.zdrOnly ?? json.disableZdrOnly ?? json.disable_zdr_only ?? process.env.ZDR_ONLY);
@@ -812,6 +815,7 @@ function normalizeInput(args) {
     preserveExistingPaymentMethod: !!json.preserveExistingPaymentMethod,
     existingBillingAddress: !!(args['existing-billing-address'] || json.existingBillingAddress),
     disableZdr: normalizeBooleanInput(disableZdrInput),
+    enableZdr: normalizeBooleanInput(enableZdrInput),
     zdrOnly: normalizeBooleanInput(zdrOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
@@ -864,8 +868,11 @@ function normalizeInput(args) {
   };
 
   if (!input.expectedAccount) throw new Error('expectedAccount is required');
-  if (input.zdrOnly && !input.disableZdr) {
-    throw new Error('zdrOnly requires disableZdr');
+  if (input.disableZdr && input.enableZdr) {
+    throw new Error('disableZdr and enableZdr cannot be combined');
+  }
+  if (input.zdrOnly && !input.disableZdr && !input.enableZdr) {
+    throw new Error('zdrOnly requires disableZdr or enableZdr');
   }
   if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly].filter(Boolean).length > 1) {
     throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, and zdrOnly cannot be combined');
@@ -1389,9 +1396,10 @@ async function navigatePage(client, url, options = {}) {
   throw new Error(`CDP navigation failed after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
 }
 
-function initialZdrResult(requested) {
+function initialZdrResult(requested, targetEnabled = false) {
   return {
     requested: !!requested,
+    targetEnabled: !!targetEnabled,
     configured: null,
     changed: false,
     status: requested ? 'pending' : 'skipped',
@@ -1557,6 +1565,13 @@ function zdrDomExpression(action = 'read') {
         clicked = {index: target.index, label: target.label || String(target.index)};
       }
     }
+    if (action === 'enable-first-disabled') {
+      const target = switches.find((item) => item.checked === false && !item.disabled);
+      if (target) {
+        activate(target.node);
+        clicked = {index: target.index, label: target.label || String(target.index)};
+      }
+    }
     return {
       found: true,
       href: location.href,
@@ -1564,6 +1579,7 @@ function zdrDomExpression(action = 'read') {
       total: switches.length,
       switches: switches.map(({index, checked, disabled, label}) => ({index, checked, disabled, label})),
       enabled: switches.filter((item) => item.checked === true).map((item) => item.label || String(item.index)),
+      disabledUnchecked: switches.filter((item) => item.checked === false && item.disabled).map((item) => item.label || String(item.index)),
       unknown: switches.filter((item) => item.checked == null).map((item) => item.label || String(item.index)),
       disabledEnabled: switches.filter((item) => item.checked === true && item.disabled).map((item) => item.label || String(item.index)),
       clicked,
@@ -1571,7 +1587,7 @@ function zdrDomExpression(action = 'read') {
   })()`;
 }
 
-async function readZdrSwitchState(page) {
+async function readZdrSwitchState(page, targetEnabled = null) {
   const state = await evaluate(page, zdrDomExpression('read'), 15000);
   if (!state.found) {
     throw new Error(`Zero Data Retention section not found or isolated: ${state.reason}; tail=${state.tail || ''}`);
@@ -1580,18 +1596,21 @@ async function readZdrSwitchState(page) {
   if (state.unknown?.length) {
     throw new Error(`Zero Data Retention switch state cannot be established: ${state.unknown.join(', ')}`);
   }
-  if (state.disabledEnabled?.length) {
+  if (targetEnabled === false && state.disabledEnabled?.length) {
     throw new Error(`Zero Data Retention has enabled switches that cannot be changed: ${state.disabledEnabled.join(', ')}`);
+  }
+  if (targetEnabled === true && state.disabledUnchecked?.length) {
+    throw new Error(`Zero Data Retention has disabled switches that cannot be changed: ${state.disabledUnchecked.join(', ')}`);
   }
   return state;
 }
 
-async function waitForZdrPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+async function waitForZdrPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS, targetEnabled = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
     try {
-      return await readZdrSwitchState(page);
+      return await readZdrSwitchState(page, targetEnabled);
     } catch (error) {
       lastError = error;
       await sleep(DEFAULT_DOM_POLL_MS);
@@ -1630,15 +1649,26 @@ async function waitForZdrSwitchProgress(page, previousEnabledCount, timeoutMs = 
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
-    lastState = await readZdrSwitchState(page);
+    lastState = await readZdrSwitchState(page, false);
     if (lastState.enabled.length < previousEnabledCount) return lastState;
     await sleep(500);
   }
   throw new Error(`Zero Data Retention switch did not transition off after click; still enabled: ${(lastState?.enabled || []).join(', ')}`);
 }
 
+async function waitForZdrSwitchEnableProgress(page, previousEnabledCount, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readZdrSwitchState(page, true);
+    if (lastState.enabled.length > previousEnabledCount) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Zero Data Retention switch did not transition on after click; enabled: ${(lastState?.enabled || []).join(', ')}`);
+}
+
 async function clickEnabledZdrSwitches(page) {
-  const before = await readZdrSwitchState(page);
+  const before = await readZdrSwitchState(page, false);
   if (!before.enabled.length) return {changed: false, before, afterClick: before, clicks: []};
   const guardLimit = before.total + 3;
   const clicks = [];
@@ -1659,6 +1689,32 @@ async function clickEnabledZdrSwitches(page) {
   }
   if (current.enabled.length) {
     throw new Error(`Zero Data Retention disable loop exceeded guard limit ${guardLimit}; still enabled: ${current.enabled.join(', ')}`);
+  }
+  return {changed: true, before, afterClick: current, clicks};
+}
+
+async function clickDisabledZdrSwitches(page) {
+  const before = await readZdrSwitchState(page, true);
+  if (before.enabled.length === before.total) return {changed: false, before, afterClick: before, clicks: []};
+  const guardLimit = before.total + 3;
+  const clicks = [];
+  let current = before;
+  for (let attempt = 1; attempt <= guardLimit && current.enabled.length < current.total; attempt += 1) {
+    const previousEnabledCount = current.enabled.length;
+    const clicked = await evaluate(page, zdrDomExpression('enable-first-disabled'), 15000);
+    if (!clicked?.clicked) {
+      throw new Error(`Zero Data Retention disabled switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+    }
+    current = await waitForZdrSwitchEnableProgress(page, previousEnabledCount);
+    clicks.push({
+      attempt,
+      clicked: clicked.clicked,
+      enabledBefore: previousEnabledCount,
+      enabledAfter: current.enabled.length,
+    });
+  }
+  if (current.enabled.length !== current.total) {
+    throw new Error(`Zero Data Retention enable loop exceeded guard limit ${guardLimit}; enabled: ${current.enabled.join(', ')}`);
   }
   return {changed: true, before, afterClick: current, clicks};
 }
@@ -1742,16 +1798,18 @@ async function clickGuardrailsConfirmationIfPresent(page, timeoutMs = 5000) {
   return last?.found ? last : {found: false, clicked: false};
 }
 
-async function configureOpenRouterZdr(page) {
+async function configureOpenRouterZdr(page, targetEnabled = false) {
   const opened = await openZdrGuardrailsPanel(page);
-  const initial = opened.state || await readZdrSwitchState(page);
+  const initial = await readZdrSwitchState(page, targetEnabled);
   const enabledBefore = initial.enabled || [];
-  if (!enabledBefore.length) {
+  const alreadyConfigured = targetEnabled ? enabledBefore.length === initial.total : !enabledBefore.length;
+  if (alreadyConfigured) {
     return {
       requested: true,
       configured: true,
       changed: false,
-      status: 'already_disabled',
+      status: targetEnabled ? 'already_enabled' : 'already_disabled',
+      targetEnabled,
       enabledBefore,
       enabledAfter: [],
       total: initial.total,
@@ -1759,21 +1817,25 @@ async function configureOpenRouterZdr(page) {
       opened,
     };
   }
-  const toggled = await clickEnabledZdrSwitches(page);
+  // 仅 ZDR 模式逐项切换，保留每个开关的状态变化，避免误触 Data Training 区域。
+  const toggled = targetEnabled ? await clickDisabledZdrSwitches(page) : await clickEnabledZdrSwitches(page);
   const save = await clickGuardrailsSave(page);
   const confirmation = await clickGuardrailsConfirmationIfPresent(page);
   await sleep(PAGE_SETTLE_MS);
   const reopened = await openZdrGuardrailsPanel(page, {skipNavigate: false});
-  const verified = reopened.state || await waitForZdrPanel(page);
+  const verified = reopened.state || await waitForZdrPanel(page, DEFAULT_DOM_WAIT_MS, targetEnabled);
   const enabledAfter = verified.enabled || [];
-  if (enabledAfter.length) {
-    throw new Error(`Zero Data Retention verification failed; still enabled: ${enabledAfter.join(', ')}`);
+  if (targetEnabled ? enabledAfter.length !== verified.total : enabledAfter.length) {
+    throw new Error(targetEnabled
+      ? `Zero Data Retention verification failed; still disabled: ${(verified.switches || []).filter((item) => item.checked === false).map((item) => item.label || item.index).join(', ')}`
+      : `Zero Data Retention verification failed; still enabled: ${enabledAfter.join(', ')}`);
   }
   return {
     requested: true,
     configured: true,
     changed: true,
-    status: 'disabled',
+    status: targetEnabled ? 'enabled' : 'disabled',
+    targetEnabled,
     enabledBefore,
     enabledAfter,
     total: verified.total,
@@ -5351,6 +5413,7 @@ async function run() {
       purchaseConfirmed: rawInput.purchase?.confirmed,
       autoTopupEnabled: rawInput.autoTopup?.enabled,
       disableZdr: rawInput.disableZdr,
+      enableZdr: rawInput.enableZdr,
     },
   });
   const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
@@ -5371,7 +5434,7 @@ async function run() {
   let recoveryCard = {last4, masked, expiry: expectedExpiry};
   let recoveryPaymentMethodAction = 'uploaded_card_added';
   let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
-  let zdrResult = initialZdrResult(input.disableZdr);
+  let zdrResult = initialZdrResult(input.disableZdr || input.enableZdr, input.enableZdr);
 
   try {
     await page.send('Runtime.enable');
@@ -5391,8 +5454,9 @@ async function run() {
     }
     accountForRecovery = accountState.account;
 
-    if (input.disableZdr) {
-      zdrResult = await runLoggedStep('disable-openrouter-zdr', debugDir, () => configureOpenRouterZdr(page), page);
+    if (input.disableZdr || input.enableZdr) {
+      const zdrStepName = input.enableZdr ? 'enable-openrouter-zdr' : 'disable-openrouter-zdr';
+      zdrResult = await runLoggedStep(zdrStepName, debugDir, () => configureOpenRouterZdr(page, input.enableZdr), page);
       if (input.zdrOnly) {
         return {
           ok: true,

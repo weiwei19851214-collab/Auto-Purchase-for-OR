@@ -230,7 +230,7 @@ export function safeAutoTopupPlan(row, args) {
 
 export function executionScope(args = {}) {
   return {
-    zdr: !!args.disableZdr,
+    zdr: !!args.disableZdr || !!args.enableZdr,
     billingAddress: args.scopeBillingAddress !== false,
     paymentMethod: args.scopePaymentMethod !== false,
     purchase: args.scopePurchase !== false,
@@ -241,6 +241,7 @@ export function executionScope(args = {}) {
 export function validateScope(args = {}) {
   const scope = executionScope(args);
   const missing = [];
+  if (args.disableZdr && args.enableZdr) missing.push('execution_scope:zdr_action_conflict');
   if (!scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
     missing.push('execution_scope');
   }
@@ -305,7 +306,8 @@ export function buildClosedLoopTask(row, args) {
     profileNo: adsPowerSerialNumber(row) || undefined,
     profileId: adsPowerUserId(row) || undefined,
     expectedAccount: loginEmail(row),
-    disableZdr: scope.zdr,
+    disableZdr: !!args.disableZdr,
+    enableZdr: !!args.enableZdr,
     zdrOnly,
     removeExistingPaymentMethod: scope.paymentMethod && args.removeExisting,
     preserveExistingPaymentMethod: scope.paymentMethod && args.preserveExistingPaymentMethod,
@@ -514,7 +516,7 @@ export function successDetails(row, result, args) {
     balanceAfter: verification.afterBalance ?? '',
     cardLast4: result.card?.last4 || cardLast4(cardNumber(row)),
     paymentMethodAction: result.paymentMethodAction || '',
-    zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? 'disabled' : 'not_configured')) : 'skipped',
+    zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured')) : 'skipped',
     zdrChanged: scope.zdr ? String(Boolean(zdr.changed)) : 'false',
     autoTopupStatus: scope.autoTopup
       ? (autoTopup.configured ? (autoTopup.changed ? 'updated' : 'unchanged') : 'not_configured')

@@ -112,7 +112,7 @@ export class AutoRechargeScheduler {
     }
 
     const configuredOptions = settings.options || {};
-    const zdrOnly = !!configuredOptions.disableZdr
+    const zdrOnly = (!!configuredOptions.disableZdr || !!configuredOptions.enableZdr)
       && configuredOptions.scopeBillingAddress === false
       && configuredOptions.scopePaymentMethod === false
       && configuredOptions.scopePurchase === false
@@ -315,6 +315,7 @@ function publicState(state) {
       confirmPurchase: args.confirmPurchase,
       opomWriteback: args.opomWriteback,
       disableZdr: args.disableZdr,
+      enableZdr: args.enableZdr,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       hasAdspowerApiKey: !!args.adspowerApiKey,
       concurrency: args.concurrency,

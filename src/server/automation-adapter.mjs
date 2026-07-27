@@ -78,6 +78,7 @@ export function runnerArgs(options = {}) {
     scopePurchase,
     scopeAutoTopup: options.scopeAutoTopup !== false,
     disableZdr: !!options.disableZdr,
+    enableZdr: !!options.enableZdr,
     autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
@@ -233,6 +234,7 @@ export function publicJob(row) {
       hasAdspowerApiKey: !!args.adspowerApiKey,
       executionScope: plan.scopeSummary(args),
       disableZdr: args.disableZdr,
+      enableZdr: args.enableZdr,
       scopeBillingAddress: args.scopeBillingAddress,
       scopePaymentMethod: args.scopePaymentMethod,
       scopePurchase: args.scopePurchase,
@@ -553,7 +555,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const purchaseOk = !args.scopePurchase
       || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
-    const zdrOk = !args.disableZdr || /^(disabled|already_disabled)$/.test(details.zdrStatus);
+    const zdrRequested = args.disableZdr || args.enableZdr;
+    const zdrOk = !zdrRequested || (args.enableZdr
+      ? /^(enabled|already_enabled)$/.test(details.zdrStatus)
+      : /^(disabled|already_disabled)$/.test(details.zdrStatus));
     let completed = purchaseOk && autoTopupOk && zdrOk;
     const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
     if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
@@ -716,10 +721,10 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
     balanceAfter: '',
     cardLast4: result.card?.last4 || commonModule.cardLast4(planModule.cardNumber(row)),
     paymentMethodAction: result.paymentMethodAction || '',
-    zdrStatus: args.disableZdr
-      ? (result.zdr?.status || (result.zdr?.configured ? 'disabled' : 'not_configured'))
+    zdrStatus: (args.disableZdr || args.enableZdr)
+      ? (result.zdr?.status || (result.zdr?.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured'))
       : 'skipped',
-    zdrChanged: args.disableZdr ? String(Boolean(result.zdr?.changed)) : 'false',
+    zdrChanged: (args.disableZdr || args.enableZdr) ? String(Boolean(result.zdr?.changed)) : 'false',
     autoTopupStatus: !args.scopeAutoTopup
       ? 'skipped'
       : result.autoTopup?.configured

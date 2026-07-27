@@ -151,20 +151,25 @@
   }
 
   function ruleText() {
-    if (el.zdrOnly.checked) return '仅 ZDR';
+    if (isZdrOnlyMode()) return '仅 ZDR';
     const rule = ruleValues();
     return `${rule.threshold}/${rule.below}/${rule.atOrAbove}`;
   }
 
   function autoTopupText() {
-    if (el.zdrOnly.checked) return '跳过';
+    if (isZdrOnlyMode()) return '跳过';
     if (el.autoTopupEnableOnly.checked) return '仅开启';
     return `${numericValue(el.autoTopupThreshold, 100)}/${numericValue(el.autoTopupAmount, 150)}`;
   }
 
   function zdrText() {
     if (el.zdrOnly.checked) return '仅关闭';
+    if (el.enableZdrOnly.checked) return '仅开启';
     return el.disableZdr.checked ? '关闭' : '保持现状';
+  }
+
+  function isZdrOnlyMode() {
+    return el.zdrOnly.checked || el.enableZdrOnly.checked;
   }
 
   function runtimeConfig() {
@@ -596,7 +601,7 @@
       const match = adsMatchPill(row);
       const billing = addressReady(row) ? pill('ok', 'OR · 就绪') : pill('error', '缺失');
       const last4 = cardLast4(row);
-      const card = el.zdrOnly.checked
+      const card = isZdrOnlyMode()
         ? pill('neutral', '跳过')
         : el.cardFile.files?.length
           ? (last4 ? pill('ok', `已分配 ••••${last4}`) : pill('warning', '待分配'))
@@ -665,9 +670,10 @@
 
   function renderControls() {
     const opom = state.source === 'opom';
-    const zdrOnly = el.zdrOnly.checked;
+    const zdrOnly = isZdrOnlyMode();
     const cardFile = el.cardFile.files?.[0];
-    if (zdrOnly) el.disableZdr.checked = true;
+    if (el.zdrOnly.checked) el.disableZdr.checked = true;
+    if (el.enableZdrOnly.checked) el.disableZdr.checked = false;
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
     el.ruleSummary.textContent = ruleText();
@@ -787,7 +793,8 @@
   }
 
   function optionsPayload() {
-    const zdrOnly = el.zdrOnly.checked;
+    const zdrOnly = isZdrOnlyMode();
+    const enableZdr = el.enableZdrOnly.checked;
     const hasCardCsv = Boolean(el.cardFile.files?.length);
     const preserveExistingPaymentMethod = !zdrOnly && hasCardCsv && el.preserveExistingCard.checked;
     return {
@@ -795,7 +802,8 @@
       scopePaymentMethod: zdrOnly ? false : hasCardCsv,
       scopePurchase: !zdrOnly,
       scopeAutoTopup: !zdrOnly,
-      disableZdr: zdrOnly || el.disableZdr.checked,
+      disableZdr: el.zdrOnly.checked || (!enableZdr && el.disableZdr.checked),
+      enableZdr,
       removeExisting: !zdrOnly && hasCardCsv && !preserveExistingPaymentMethod,
       preserveExistingPaymentMethod,
       stopProfiles: true,
@@ -886,7 +894,7 @@
   }
 
   async function ensureCardsAllocated() {
-    if (el.zdrOnly.checked) {
+    if (isZdrOnlyMode()) {
       state.cardAllocationSignature = '';
       return;
     }
@@ -935,7 +943,7 @@
   function validateExecutionInput() {
     if (!selectedRows().length) throw new Error('请至少选择一个账号');
     if (!canStart()) throw new Error('请先完成 AdsPower 匹配，或确认跳过匹配');
-    if (el.zdrOnly.checked) return;
+    if (isZdrOnlyMode()) return;
     const rule = ruleValues();
     if (!Number.isFinite(rule.threshold) || rule.threshold <= 0) {
       throw new Error('余额阈值必须大于 0');
@@ -1144,6 +1152,8 @@
     const enabled = el.autoRechargeEnabled.checked;
     const confirmation = el.zdrOnly.checked
       ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
+      : el.enableZdrOnly.checked
+        ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
       : '启用后，服务端将在每小时 15 和 45 分按当前页面参数自动创建真实充值任务。确认启用？';
     if (enabled && !window.confirm(confirmation)) {
       el.autoRechargeEnabled.checked = false;
@@ -1212,6 +1222,7 @@
     el.autoTopupEnableOnly.checked = false;
     el.disableZdr.checked = false;
     el.zdrOnly.checked = false;
+    el.enableZdrOnly.checked = false;
     state.disableZdrBeforeOnly = false;
     el.skipMatch.checked = false;
     el.concurrency.value = '1';
@@ -1281,16 +1292,23 @@
       renderControls();
     });
     el.disableZdr.addEventListener('change', invalidatePreparation);
-    el.zdrOnly.addEventListener('change', () => {
-      if (el.zdrOnly.checked) {
-        state.disableZdrBeforeOnly = el.disableZdr.checked;
-        el.disableZdr.checked = true;
-      } else {
-        el.disableZdr.checked = state.disableZdrBeforeOnly;
-      }
+    function setZdrOnlyMode(mode) {
+      const wasZdrOnly = isZdrOnlyMode();
+      if (mode && !wasZdrOnly) state.disableZdrBeforeOnly = el.disableZdr.checked;
+      el.zdrOnly.checked = mode === 'disable';
+      el.enableZdrOnly.checked = mode === 'enable';
+      if (mode === 'disable') el.disableZdr.checked = true;
+      if (mode === 'enable') el.disableZdr.checked = false;
+      if (!mode) el.disableZdr.checked = state.disableZdrBeforeOnly;
       state.cardAllocationSignature = '';
       invalidatePreparation();
       renderControls();
+    }
+    el.zdrOnly.addEventListener('change', () => {
+      setZdrOnlyMode(el.zdrOnly.checked ? 'disable' : null);
+    });
+    el.enableZdrOnly.addEventListener('change', () => {
+      setZdrOnlyMode(el.enableZdrOnly.checked ? 'enable' : null);
     });
     el.skipMatch.addEventListener('change', () => {
       state.cardAllocationSignature = '';

@@ -1,4 +1,5 @@
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
+const ADSPOWER_STOP_REQUEST_TIMEOUT_MS = 2500;
 
 export function adsPowerDefaults(env = process.env) {
   return {
@@ -52,6 +53,8 @@ export async function stopProfile(args, profileIdentifier) {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      // 行级超时只预留 5 秒回收浏览器，两条兼容 stop 接口各最多占用一半。
+      signal: AbortSignal.timeout(ADSPOWER_STOP_REQUEST_TIMEOUT_MS),
     });
     if (res.ok) return {attempted: true, ok: true, endpoint: 'v2', identifier};
     failures.push(`v2:${res.status}`);
@@ -62,7 +65,10 @@ export async function stopProfile(args, profileIdentifier) {
     const url = new URL(`${base}/api/v1/browser/stop`);
     if (identifier.userId) url.searchParams.set('user_id', identifier.userId);
     else url.searchParams.set('serial_number', identifier.serialNumber);
-    const res = await fetch(url, {headers});
+    const res = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(ADSPOWER_STOP_REQUEST_TIMEOUT_MS),
+    });
     if (res.ok) return {attempted: true, ok: true, endpoint: 'v1', identifier};
     failures.push(`v1:${res.status}`);
   } catch (error) {

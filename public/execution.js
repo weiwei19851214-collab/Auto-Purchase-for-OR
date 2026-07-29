@@ -4,6 +4,7 @@ let jobId = new URLSearchParams(location.search).get('job') || '';
 let refreshTimer = null;
 let lastJob = null;
 let loadSequence = 0;
+let sessionRefreshPromise = null;
 
 const els = {
   workerLabel: document.querySelector('#workerLabel'),
@@ -43,7 +44,7 @@ function sanitizeMessage(value, limit = 800) {
     .slice(0, limit);
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, retriedAfterSessionRefresh = false) {
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -53,15 +54,28 @@ async function api(path, options = {}) {
     },
   });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && !retriedAfterSessionRefresh) {
+    // 服务重启后旧页面仍持有旧 token；只刷新一次会话，避免请求无限循环。
+    await initSession();
+    return api(path, options, true);
+  }
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
 async function initSession() {
-  const response = await fetch('/api/session');
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
-  sessionToken = data.token;
+  if (sessionRefreshPromise) return sessionRefreshPromise;
+  sessionRefreshPromise = (async () => {
+    const response = await fetch('/api/session');
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
+    sessionToken = data.token;
+  })();
+  try {
+    await sessionRefreshPromise;
+  } finally {
+    sessionRefreshPromise = null;
+  }
 }
 
 async function loadJob() {
@@ -305,9 +319,16 @@ async function cancelJob() {
 
 async function downloadResult() {
   if (!jobId || els.downloadButton.disabled) return;
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/result.csv`, {
+  let response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/result.csv`, {
     headers: {'X-Runner-Session': sessionToken},
   });
+  if (response.status === 401) {
+    // 下载接口不经过 api()，同样需要覆盖服务重启后的会话恢复。
+    await initSession();
+    response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/result.csv`, {
+      headers: {'X-Runner-Session': sessionToken},
+    });
+  }
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || `HTTP ${response.status}`);

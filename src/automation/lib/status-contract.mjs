@@ -72,7 +72,8 @@ export function classifyError(message) {
       stage: 'payment_method.input',
       terminal: true,
       safeToContinueBatch: true,
-      stopProfile: false,
+      // 输入错误不能自动恢复，记录现场日志后立即关闭，避免单行失败长期占用浏览器。
+      stopProfile: true,
       message: text,
     });
   }

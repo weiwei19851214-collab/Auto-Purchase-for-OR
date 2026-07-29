@@ -26,10 +26,18 @@ test('CDP navigation timeouts are ordinary row failures and do not stop the batc
   assert.equal(result.stopProfile, true);
 });
 
-test('Stripe input rejection keeps the browser open for inspection or manual recovery', () => {
+test('Stripe input rejection closes the profile after recording the failure', () => {
   const result = classifyError('Stripe payment field was not accepted: #payment-numberInput');
   assert.equal(result.status, STATUSES.FAILED);
   assert.equal(result.stage, 'payment_method.input');
   assert.equal(result.safeToContinueBatch, true);
-  assert.equal(result.stopProfile, false);
+  assert.equal(result.stopProfile, true);
+});
+
+test('all Stripe card field validation failures share the payment input result', () => {
+  for (const field of ['number', 'expiry', 'cvc']) {
+    const result = classifyError(`Stripe payment field was not accepted: ${field}`);
+    assert.equal(result.status, STATUSES.FAILED);
+    assert.equal(result.stage, 'payment_method.input');
+  }
 });

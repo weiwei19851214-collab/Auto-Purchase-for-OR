@@ -38,6 +38,9 @@ test('Stripe card entry skips Link checkbox cleanup after switching a non-US cou
 test('Stripe card entry verifies fields keep the inserted card values', () => {
   const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
   assert.match(source, /Stripe 必须同时保留值并清除字段级 incomplete\/invalid 状态/);
+  assert.match(source, /鼠标点击会折叠之前的选区/);
+  assert.match(source, /phase: 'clear_before_insert'/);
+  assert.match(source, /Input\.insertText/);
   assert.match(source, /dispatch_key_events/);
   assert.doesNotMatch(source, /native_value_setter/);
   assert.match(source, /Stripe payment field was not accepted/);
@@ -47,8 +50,8 @@ test('Stripe card entry verifies fields keep the inserted card values', () => {
 
 test('CDP navigation has retry and location fallback for slow AdsPower pages', () => {
   const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
-  assert.match(source, /DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000/);
-  assert.match(source, /DEFAULT_NAVIGATION_RETRIES = 3/);
+  assert.match(source, /DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 30000/);
+  assert.match(source, /DEFAULT_NAVIGATION_RETRIES = 2/);
   assert.match(source, /Page\.stopLoading/);
   assert.match(source, /location\.href =/);
 });

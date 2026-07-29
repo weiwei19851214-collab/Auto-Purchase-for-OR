@@ -132,6 +132,7 @@ export class JobWorker {
     if (!rows.length) return;
     const options = JSON.parse(getJob(this.db, jobId)?.options_json || '{}');
     const args = runnerArgs(options);
+    // 本批按创建任务时保存的并发数执行；恢复任务不读取页面临时状态。
     const concurrency = Math.min(rows.length, args.concurrency || 1);
     addEvent(this.db, jobId, 'job.concurrency', `worker concurrency ${concurrency}/${args.concurrency}`, {
       requested: args.concurrency,

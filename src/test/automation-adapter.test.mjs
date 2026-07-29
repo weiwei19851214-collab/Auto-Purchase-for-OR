@@ -82,6 +82,11 @@ test('runnerArgs clamps concurrency to a safe local range', () => {
   assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
 });
 
+test('runnerArgs caps a row timeout below the three-minute total budget', () => {
+  assert.equal(runnerArgs({rowTimeoutMs: 999999}).rowTimeoutMs, 175000);
+  assert.equal(runnerArgs({rowTimeoutMs: 30000}).rowTimeoutMs, 30000);
+});
+
 test('runnerArgs carries OPOM card provider selection', () => {
   assert.equal(runnerArgs({}).cardProvider, 'EJH');
   assert.equal(runnerArgs({cardProvider: 'PINGPONG'}).cardProvider, 'PINGPONG');
@@ -384,7 +389,7 @@ test('browser path can click icon-only add payment method button in Purchase Cre
 test('card save waits for the Saving state to finish before opening Purchase Credits', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const saveWaitBody = script.slice(script.indexOf('async function waitUntilSaveModalCloses'), script.indexOf('async function verifyByPurchaseModal'));
-  assert.match(script, /const SAVE_PAYMENT_METHOD_WAIT_MS = 30000/);
+  assert.match(script, /const SAVE_PAYMENT_METHOD_WAIT_MS = 20000/);
   assert.match(saveWaitBody, /Save payment method\|\\\\bSaving\\\\b/);
   assert.match(saveWaitBody, /Save modal did not close after/);
 });
@@ -392,7 +397,7 @@ test('card save waits for the Saving state to finish before opening Purchase Cre
 test('stalled card-save recovery refreshes and verifies the existing card without another Save click', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const cardSaveBody = script.slice(script.indexOf("runLoggedStep('wait-save-modal-closes'"), script.indexOf("const purchaseResult = input.purchase.confirmed", script.indexOf("runLoggedStep('wait-save-modal-closes'")));
-  assert.match(script, /const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 30000/);
+  assert.match(script, /const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 20000/);
   assert.match(cardSaveBody, /refresh-after-stalled-card-save/);
   assert.match(cardSaveBody, /verify-saved-card-after-stalled-save/);
   assert.match(cardSaveBody, /refreshOnTimeout:\s*false/);
@@ -537,10 +542,10 @@ test('credit balance parser preserves negative balances', () => {
   assert.ok(script.includes("Number(raw.replace(/[\\\\s,]/g, ''))"));
 });
 
-test('slow payment method surfaces get extended waits', () => {
+test('payment method surfaces use bounded waits within the three-minute row budget', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000/);
-  assert.match(script, /const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000/);
+  assert.match(script, /const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000/);
+  assert.match(script, /const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000/);
   assert.match(script, /Purchase modal is not ready after \$\{timeoutMs\}ms/);
 });
 
@@ -599,6 +604,9 @@ test('browser path verifies Stripe card fields before saving payment method', ()
   assert.match(script, /document\.activeElement === el/);
   assert.match(script, /invalidByText/);
   assert.match(script, /ariaInvalid/);
+  assert.match(script, /expiration.*date\|month\|year/);
+  assert.match(script, /waitUntilSaveModalCloses\(page, payment\)/);
+  assert.match(script, /detectPaymentIssue\(page, payment\)/);
   assert.doesNotMatch(script, /native_value_setter/);
   assert.match(script, /verify-stripe-card-before-save/);
   assert.match(script, /verify-stripe-card-before-save-retry/);
@@ -790,6 +798,63 @@ test('createJob rejects dry-run confirmation when purchase submission mode chang
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
+});
+
+test('payment input rejection stops the AdsPower profile immediately', async () => {
+  const stoppedProfiles = [];
+  const result = await executeRowWithAdapters(VALID_CSV, 0, {}, {
+    runClosedLoopChildAsync: async () => ({
+      ok: false,
+      error: 'Stripe payment field was not accepted: #payment-numberInput',
+    }),
+    adspower: {
+      stopProfile: async (_args, profileIdentifier) => {
+        stoppedProfiles.push(profileIdentifier);
+        return {attempted: true, ok: true};
+      },
+    },
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stage, 'payment_method.input');
+  assert.equal(result.stopProfile, true);
+  assert.equal(result.profileStop.ok, true);
+  assert.equal(stoppedProfiles.length, 1);
+  assert.equal(stoppedProfiles[0].value, '1415');
+});
+
+test('concurrent payment tasks keep each row card and AdsPower profile paired', async () => {
+  const tasks = [];
+  const options = {
+    scopeBillingAddress: false,
+    scopePaymentMethod: true,
+    scopePurchase: false,
+    scopeAutoTopup: false,
+  };
+  const adapters = {
+    runClosedLoopChildAsync: async (_script, task) => {
+      tasks.push(task);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return {ok: true, result: {card: {last4: task.card.number.slice(-4)}}};
+    },
+  };
+
+  await Promise.all([
+    executeRowWithAdapters(THREE_ROW_CSV, 0, options, adapters),
+    executeRowWithAdapters(THREE_ROW_CSV, 1, options, adapters),
+  ]);
+
+  const paired = tasks.map((task) => ({
+    profileNo: task.profileNo,
+    expectedAccount: task.expectedAccount,
+    cardNumber: task.card.number,
+    expiry: task.card.expiry,
+    cvc: task.card.cvc,
+  })).sort((left, right) => Number(left.profileNo) - Number(right.profileNo));
+  assert.deepEqual(paired, [
+    {profileNo: '1415', expectedAccount: 'first@example.com', cardNumber: '5257970000000001', expiry: '0628', cvc: '456'},
+    {profileNo: '1416', expectedAccount: 'second@example.com', cardNumber: '5257970000000002', expiry: '0628', cvc: '456'},
+  ]);
 });
 
 test('executeRow marks verified purchase as failed when OPOM completed writeback fails', async () => {
@@ -1205,10 +1270,12 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-mid-'));
   try {
     const db = openDatabase(join(dir, 'test.sqlite'));
-    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const options = {concurrency: 5};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV, options});
     const created = await createJob(db, {
       fileName: 'account.csv',
       csvText: THREE_ROW_CSV,
+      options,
       liveConfirmationToken: dryRun.liveConfirmationToken,
     });
     const rows = jobDetails(db, created.job.id).rows;
@@ -1235,6 +1302,7 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
 
     const resumed = await resumeJob(db, created.job.id, {startRowNumber: 2});
     assert.equal(resumed.job.status, 'queued');
+    assert.equal(resumed.job.options.concurrency, 5);
     assert.equal(resumed.job.cancelRequested, false);
     assert.equal(resumed.job.error, '');
     const details = jobDetails(db, created.job.id);

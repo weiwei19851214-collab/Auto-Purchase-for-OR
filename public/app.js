@@ -106,7 +106,8 @@
     el.errorText.textContent = '';
   }
 
-  async function requestJson(path, {method = 'GET', body, headers = {}} = {}) {
+  async function requestJson(path, options = {}, retriedAfterSessionRefresh = false) {
+    const {method = 'GET', body, headers = {}} = options;
     const response = await fetch(path, {
       method,
       headers: {
@@ -117,17 +118,30 @@
       ...(body === undefined ? {} : {body: JSON.stringify(body)}),
     });
     const data = await response.json().catch(() => ({}));
+    if (response.status === 401 && !retriedAfterSessionRefresh) {
+      // 本地服务重启会更换内存 token；仅重新取一次会话后重放原请求，避免无限重试。
+      await initSession();
+      return requestJson(path, options, true);
+    }
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
   }
 
   async function initSession() {
-    const response = await fetch('/api/session');
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
-    state.sessionToken = data.token;
-    state.sessionConfig = data.integrations || {};
-    renderConnectionSummary();
+    if (state.sessionRefreshPromise) return state.sessionRefreshPromise;
+    state.sessionRefreshPromise = (async () => {
+      const response = await fetch('/api/session');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
+      state.sessionToken = data.token;
+      state.sessionConfig = data.integrations || {};
+      renderConnectionSummary();
+    })();
+    try {
+      await state.sessionRefreshPromise;
+    } finally {
+      state.sessionRefreshPromise = null;
+    }
   }
 
   function numericValue(input, fallback = 0) {
@@ -1172,6 +1186,7 @@
     state.worker = data.worker || {};
     renderSchedulerState(data.scheduler || {});
     renderWorkerAndJobs();
+    clearError();
     if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
     state.refreshTimer = window.setTimeout(
       () => refreshJobs().catch(showError),

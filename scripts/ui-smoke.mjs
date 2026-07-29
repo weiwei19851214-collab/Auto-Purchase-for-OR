@@ -57,6 +57,10 @@ try {
   add('automatic dry-run and job creation wired', /\/api\/jobs\/dry-run/.test(appJs) && /\/api\/jobs/.test(appJs) && /liveConfirmationToken/.test(appJs), 'wired');
   add('execution page job recovery wired', /URLSearchParams\(location\.search\)\.get\(['"]job/.test(executionJs) && /resume-preview/.test(executionJs) && /opom-writeback-repair/.test(executionJs), 'wired');
   add('result CSV download uses session header', /X-Runner-Session/.test(executionJs), 'session_header');
+  add('local session recovers once after server restart', /response\.status === 401 && !retriedAfterSessionRefresh/.test(appJs)
+    && /response\.status === 401 && !retriedAfterSessionRefresh/.test(executionJs)
+    && /sessionRefreshPromise/.test(appJs)
+    && /sessionRefreshPromise/.test(executionJs), 'one_retry');
   add('deprecated UI controls removed from main page', !/createCardsBtn|noPurchaseMode|adspowerStatusMode|adspowerDiscoverTargetsBtn|addressMappingCsv|EJH_APP_KEY|EJH_APP_SECRET|Python/.test(html), 'removed');
   add('OPOM writeback is enabled for recharge and skipped for ZDR-only', !/id=["']opomWriteback["']/.test(html)
     && /opomWriteback:\s*!zdrOnly/.test(appJs), 'scope_aware');

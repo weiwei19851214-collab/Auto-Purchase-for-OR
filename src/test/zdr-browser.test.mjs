@@ -58,6 +58,9 @@ test('browser ZDR automation uses Guardrails visible navigation and scoped switc
   assert.match(source, /OPENROUTER_GUARDRAILS_MODELS_URL = 'https:\/\/openrouter\.ai\/workspaces\/default\/guardrails\/default\/models'/);
   assert.match(source, /navigatePage\(page, OPENROUTER_GUARDRAILS_MODELS_URL\)/);
   assert.ok(source.includes('Workspace\\\\s+Guardrail'));
+  assert.match(source, /async function openDefaultWorkspaceGuardrail/);
+  assert.match(source, /guardrail_row_text/);
+  assert.match(source, /const workspace = await openDefaultWorkspaceGuardrail\(page\)/);
   assert.ok(source.includes('Model\\\\s*&\\\\s*Provider\\\\s+Access'));
   assert.ok(source.includes('Zero\\\\s+Data\\\\s+Retention'));
   assert.match(source, /const switchSelector = '\[role="switch"\],button\[aria-checked\],input\[type="checkbox"\]\[role="switch"\],input\[type="checkbox"\]\[aria-checked\]'/);

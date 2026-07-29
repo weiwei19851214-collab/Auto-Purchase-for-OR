@@ -20,22 +20,22 @@ const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
 // AdsPower can take longer to create a browser profile when several profiles
 // start together; keep the startup request alive for 30 seconds.
 const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000;
-const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
-const DEFAULT_CREDITS_ENTRY_WAIT_MS = 60000;
-const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 60000;
-const DEFAULT_STRIPE_IFRAME_WAIT_MS = 60000;
+const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 30000;
+const DEFAULT_CREDITS_ENTRY_WAIT_MS = 30000;
+const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000;
+const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000;
 // 新增银行卡页面已出现后，给 Stripe iframe 最多 20 秒完成挂载。
 const PAYMENT_TARGET_WAIT_MS = 20000;
 // Credits 页新版金额卡片可能晚于操作按钮渲染，余额读取等待该金额进入 DOM。
 const CREDIT_BALANCE_READ_WAIT_MS = 20000;
-// 保存银行卡通常数秒完成；超过该时长仍显示 Saving 时停止本行，避免占满整行 180 秒超时。
-const SAVE_PAYMENT_METHOD_WAIT_MS = 30000;
-// 保存页卡在 Saving 时，只给刷新后的卡片回读一次短窗口，避免再次耗尽整行超时。
-const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 30000;
-const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 60000;
-const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 60000;
-const DEFAULT_NAVIGATION_RETRIES = 3;
-const DEFAULT_DOM_WAIT_MS = 60000;
+// 保存银行卡通常数秒完成；超过该时长仍显示 Saving 时停止本行，避免占满单行 3 分钟时限。
+const SAVE_PAYMENT_METHOD_WAIT_MS = 20000;
+// 保存页卡在 Saving 时，只给刷新后的卡片回读一次短窗口，避免再次耗尽单行时限。
+const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 20000;
+const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 30000;
+const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 30000;
+const DEFAULT_NAVIGATION_RETRIES = 2;
+const DEFAULT_DOM_WAIT_MS = 30000;
 const DEFAULT_DOM_POLL_MS = 1000;
 const SLOW_DOM_POLL_MS = 1500;
 const STRIPE_POST_FILL_SETTLE_MS = 1500;
@@ -1459,6 +1459,44 @@ async function clickGuardrailsVisibleControl(page, pattern, label = pattern, tim
   throw new Error(`Guardrails control not clickable: ${label}; ${last?.error || last?.tail || ''}`);
 }
 
+async function openDefaultWorkspaceGuardrail(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+        .trim()
+        .replace(/\\s+/g, ' ');
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      // OpenRouter 新版 Guardrails 首页把默认规则展示为表格行，不一定提供 button/a 语义。
+      const owners = [...document.querySelectorAll('a,button,[role="link"],[role="button"],[role="row"],tr,[tabindex],div')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .filter((item) => /\\bWorkspace\\s+Guardrail\\b/i.test(item.text) && item.text.length <= 260)
+        .sort((left, right) => left.text.length - right.text.length);
+      const owner = owners[0]?.node;
+      if (!owner) return {clicked:false, tail:textOf(document.body).slice(-1600)};
+      const target = owner.closest?.('a,button,[role="link"],[role="button"],[role="row"],tr,[tabindex]') || owner;
+      activate(target);
+      return {clicked:true, label:textOf(target), method: target === owner ? 'guardrail_row_text' : 'guardrail_row_owner'};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Default Workspace Guardrail row not clickable: ${last?.error || last?.tail || ''}`);
+}
+
 function zdrDomExpression(action = 'read') {
   return `(() => {
     const action = ${JSON.stringify(action)};
@@ -1637,7 +1675,7 @@ async function openZdrGuardrailsPanel(page, options = {}) {
     await navigatePage(page, OPENROUTER_GUARDRAILS_URL);
     await sleep(PAGE_SETTLE_MS);
   }
-  const workspace = await clickGuardrailsVisibleControl(page, '\\bWorkspace\\s+Guardrail\\b', 'Workspace Guardrail');
+  const workspace = await openDefaultWorkspaceGuardrail(page);
   await sleep(1000);
   const tab = await clickGuardrailsVisibleControl(page, '\\bModel\\s*&\\s*Provider\\s+Access\\b', 'Model & Provider Access');
   await sleep(PAGE_SETTLE_MS);
@@ -2657,10 +2695,10 @@ function normalizeStripeInputValue(value) {
 }
 
 function stripeFieldErrorPattern(selector) {
-  if (/numberInput/.test(selector)) return 'card number[^\\n]*(?:incomplete|invalid|incorrect)';
-  if (/expiryInput/.test(selector)) return 'expiration date[^\\n]*(?:incomplete|invalid|incorrect|expired)';
-  if (/cvcInput/.test(selector)) return '(?:security code|cvc)[^\\n]*(?:incomplete|invalid|incorrect)';
-  if (/postalCodeInput/.test(selector)) return '(?:zip|postal)[^\\n]*(?:incomplete|invalid|incorrect)';
+  if (/numberInput/.test(selector)) return '(?:card\\s+number|card\\s+no\\.?)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
+  if (/expiryInput/.test(selector)) return "(?:expiration(?:\\s+(?:date|month|year))?|card[\\'’]?s\\s+expiration)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|expired|past)";
+  if (/cvcInput/.test(selector)) return '(?:security\\s+code|cvc)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
+  if (/postalCodeInput/.test(selector)) return '(?:zip|postal)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
   return '(?:incomplete|invalid|incorrect)';
 }
 
@@ -2733,20 +2771,6 @@ async function typeFocusedFieldWithKeyEvents(client, text) {
     });
     await sleep(24);
   }
-  await client.send('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key: 'Tab',
-    code: 'Tab',
-    windowsVirtualKeyCode: 9,
-    nativeVirtualKeyCode: 9,
-  });
-  await client.send('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: 'Tab',
-    code: 'Tab',
-    windowsVirtualKeyCode: 9,
-    nativeVirtualKeyCode: 9,
-  });
 }
 
 async function focusStripeFieldWithCdp(client, selector) {
@@ -2796,13 +2820,22 @@ async function focusAndInsertText(client, selector, text, options = {}) {
     if (!el) return {found:false};
     const value = el.value || '';
     const normalized = String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase();
+    const expectedValue = ${JSON.stringify(expected)};
     const errorMatch = (document.body?.innerText || '').match(new RegExp(${JSON.stringify(errorPattern)}, 'i'));
     const ariaInvalid = el.getAttribute('aria-invalid') === 'true';
+    const safeValue = /numberInput/.test(${JSON.stringify(selector)})
+      ? (normalized ? '****' + normalized.slice(-4) : '')
+      : (/cvcInput/.test(${JSON.stringify(selector)}) ? (normalized ? '***' : '') : normalized);
+    const safeExpected = /numberInput/.test(${JSON.stringify(selector)})
+      ? (expectedValue ? '****' + expectedValue.slice(-4) : '')
+      : (/cvcInput/.test(${JSON.stringify(selector)}) ? (expectedValue ? '***' : '') : expectedValue);
     return {
       found: true,
       valueLength: normalized.length,
       matchesExpected: normalized === ${JSON.stringify(expected)},
       active: document.activeElement === el,
+      observed: safeValue,
+      expected: safeExpected,
       ariaInvalid,
       invalidByText: !!errorMatch,
       errorText: errorMatch?.[0] || '',
@@ -2810,7 +2843,7 @@ async function focusAndInsertText(client, selector, text, options = {}) {
     };
   })()`);
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const target = await evaluate(client, `(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return {found:false};
@@ -2824,7 +2857,7 @@ async function focusAndInsertText(client, selector, text, options = {}) {
       return {
         found: true,
         visible: rect.width > 0 && rect.height > 0,
-        value: el.value || '',
+        valueLength: String(el.value || '').length,
         rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
       };
     })()`);
@@ -2846,16 +2879,40 @@ async function focusAndInsertText(client, selector, text, options = {}) {
       await sleep(350);
       continue;
     }
+    // 鼠标点击会折叠之前的选区；重新选中后先确认清空，避免旧卡值和当前任务输入拼接或残留。
+    const selectionState = await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return {found:false};
+      el.focus();
+      if (el.select) el.select();
+      if (el.setSelectionRange) {
+        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
+      }
+      return {found:true, active:document.activeElement === el, selectedLength:Math.abs((el.selectionEnd || 0) - (el.selectionStart || 0))};
+    })()`);
+    if (!selectionState.found || !selectionState.active) {
+      lastState = {...selectionState, phase: 'select_before_clear'};
+      await sleep(350);
+      continue;
+    }
     await clearFocusedFieldWithKeys(client);
     await sleep(80);
-    await typeFocusedFieldWithKeyEvents(client, text);
+    const cleared = await readValueState();
+    if (cleared.valueLength !== 0) {
+      lastState = {...cleared, phase: 'clear_before_insert'};
+      await sleep(350);
+      continue;
+    }
+    // 首次使用 Stripe 原生文本输入；只有它未被页面接受时才使用一次按键级重填。
+    if (attempt === 0) await client.send('Input.insertText', {text: String(text || '')});
+    else await typeFocusedFieldWithKeyEvents(client, text);
     await sleep(320);
 
     const state = await readValueState();
     lastState = state;
     // Stripe 必须同时保留值并清除字段级 incomplete/invalid 状态；DOM value 不能单独证明 Stripe 已接收输入。
     if (state.matchesExpected && state.accepted) {
-      return {...state, method: 'dispatch_key_events', attempt: attempt + 1};
+      return {...state, method: attempt === 0 ? 'insert_text' : 'dispatch_key_events', attempt: attempt + 1};
     }
     await sleep(350);
   }
@@ -3130,10 +3187,13 @@ async function dismissBrowserChromeBubbles(page) {
   return {attempted: true, escapes, clickAway};
 }
 
-async function waitUntilSaveModalCloses(page, timeoutMs = SAVE_PAYMENT_METHOD_WAIT_MS) {
+async function waitUntilSaveModalCloses(page, payment, timeoutMs = SAVE_PAYMENT_METHOD_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
+    // 拒卡是保存后的支付结果，必须在 iframe 和主页面同时识别，保留其优先级高于超时恢复。
+    const paymentIssue = await detectPaymentIssue(page, payment);
+    if (paymentIssue.found) throw new Error(`payment_issue_card_declined: ${paymentIssue.message || 'Payment Issue'}`);
     const state = await evaluate(page, `(() => {
       const text = document.body?.innerText || '';
       return {
@@ -3931,8 +3991,8 @@ async function findRecentTransactionAmount(page, expectedAmount) {
   })(${JSON.stringify(target)})`);
 }
 
-async function detectPaymentIssue(page) {
-  return evaluate(page, `(() => {
+async function detectPaymentIssue(page, payment = null) {
+  const inspect = async (client) => evaluate(client, `(() => {
     const text = document.body?.innerText || '';
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
@@ -3957,6 +4017,12 @@ async function detectPaymentIssue(page) {
       tail: text.slice(-1800),
     };
   })()`);
+  const mainPageIssue = await inspect(page).catch(() => ({found: false}));
+  if (mainPageIssue.found || !payment) return mainPageIssue;
+  const stripeFrameIssue = await inspect(payment).catch(() => ({found: false}));
+  return stripeFrameIssue.found
+    ? {...stripeFrameIssue, source: 'stripe_iframe'}
+    : mainPageIssue;
 }
 
 async function executeConfirmedPurchase(page, purchase, debugPort = '', debugDir = '') {
@@ -5853,7 +5919,7 @@ async function run() {
     let postSave;
     let savedCardAfterStalledSave = null;
     try {
-      postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page), page);
+      postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page, payment), page);
     } catch (error) {
       if (!/Save modal did not close after/i.test(error.message || '') || !input.openPurchaseForVerification) throw error;
 

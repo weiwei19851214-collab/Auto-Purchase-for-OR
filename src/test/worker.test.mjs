@@ -195,11 +195,16 @@ test('worker continues later rows after manual security blocker', async () => {
   }
 });
 
-test('worker runs queued rows concurrently when job concurrency is greater than one', async () => {
+test('worker runs payment-method rows concurrently when job concurrency is greater than one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-concurrency-'));
   try {
     const db = openDatabase(join(dir, 'test.sqlite'));
-    const options = {concurrency: 2};
+    const options = {
+      concurrency: 2,
+      scopePaymentMethod: true,
+      scopeBillingAddress: false,
+      scopeAutoTopup: false,
+    };
     const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: TWO_ROW_CSV, options});
     const created = await createJob(db, {
       fileName: 'account.csv',

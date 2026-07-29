@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
 import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, join} from 'node:path';
-import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
+import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
 import {newId, nowIso} from './ids.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import * as childRunner from '../automation/lib/child-runner.mjs';
@@ -83,7 +83,7 @@ export function runnerArgs(options = {}) {
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
     cardProvider: normalizeCardProvider(options.cardProvider),
-    rowTimeoutMs: Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS),
+    rowTimeoutMs: Math.min(MAX_ROW_TIMEOUT_MS, Math.max(1000, Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS))),
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',
     adspowerApiKey: options.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',

@@ -201,7 +201,13 @@ h2 { font-size: 19px; font-weight: 760; }
 .secondary-button:not(:disabled):active,
 .toolbar-button:not(:disabled):active { transform: scale(0.98); }
 
-.worker-button { display: inline-flex; align-items: center; gap: 8px; }
+.worker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+  pointer-events: none;
+}
 
 .status-dot {
   width: 8px;
@@ -671,6 +677,13 @@ select { padding-right: 28px; }
 }
 
 .match-table tbody tr:hover { background: color-mix(in srgb, var(--blue) 5%, var(--surface-solid)); }
+.match-table tbody tr.match-row-failed {
+  background: color-mix(in srgb, var(--red) 7%, var(--surface-solid));
+}
+
+.match-table tbody tr.match-row-failed:hover {
+  background: color-mix(in srgb, var(--red) 11%, var(--surface-solid));
+}
 .row-check-target {
   display: grid;
   width: 44px;
@@ -1038,6 +1051,10 @@ body[data-page="execution"] .toolbar-inner {
   vertical-align: middle;
 }
 
+.execution-table tbody tr.detail-row-failed {
+  background: color-mix(in srgb, var(--red) 7%, var(--surface-solid));
+}
+
 .execution-table .message {
   white-space: normal;
   overflow-wrap: anywhere;
@@ -1269,6 +1286,9 @@ body[data-page="execution"] .event-line span:last-child {
     border-radius: 10px;
     background: var(--surface-solid);
     overflow: hidden;
+  }
+  .execution-table tbody tr.detail-row-failed {
+    background: color-mix(in srgb, var(--red) 7%, var(--surface-solid));
   }
   .execution-table tbody tr + tr {
     margin-top: 10px;

@@ -146,8 +146,9 @@ function renderRows(rows, job) {
   const canOperate = !['queued', 'running'].includes(job.status);
   els.executionBody.innerHTML = rows.map((row) => {
     const canRepair = canRepairOpom(row, canOperate);
+    const failedRow = isFailedJobRow(row);
     return `
-      <tr>
+      <tr class="${failedRow ? 'detail-row-failed' : ''}">
         <td data-label="状态">${statusPill(row.status, statusLabel(row.status))}</td>
         <td data-label="行">${escapeHtml(row.rowNumber)}</td>
         <td data-label="账号"><span class="account-cell"><strong>${escapeHtml(row.loginEmail || row.username || '-')}</strong><small>${escapeHtml(row.opomAccountId || '')}</small></span></td>
@@ -172,6 +173,22 @@ function renderRows(rows, job) {
   els.executionBody.querySelectorAll('.repair-opom').forEach((button) => {
     button.addEventListener('click', () => repairOpom(Number(button.dataset.rowNumber)).catch(showError));
   });
+}
+
+function isFailedJobRow(row = {}) {
+  // 只突出已结束但未成功的子任务，排队、执行中、跳过和用户取消不显示为失败。
+  return new Set([
+    'failed',
+    'blocked',
+    'missing_fields',
+    'login_required',
+    'identity_mismatch',
+    'payment_issue_card_declined',
+    'manual_security_blocker',
+    'purchase_unverified',
+    'credits_401_blocked',
+    'balance_unknown',
+  ]).has(String(row.status || '').trim());
 }
 
 function cardOpomText(row) {

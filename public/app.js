@@ -560,6 +560,12 @@
     return pill('error', '失败');
   }
 
+  function hasMatchFailure(row) {
+    // 只有实际请求过 OPOM/AdsPower 后明确失败才标红；刚导入的“未验证”不是失败。
+    return row.ads_match_status === 'failed'
+      || row.opom_health_status === 'opom_resolve_failed';
+  }
+
   function syncSelectAllRows(rows = state.rows) {
     const selectedCount = selectedRows().length;
     el.selectAllRows.checked = rows.length > 0 && selectedCount === rows.length;
@@ -621,7 +627,7 @@
           ? (last4 ? pill('ok', `已分配 ••••${last4}`) : pill('warning', '待分配'))
           : pill('neutral', '不替换');
       return `
-        <tr>
+        <tr class="${hasMatchFailure(row) ? 'match-row-failed' : ''}">
           <td>
             <label class="row-check-target">
               <input class="row-check" type="checkbox" data-index="${index}" aria-label="选择 ${escapeHtml(row.login_email || `第 ${index + 1} 行`)}" ${row.execute !== false ? 'checked' : ''}>
@@ -1194,13 +1200,6 @@
     );
   }
 
-  function workerJobId() {
-    const currentRows = Array.isArray(state.worker.currentRows) ? state.worker.currentRows : [];
-    return currentRows.find((row) => row.jobId)?.jobId
-      || state.jobs.find((job) => ['running', 'queued'].includes(job.status))?.id
-      || '';
-  }
-
   async function withBusy(button, busyText, action) {
     const original = button.textContent;
     button.disabled = true;
@@ -1265,7 +1264,11 @@
 
   function bindEvents() {
     bindSourceControl();
-    el.accountFileButton.addEventListener('click', () => el.accountFile.click());
+    el.accountFileButton.addEventListener('click', () => {
+      // 浏览器对同一路径文件不会再次触发 change；清空原选择后允许重复导入同一份账号 CSV。
+      el.accountFile.value = '';
+      el.accountFile.click();
+    });
     el.accountFile.addEventListener('change', () => {
       const file = el.accountFile.files?.[0];
       if (!file) return;
@@ -1361,14 +1364,6 @@
     el.recordsButton.addEventListener('click', () => {
       renderWorkerAndJobs();
       el.recordsDialog.showModal();
-    });
-    el.workerButton.addEventListener('click', () => {
-      const jobId = workerJobId();
-      if (jobId) openExecution(jobId);
-      else {
-        renderWorkerAndJobs();
-        el.recordsDialog.showModal();
-      }
     });
     el.saveSettingsButton.addEventListener('click', saveRuntimeConfig);
     el.clearSettingsButton.addEventListener('click', clearRuntimeConfig);

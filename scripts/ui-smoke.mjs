@@ -30,6 +30,7 @@ try {
   add('JS selector contract', missingIds.length === 0, missingIds.length ? `missing:${missingIds.join(',')}` : `ids=${queriedIds.length}`);
 
   add('CSV and OPOM source switch present', /data-source=["']csv["']/.test(html) && /data-source=["']opom["']/.test(html), 'dual_source');
+  add('account CSV can be reselected after import', /el\.accountFile\.value\s*=\s*'';[\s\S]{0,240}el\.accountFile\.click\(\)/.test(appJs), 'same_file_reimport');
   add('OPOM combined status maps in UI', /card_switch\s*&amp;\s*overdue/.test(html), 'combined_status');
   add('default rule values', /id=["']balanceThreshold["'][^>]*value=["']145["']/.test(html)
     && /id=["']amountBelow["'][^>]*value=["']150["']/.test(html)
@@ -54,6 +55,9 @@ try {
   add('auto recharge scheduler switch present', /id=["']autoRechargeEnabled["'][^>]*role=["']switch["']/.test(html)
     && /\/api\/scheduler/.test(appJs), 'present');
   add('mapping and concurrency controls present', /id=["']matchButton["']/.test(html) && /id=["']skipMatch["']/.test(html) && /id=["']concurrency["'][^>]*max=["']10["']/.test(html), 'present');
+  add('Worker is display-only and task history remains the navigation entry', /<div class=["']toolbar-button worker-button["'] id=["']workerButton["'] role=["']status["']/.test(html)
+    && /id=["']recordsButton["']/.test(html)
+    && !/workerButton\.addEventListener\(['"]click/.test(appJs), 'worker_status_only');
   add('automatic dry-run and job creation wired', /\/api\/jobs\/dry-run/.test(appJs) && /\/api\/jobs/.test(appJs) && /liveConfirmationToken/.test(appJs), 'wired');
   add('execution page job recovery wired', /URLSearchParams\(location\.search\)\.get\(['"]job/.test(executionJs) && /resume-preview/.test(executionJs) && /opom-writeback-repair/.test(executionJs), 'wired');
   add('result CSV download uses session header', /X-Runner-Session/.test(executionJs), 'session_header');

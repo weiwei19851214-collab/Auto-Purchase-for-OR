@@ -44,6 +44,21 @@ npm test
 npm start
 ```
 
+在 Windows PowerShell 或 IntelliJ IDEA 中，不要执行 `start-local.sh`。可直接运行：
+
+```powershell
+.\start-local.cmd
+```
+
+或在 PowerShell 中执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+```
+
+首次运行仍需先执行一次 `npm install`。Windows 启动脚本会检查 Node.js 22、创建
+运行目录，并停止占用本项目端口的旧本地进程。
+
 `npm start` 会自动读取项目根目录可选的 `.recharge.local.env`，因此保存过的
 OPOM 本地配置不需要再手动 export。也可以在页面的“本地配置”中填写
 `OPOM_BASE_URL` 和 `RECHARGE_API_TOKEN`；两者均未配置时，读取按钮会保持禁用。

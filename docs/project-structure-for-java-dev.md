@@ -60,7 +60,9 @@ src/server/index.mjs
 ├── openrouter-recharge-input-template.csv
 ├── reconciliation-card-import-template.csv
 ├── package.json
-└── start-local.sh
+├── start-local.sh           # macOS/Linux 本地启动入口
+├── start-local.ps1          # Windows PowerShell 本地启动入口
+└── start-local.cmd          # Windows 双击/IDEA 调用入口
 ```
 
 `data/` 是运行时目录，不是主要源码目录。排查执行失败时常看 `data/logs/<job>/<row>/step-*.json`。

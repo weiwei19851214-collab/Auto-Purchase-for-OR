@@ -13,7 +13,7 @@ function Get-FirstConfiguredPort {
 }
 
 if (-not $env:PORT) {
-  # 与 macOS 启动脚本保持相同的端口优先级，最终仍只通过 PORT 交给 Node 服务。
+  # Keep the same port precedence as the macOS/Linux launcher.
   $env:PORT = Get-FirstConfiguredPort
 }
 if (-not $env:OR_RUNNER_DB) {
@@ -25,31 +25,31 @@ foreach ($relativePath in @('data\uploads', 'data\results', 'data\logs')) {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw '未找到 Node.js。请安装 Node.js 22 或更高版本后重新运行。'
+  throw 'Node.js was not found. Install Node.js 22 or later, then run this script again.'
 }
 
 $nodeMajor = [int](& node -p "process.versions.node.split('.')[0]")
 if ($nodeMajor -lt 22) {
-  throw "当前 Node.js 版本是 $(& node -v)，本项目需要 Node.js 22 或更高版本。"
+  throw "Node.js $(& node -v) is too old. This project requires Node.js 22 or later."
 }
 
 if (-not (Test-Path (Join-Path $projectRoot 'node_modules'))) {
-  Write-Host '提示: 未发现 node_modules。首次运行请先执行: npm install' -ForegroundColor Yellow
+  Write-Host 'node_modules was not found. Run npm install before starting the project.' -ForegroundColor Yellow
 }
 
-# 本地控制台固定监听回环地址；同端口的旧进程通常是本项目上一次启动残留。
+# The local console owns this loopback port; an existing listener is usually a previous local run.
 $listeners = @(Get-NetTCPConnection -LocalPort ([int]$env:PORT) -State Listen -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {
-  Write-Host "检测到端口 $env:PORT 已被占用，正在停止旧进程 PID $($listener.OwningProcess)" -ForegroundColor Yellow
+  Write-Host "Port $env:PORT is in use. Stopping previous process PID $($listener.OwningProcess)." -ForegroundColor Yellow
   Stop-Process -Id $listener.OwningProcess -Force
 }
 
-Write-Host 'OpenRouter 充值执行器本地启动'
-Write-Host "项目目录: $projectRoot"
-Write-Host "访问地址: http://127.0.0.1:$env:PORT"
-Write-Host "数据库: $env:OR_RUNNER_DB"
+Write-Host 'Starting OpenRouter Recharge Runner'
+Write-Host "Project directory: $projectRoot"
+Write-Host "URL: http://127.0.0.1:$env:PORT"
+Write-Host "Database: $env:OR_RUNNER_DB"
 Write-Host ''
 
-# npm.cmd 避免 PowerShell 将 Windows 的 npm shim 误识别为 Unix 可执行文件。
+# Use the Windows npm shim explicitly.
 & npm.cmd start
 exit $LASTEXITCODE

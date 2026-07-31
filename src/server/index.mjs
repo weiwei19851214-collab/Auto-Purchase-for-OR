@@ -1,7 +1,7 @@
 import {createServer} from 'node:http';
 import {execFile} from 'node:child_process';
 import {existsSync} from 'node:fs';
-import {resolve} from 'node:path';
+import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
 import {DEFAULT_SERVER_PORT, PUBLIC_DIR, ROOT_DIR} from './config.mjs';
 import {openDatabase, getJob, recoverInterruptedWork} from './db.mjs';
@@ -240,7 +240,11 @@ async function repoInfo() {
 async function serveStatic(res, pathname) {
   const requested = pathname === '/' ? '/index.html' : pathname;
   const filePath = resolve(PUBLIC_DIR, `.${requested}`);
-  if (!filePath.startsWith(`${PUBLIC_DIR}/`) && filePath !== PUBLIC_DIR) throw httpError(403, 'Forbidden');
+  // 不能用字符串拼接 '/' 判断目录边界：Windows resolve 会返回 '\\'，会把合法首页误判为越界。
+  const relativePath = relative(PUBLIC_DIR, filePath);
+  if (relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw httpError(403, 'Forbidden');
+  }
   if (!existsSync(filePath)) {
     sendText(res, 404, 'Not found');
     return;

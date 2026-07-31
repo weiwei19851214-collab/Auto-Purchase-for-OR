@@ -11,5 +11,6 @@ test('Windows startup wrappers invoke the local Node server without Bash', () =>
   assert.match(powershell, /npm\.cmd start/);
   assert.match(powershell, /Get-NetTCPConnection/);
   assert.doesNotMatch(powershell, /\/usr\/bin\/env|\bbash\b/);
+  assert.doesNotMatch(powershell, /node_modules/);
   assert.match(command, /powershell\.exe .*start-local\.ps1/i);
 });

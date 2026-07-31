@@ -56,8 +56,8 @@ npm start
 powershell -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
-首次运行仍需先执行一次 `npm install`。Windows 启动脚本会检查 Node.js 22、创建
-运行目录，并停止占用本项目端口的旧本地进程。
+当前项目没有第三方 npm 依赖，无需因 `node_modules` 不存在而执行 `npm install`。
+Windows 启动脚本会检查 Node.js 22、创建运行目录，并停止占用本项目端口的旧本地进程。
 
 `npm start` 会自动读取项目根目录可选的 `.recharge.local.env`，因此保存过的
 OPOM 本地配置不需要再手动 export。也可以在页面的“本地配置”中填写

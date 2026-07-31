@@ -33,10 +33,6 @@ if ($nodeMajor -lt 22) {
   throw "Node.js $(& node -v) is too old. This project requires Node.js 22 or later."
 }
 
-if (-not (Test-Path (Join-Path $projectRoot 'node_modules'))) {
-  Write-Host 'node_modules was not found. Run npm install before starting the project.' -ForegroundColor Yellow
-}
-
 # The local console owns this loopback port; an existing listener is usually a previous local run.
 $listeners = @(Get-NetTCPConnection -LocalPort ([int]$env:PORT) -State Listen -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {

@@ -44,20 +44,30 @@ npm test
 npm start
 ```
 
-在 Windows PowerShell 或 IntelliJ IDEA 中，不要执行 `start-local.sh`。可直接运行：
+全新 Windows 电脑只需下载一个文件 `bootstrap-windows.ps1`，在 PowerShell 执行：
 
 ```powershell
-.\start-local.cmd
+powershell -ExecutionPolicy Bypass -File .\bootstrap-windows.ps1
 ```
 
-或在 PowerShell 中执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\start-local.ps1
-```
+它会用 `winget` 安装 Git 和 Node.js LTS，克隆
+`https://github.com/weiwei19851214-collab/Auto-Purchase-for-OR` 的 `new-portal` 分支到
+`%USERPROFILE%\OpenRouter-Recharge-Runner\Auto-Purchase-for-OR`，启动本地控制台，并在健康检查
+成功后自动打开页面。以后再次执行同一个文件时会复用已克隆的项目并直接启动，不会覆盖本地代码。
+仓库需要权限时，Git 会要求操作者完成 GitHub 登录。它不会安装 AdsPower，也不会写入 OPOM Token
+等业务配置。
 
 当前项目没有第三方 npm 依赖，无需因 `node_modules` 不存在而执行 `npm install`。
-Windows 启动脚本会检查 Node.js 22、创建运行目录，并停止占用本项目端口的旧本地进程。
+
+全新 macOS 电脑同样只需下载一个文件 `bootstrap-macos.sh`，在 Terminal 执行：
+
+```bash
+bash ./bootstrap-macos.sh
+```
+
+它会检查并安装 Homebrew、Git、Node.js 22+，克隆相同的 `new-portal` 分支，再调用项目原有
+`start-local.sh` 启动服务并自动打开页面。Homebrew 首次安装可能要求输入 macOS 管理员密码；
+脚本不会安装 AdsPower，也不会写入 OPOM Token 等业务配置。
 
 `npm start` 会自动读取项目根目录可选的 `.recharge.local.env`，因此保存过的
 OPOM 本地配置不需要再手动 export。也可以在页面的“本地配置”中填写

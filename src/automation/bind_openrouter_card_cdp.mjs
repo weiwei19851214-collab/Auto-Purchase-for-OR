@@ -16,7 +16,6 @@ const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
 const OPENROUTER_GUARDRAILS_URL = 'https://openrouter.ai/workspaces/default/guardrails';
 const OPENROUTER_GUARDRAILS_MODELS_URL = 'https://openrouter.ai/workspaces/default/guardrails/default/models';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
-const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
 // AdsPower can take longer to create a browser profile when several profiles
 // start together; keep the startup request alive for 30 seconds.
 const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000;
@@ -2015,64 +2014,6 @@ async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
   return paymentMethod;
 }
 
-async function clearDefaultPaymentMethod(page) {
-  const before = await fetchStripeData(page);
-  if (!before.ok) {
-    if (before.status === 404) {
-      return {
-        clearedDefault: false,
-        skipped: true,
-        reason: /Customer not found/i.test(before.text || '')
-          ? 'stripe_customer_not_found'
-          : 'stripe_data_not_found',
-        existingPaymentMethodCount: 0,
-        existingPaymentMethods: [],
-      };
-    }
-    throw new Error(`Could not read Stripe data before clearing default payment method: ${before.status} ${before.text}`);
-  }
-
-  const updateResult = await evaluate(page, `(async () => {
-    const res = await fetch(location.href, {
-      method: 'POST',
-      headers: {
-        'Next-Action': ${JSON.stringify(UPDATE_CURRENT_USER_ACTION)},
-        'Content-Type': 'text/plain;charset=UTF-8',
-        'Accept': 'text/x-component',
-      },
-      body: JSON.stringify([{stripe_payment_method_id:null, stripe_payment_method_backup_list:[]}]),
-    });
-    const text = await res.text();
-    return {
-      ok: res.ok && /"__kind":"OK"/.test(text) && /"stripe_payment_method_id":null/.test(text),
-      status: res.status,
-      text: text.slice(0, 1200),
-    };
-  })()`, 20000);
-  if (!updateResult.ok) {
-    if (/Server action not found/i.test(updateResult.text || '')) {
-      await navigatePage(page, OPENROUTER_CREDITS_URL).catch(() => null);
-      await sleep(500);
-      return {
-        clearedDefault: false,
-        skipped: true,
-        reason: 'openrouter_update_current_user_action_not_found',
-        existingPaymentMethodCount: before.paymentMethods.length,
-        existingPaymentMethods: before.paymentMethods.map(maskPaymentMethod),
-      };
-    }
-    throw new Error(`Could not clear default payment method: ${updateResult.status} ${updateResult.text}`);
-  }
-
-  await navigatePage(page, OPENROUTER_CREDITS_URL);
-  await sleep(1500);
-  return {
-    clearedDefault: true,
-    existingPaymentMethodCount: before.paymentMethods.length,
-    existingPaymentMethods: before.paymentMethods.map(maskPaymentMethod),
-  };
-}
-
 async function ensureOpenRouterPage(input) {
   input.debugPort ||= debugPortFromWs(input.browserWs);
   if (!input.debugPort) throw new Error('No debugPort available');
@@ -2717,44 +2658,51 @@ function keyDescriptor(character) {
   return {key: value, code: '', keyCode};
 }
 
-async function clearFocusedFieldWithKeys(client) {
+async function clearFocusedFieldWithBackspaces(client, currentValueLength = 0) {
   await client.send('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key: 'a',
-    code: 'KeyA',
-    modifiers: 4,
-    windowsVirtualKeyCode: 65,
-    nativeVirtualKeyCode: 65,
+    type: 'rawKeyDown',
+    key: 'End',
+    code: 'End',
+    windowsVirtualKeyCode: 35,
+    nativeVirtualKeyCode: 35,
   });
   await client.send('Input.dispatchKeyEvent', {
     type: 'keyUp',
-    key: 'a',
-    code: 'KeyA',
-    modifiers: 4,
-    windowsVirtualKeyCode: 65,
-    nativeVirtualKeyCode: 65,
+    key: 'End',
+    code: 'End',
+    windowsVirtualKeyCode: 35,
+    nativeVirtualKeyCode: 35,
   });
-  await client.send('Input.dispatchKeyEvent', {
-    type: 'keyDown',
-    key: 'Backspace',
-    code: 'Backspace',
-    windowsVirtualKeyCode: 8,
-    nativeVirtualKeyCode: 8,
-  });
-  await client.send('Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: 'Backspace',
-    code: 'Backspace',
-    windowsVirtualKeyCode: 8,
-    nativeVirtualKeyCode: 8,
-  });
+  for (let index = 0; index < Math.max(8, Number(currentValueLength || 0) + 4); index += 1) {
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+  }
 }
 
 async function typeFocusedFieldWithKeyEvents(client, text) {
   for (const character of String(text || '')) {
     const descriptor = keyDescriptor(character);
     await client.send('Input.dispatchKeyEvent', {
-      type: 'keyDown',
+      type: 'rawKeyDown',
+      key: descriptor.key,
+      code: descriptor.code,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'char',
       key: descriptor.key,
       code: descriptor.code,
       text: character,
@@ -2771,6 +2719,23 @@ async function typeFocusedFieldWithKeyEvents(client, text) {
     });
     await sleep(24);
   }
+}
+
+async function blurFocusedFieldWithTab(client) {
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
 }
 
 async function focusStripeFieldWithCdp(client, selector) {
@@ -2810,7 +2775,7 @@ async function focusStripeFieldWithCdp(client, selector) {
   })()`);
 }
 
-async function focusAndInsertText(client, selector, text, options = {}) {
+async function focusAndTypeStripeField(client, selector, text, options = {}) {
   const expected = normalizeStripeInputValue(options.expectedValue || text);
   const errorPattern = stripeFieldErrorPattern(selector);
   let lastState = null;
@@ -2895,7 +2860,7 @@ async function focusAndInsertText(client, selector, text, options = {}) {
       await sleep(350);
       continue;
     }
-    await clearFocusedFieldWithKeys(client);
+    await clearFocusedFieldWithBackspaces(client, target.valueLength);
     await sleep(80);
     const cleared = await readValueState();
     if (cleared.valueLength !== 0) {
@@ -2903,16 +2868,20 @@ async function focusAndInsertText(client, selector, text, options = {}) {
       await sleep(350);
       continue;
     }
-    // 首次使用 Stripe 原生文本输入；只有它未被页面接受时才使用一次按键级重填。
-    if (attempt === 0) await client.send('Input.insertText', {text: String(text || '')});
-    else await typeFocusedFieldWithKeyEvents(client, text);
+    // Stripe 所有文本字段都逐位触发真实键盘事件；整串注入可能只更新 DOM value，未同步 Stripe 内部状态。
+    await typeFocusedFieldWithKeyEvents(client, text);
+    await blurFocusedFieldWithTab(client);
     await sleep(320);
 
     const state = await readValueState();
     lastState = state;
     // Stripe 必须同时保留值并清除字段级 incomplete/invalid 状态；DOM value 不能单独证明 Stripe 已接收输入。
     if (state.matchesExpected && state.accepted) {
-      return {...state, method: attempt === 0 ? 'insert_text' : 'dispatch_key_events', attempt: attempt + 1};
+      return {
+        ...state,
+        method: 'dispatch_key_events',
+        attempt: attempt + 1,
+      };
     }
     await sleep(350);
   }
@@ -2982,17 +2951,17 @@ async function ensureStripeCardReadyForSubmit(payment, card) {
 
   // 提交 Save payment method 前必须回读 Stripe iframe 字段；若页面重渲染吞值，只重填一次，避免空卡号/有效期/邮编被提交。
   if (!state.complete.number) {
-    await focusAndInsertText(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+    await focusAndTypeStripeField(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
   }
   if (!state.complete.expiry) {
-    await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+    await focusAndTypeStripeField(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
   }
   if (!state.complete.cvc) {
-    await focusAndInsertText(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
+    await focusAndTypeStripeField(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
   }
   if (!state.complete.postalCode) {
     if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
-    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
+    await focusAndTypeStripeField(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
   }
 
   state = await readStripePaymentFieldState(payment, card);
@@ -3042,9 +3011,9 @@ async function fillStripeCard(payment, card) {
     await sleep(DEFAULT_DOM_POLL_MS);
   }
   if (!ready) throw new Error(`Missing Stripe field after ${DEFAULT_STRIPE_IFRAME_WAIT_MS}ms: #payment-numberInput`);
-  await focusAndInsertText(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
-  await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
-  await focusAndInsertText(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
+  await focusAndTypeStripeField(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+  await focusAndTypeStripeField(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+  await focusAndTypeStripeField(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
   const countryState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-countryInput');
     if (!el) return {exists:false, changedFromNonUs:false, selected:false};
@@ -3091,7 +3060,7 @@ async function fillStripeCard(payment, card) {
   })()`);
   if (postalState.exists) {
     if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
-    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
+    await focusAndTypeStripeField(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
   }
 
   const values = await evaluate(payment, `(() => [...document.querySelectorAll('input,select')].map((el) => ({
@@ -3537,9 +3506,8 @@ async function resolvePurchasePlan(page, purchase) {
 async function setPurchaseAmountInput(page, amount) {
   const value = normalizeMoneyValue(amount);
   if (!value) throw new Error('Purchase amount is required');
-  const result = await evaluate(page, `(() => {
+  const target = await evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const value = ${JSON.stringify(String(value))};
     const labelText = (input) => [
       input.name,
       input.id,
@@ -3563,7 +3531,7 @@ async function setPurchaseAmountInput(page, amount) {
       || inputs.find((item) => /\\bAmount\\b|Purchase\\s+Credits/i.test(item.text));
     if (!candidate) {
       return {
-        updated:false,
+        found:false,
         reason:'amount_input_not_found',
         inputs:inputs.map((item) => ({index:item.index, type:item.input.type || '', value:item.input.value || '', text:item.text.slice(0, 300)})),
         tail:(document.body?.innerText || '').slice(-1800),
@@ -3571,33 +3539,62 @@ async function setPurchaseAmountInput(page, amount) {
     }
     const input = candidate.input;
     const before = input.value || '';
+    document.querySelectorAll('[data-or-purchase-amount-target]')
+      .forEach((node) => node.removeAttribute('data-or-purchase-amount-target'));
+    input.setAttribute('data-or-purchase-amount-target', 'true');
     input.scrollIntoView({block:'center', inline:'center'});
     input.focus();
-    if (input.select) input.select();
-    const nativeValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
-    if (nativeValue) nativeValue.call(input, value);
-    else input.value = value;
-    try {
-      input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
-    } catch {
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    }
-    input.dispatchEvent(new Event('change', {bubbles:true}));
-    input.blur();
     return {
-      updated: input.value === value,
+      found:true,
+      focused:document.activeElement === input,
       index: candidate.index,
       before,
-      value: input.value || '',
       text: candidate.text.slice(0, 300),
       rect: {x:candidate.rect.x, y:candidate.rect.y, width:candidate.rect.width, height:candidate.rect.height},
     };
   })()`);
+  if (!target.found) {
+    throw new Error(`Purchase amount input not found: ${JSON.stringify(target)}`);
+  }
+
+  const selector = '[data-or-purchase-amount-target="true"]';
+  const focusState = target.focused ? {found: true, active: true} : await focusStripeFieldWithCdp(page, selector);
+  if (!focusState.found || !focusState.active) {
+    throw new Error(`Purchase amount input could not be focused: ${JSON.stringify({target, focusState})}`);
+  }
+  await clearFocusedFieldWithBackspaces(page, String(target.before || '').length);
+  await sleep(80);
+  const cleared = await evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    return {found:!!input, value:input?.value || '', active:document.activeElement === input};
+  })()`);
+  if (!cleared.found || cleared.value !== '' || !cleared.active) {
+    throw new Error(`Purchase amount input could not be cleared: ${JSON.stringify(cleared)}`);
+  }
+
+  await typeFocusedFieldWithKeyEvents(page, value);
+  await blurFocusedFieldWithTab(page);
+  await sleep(350);
+  const result = await evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    const actual = input?.value || '';
+    const expected = ${JSON.stringify(String(value))};
+    const response = {
+      updated: actual === expected && document.activeElement !== input,
+      value: actual,
+      blurred: document.activeElement !== input,
+      index: ${JSON.stringify(target.index)},
+      before: ${JSON.stringify(target.before)},
+      text: ${JSON.stringify(target.text)},
+      rect: ${JSON.stringify(target.rect)},
+      method: 'dispatch_key_events',
+    };
+    input?.removeAttribute('data-or-purchase-amount-target');
+    return response;
+  })()`);
   if (!result.updated) {
     throw new Error(`Purchase amount input did not retain ${value}: ${JSON.stringify(result)}`);
   }
-  await sleep(350);
   return result;
 }
 
@@ -4131,18 +4128,15 @@ async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
 }
 
 async function removeSavedPaymentMethodsFromPicker(page) {
-  const removed = [];
-
   await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
-  await sleep(1200);
+  await sleep(500);
 
-  for (let i = 0; i < 8; i += 1) {
-    const result = await evaluate(page, `(() => {
+  const result = await evaluate(page, `(() => {
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      const buttons = [...document.querySelectorAll('button,a,[role="button"],svg,[aria-label],[title]')]
+      const controls = [...document.querySelectorAll('button,a,[role="button"]')]
         .map((node, index) => {
           const rect = node.getBoundingClientRect();
           return {
@@ -4158,7 +4152,7 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         })
         .filter((item) => visible(item.node) && !item.disabled);
 
-      const card = buttons
+      const card = controls
         .filter((item) => (
           /\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER)\\b/i.test(item.text)
           && /\\(\\d{4}\\)/.test(item.text)
@@ -4174,53 +4168,30 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         };
       }
 
-      // OpenRouter 的保存卡删除按钮没有文案；末尾这几个 Tailwind 类稳定表达“小按钮在卡片右上角”。
-      const hasDeleteButtonClass = (item) => {
-        const classes = item.className.split(/\\s+/);
-        return ['h-6', 'w-6', 'absolute', 'right-2', 'top-2']
-          .every((name) => classes.includes(name));
+      // 只认卡片附近带删除语义或 Trash 图标的真实按钮，避免坐标点击误触并重复发送删除请求。
+      const hasTrashIcon = (node) => {
+        const svgText = [...node.querySelectorAll('svg')]
+          .map((svg) => [svg.getAttribute('class') || '', svg.getAttribute('data-lucide') || '', svg.innerHTML || ''].join(' '))
+          .join(' ');
+        return /trash|M3\\s*6h18|M19\\s*6v14/i.test(svgText);
       };
-      const trash = buttons
+      const trash = controls
         .filter((item) => (
           item.index !== card.index
-          && !item.text
-          && item.rect.width >= 18
-          && item.rect.width <= 42
-          && item.rect.height >= 18
-          && item.rect.height <= 42
-          && item.rect.y >= card.rect.y - 8
-          && item.rect.y <= card.rect.y + card.rect.height - 8
-          && item.rect.x >= card.rect.x + card.rect.width - 110
+          && (/delete|remove/i.test([item.aria, item.title].join(' ')) || hasTrashIcon(item.node))
+          && item.rect.y >= card.rect.y - 20
+          && item.rect.y <= card.rect.y + card.rect.height + 20
+          && item.rect.x >= card.rect.x
           && item.rect.x <= card.rect.x + card.rect.width + 20
         ))
-        .sort((a, b) => Number(hasDeleteButtonClass(b)) - Number(hasDeleteButtonClass(a)) || a.rect.y - b.rect.y)[0];
+        .sort((a, b) => Math.abs(a.rect.y - card.rect.y) - Math.abs(b.rect.y - card.rect.y))[0];
 
       if (!trash) {
-        const points = [
-          {x: card.rect.x + card.rect.width - 32, y: card.rect.y + 18},
-          {x: card.rect.x + card.rect.width - 30, y: card.rect.y + card.rect.height / 2},
-          {x: card.rect.x + card.rect.width - 62, y: card.rect.y + 18},
-        ];
-        for (const point of points) {
-          const target = document.elementFromPoint(point.x, point.y);
-          if (!target) continue;
-          target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          return {
-            clicked: true,
-            done: false,
-            card: card.text,
-            trashRect: {x: point.x, y: point.y, width: 0, height: 0},
-            fallback: 'elementFromPoint',
-            target: target.tagName,
-          };
-        }
         return {
           clicked: false,
           done: false,
           card: {text: card.text, rect: card.rect},
-          buttons: buttons.map(({node, ...item}) => item).slice(-35),
+          buttons: controls.map(({node, ...item}) => item).slice(-35),
           tail: (document.body?.innerText || '').slice(-1800),
         };
       }
@@ -4235,27 +4206,26 @@ async function removeSavedPaymentMethodsFromPicker(page) {
       };
     })()`);
 
-    if (result.done) {
-      return {
-        attempted: true,
-        removedSavedPaymentMethods: removed,
-        hasSavePaymentForm: !!result.hasSave,
-      };
-    }
-    if (!result.clicked) {
-      throw new Error(`Saved payment-method delete button not found: ${JSON.stringify(result).slice(0, 2000)}`);
-    }
-    removed.push(result.card);
-    await sleep(800);
+  if (result.done) {
+    return {
+      attempted: true,
+      removedSavedPaymentMethods: [],
+      hasSavePaymentForm: !!result.hasSave,
+    };
+  }
+  if (!result.clicked) {
+    throw new Error(`Saved payment-method delete button not found: ${JSON.stringify(result).slice(0, 2000)}`);
+  }
+  await sleep(500);
 
-    const confirmed = await evaluate(page, `(() => {
-      const confirm = [...document.querySelectorAll('button,[role="button"]')]
-        .find((node) => /Remove|Delete|Confirm/i.test((node.innerText || node.textContent || '').trim()) && !node.disabled);
-      if (confirm) confirm.click();
-      return !!confirm;
-    })()`);
-    for (let wait = 0; wait < 10; wait += 1) {
-      const state = await evaluate(page, `(() => {
+  const confirmed = await evaluate(page, `(() => {
+    const confirm = [...document.querySelectorAll('button,[role="button"]')]
+      .find((node) => /^(Remove|Delete|Confirm)$/i.test((node.innerText || node.textContent || '').trim()) && !node.disabled);
+    if (confirm) confirm.click();
+    return !!confirm;
+  })()`);
+  for (let wait = 0; wait < 10; wait += 1) {
+    const state = await evaluate(page, `(() => {
         const text = document.body?.innerText || '';
         const removedCard = ${JSON.stringify(result.card)};
         return {
@@ -4264,16 +4234,17 @@ async function removeSavedPaymentMethodsFromPicker(page) {
           tail: text.slice(-1500),
         };
       })()`);
-      if (!state.cardStillVisible || state.hasSave) break;
-      await sleep(DEFAULT_DOM_POLL_MS);
-      if (wait === 9) {
-        throw new Error(`Saved payment-method removal did not take effect: ${state.tail}`);
-      }
+    if (!state.cardStillVisible || state.hasSave) {
+      return {
+        attempted: true,
+        removedSavedPaymentMethods: [result.card],
+        hasSavePaymentForm: !!state.hasSave,
+        confirmed,
+      };
     }
-    if (confirmed) await sleep(800);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-
-  throw new Error('Saved payment-method removal did not converge');
+  throw new Error('Saved payment-method removal did not take effect after 10000ms');
 }
 
 async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
@@ -4879,24 +4850,11 @@ async function replaceAutoTopupInputById(page, selector, value) {
   if (!target?.found) return {updated: false, reason: 'auto_topup_input_not_found', selector};
   if (!target.focused) return {updated: false, reason: 'auto_topup_input_not_focused', selector};
 
-  // type=number 不支持 select()/setSelectionRange；End + 足量 Backspace 是跨页面实现更稳定的真实清空方式。
-  await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35});
-  for (let index = 0; index < Math.max(8, String(target.before || '').length + 2); index += 1) {
-    await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-  }
-  for (const character of String(value)) {
-    const isDigit = /^\d$/.test(character);
-    const code = isDigit ? `Digit${character}` : (character === '.' ? 'Period' : '');
-    const windowsVirtualKeyCode = isDigit ? character.charCodeAt(0) : (character === '.' ? 190 : character.charCodeAt(0));
-    await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: character, code, windowsVirtualKeyCode});
-    await page.send('Input.dispatchKeyEvent', {type: 'char', key: character, code, text: character, unmodifiedText: character, windowsVirtualKeyCode});
-    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: character, code, windowsVirtualKeyCode});
-  }
+  // type=number 不支持 select()/setSelectionRange；End + 足量 Backspace 是跨平台更稳定的真实清空方式。
+  await clearFocusedFieldWithBackspaces(page, String(target.before || '').length);
+  await typeFocusedFieldWithKeyEvents(page, value);
   // blur/change 是 OpenRouter 表单把 DOM 值同步到提交状态的关键；仅回读 input.value 会产生假成功。
-  await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
+  await blurFocusedFieldWithTab(page);
   await sleep(400);
   return evaluate(page, `(() => {
     const input = document.querySelector(${JSON.stringify(selector)});
@@ -5696,21 +5654,8 @@ async function run() {
       }
     }
     const removal = input.removeExistingPaymentMethod
-      ? await clearDefaultPaymentMethod(page)
-      : {clearedDefault: false, existingPaymentMethodCount: null, existingPaymentMethods: []};
-    const shouldTryPickerRemoval = input.removeExistingPaymentMethod && (
-      removal.existingPaymentMethodCount > 0
-      || /stripe_(?:customer|data)_not_found/.test(removal.reason || '')
-    );
-    if (shouldTryPickerRemoval) {
-      removal.savedCardPickerRemoval = await removeSavedPaymentMethodsFromPicker(page);
-    } else if (input.removeExistingPaymentMethod) {
-      removal.savedCardPickerRemoval = {
-        attempted: false,
-        skipped: true,
-        reason: removal.reason || 'no_existing_payment_methods',
-      };
-    }
+      ? await runLoggedStep('remove-saved-payment-method', debugDir, () => removeSavedPaymentMethodsFromPicker(page), page)
+      : {attempted: false, skipped: true, reason: 'preserve_existing_payment_method'};
     let paymentPath;
     try {
       paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {

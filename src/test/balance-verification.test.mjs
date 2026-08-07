@@ -40,12 +40,20 @@ test('Stripe card entry verifies fields keep the inserted card values', () => {
   assert.match(source, /Stripe 必须同时保留值并清除字段级 incomplete\/invalid 状态/);
   assert.match(source, /鼠标点击会折叠之前的选区/);
   assert.match(source, /phase: 'clear_before_insert'/);
-  assert.match(source, /Input\.insertText/);
+  assert.doesNotMatch(source, /Input\.insertText/);
   assert.match(source, /dispatch_key_events/);
   assert.doesNotMatch(source, /native_value_setter/);
   assert.match(source, /Stripe payment field was not accepted/);
   assert.match(source, /expectedValue: card\.number/);
   assert.match(source, /expectedValue: card\.postalCode/);
+});
+
+test('all Stripe payment fields always use per-key CDP events', () => {
+  const source = readFileSync(new URL('../automation/bind_openrouter_card_cdp.mjs', import.meta.url), 'utf8');
+  assert.match(source, /async function focusAndTypeStripeField/);
+  assert.match(source, /typeFocusedFieldWithKeyEvents\(client, text\)/);
+  assert.match(source, /blurFocusedFieldWithTab\(client\)/);
+  assert.doesNotMatch(source, /focusAndInsertText/);
 });
 
 test('CDP navigation has retry and location fallback for slow AdsPower pages', () => {

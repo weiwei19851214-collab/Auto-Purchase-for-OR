@@ -288,6 +288,12 @@ TOTP seed、验证码、API key、AK 或其他认证凭据。卡号可按本项�
 
 - OpenRouter 充值页面会更新 DOM。选择器必须优先基于可见文本、模态标题、
   SVG/icon 语义、按钮位置和页面状态组合判断，避免只依赖单个 class。
+- 外部网页自动化中的所有文本、数字和 `contenteditable` 输入框都必须先聚焦、
+  用 CDP 真实键盘事件逐字符清空和输入（`keyDown` / `char` / `keyUp`），最后用
+  `Tab` 失焦触发页面提交状态同步。禁止把直接修改 `value`、原生 value setter、
+  合成 `input/change` 事件或整串 `Input.insertText` 作为正式填写方式；DOM value
+  回读只能作为辅助证据，必须结合失焦后的页面状态或服务端结果确认。原生
+  `select`、开关和按钮继续使用语义选择或点击，不强行模拟文本输入。
 - Purchase Credits 页面里“新增新卡”可能是只有加号 SVG 的按钮，没有文字。
   当前 DOM 特征包含 lucide plus 路径 `M12 4.5v15m7.5-7.5h-15`、按钮区域在
   支付卡片右侧。不要再因为找不到文字按钮误报 `Stripe payment iframe target not found`。

@@ -322,23 +322,25 @@ test('billing-address-only browser path refuses Add Credits fallback', () => {
   assert.match(script, /async function clickAddPaymentMethod/);
 });
 
-test('browser path falls back when OpenRouter server action id changes', () => {
+test('browser path removes a saved card through one semantic trash-button click', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /Server action not found/i);
-  assert.match(script, /openrouter_update_current_user_action_not_found/);
   assert.match(script, /removeSavedPaymentMethodsFromPicker/);
+  assert.match(script, /runLoggedStep\('remove-saved-payment-method'/);
+  assert.match(script, /hasTrashIcon/);
+  assert.doesNotMatch(script, /UPDATE_CURRENT_USER_ACTION/);
+  assert.doesNotMatch(script, /elementFromPoint/);
+  const removalStart = script.indexOf('async function removeSavedPaymentMethodsFromPicker');
+  const removalEnd = script.indexOf('async function openAddCreditsPaymentPath', removalStart);
+  assert.doesNotMatch(script.slice(removalStart, removalEnd), /for \(let i = 0; i < 8/);
 });
 
-test('browser path skips default payment clearing when Stripe data endpoint is not found', () => {
+test('browser path keeps Stripe inspection fallback independent from saved-card removal', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /before\.status === 404/);
-  assert.match(script, /stripe_data_not_found/);
-  assert.match(script, /shouldTryPickerRemoval/);
-  assert.ok(script.includes('stripe_(?:customer|data)_not_found'));
   assert.match(script, /stripeTargets=/);
   assert.match(script, /verifySavedPaymentMethodFromCreditsUi/);
   assert.match(script, /stripe_data_404_ui_fallback/);
   assert.match(script, /Credits UI fallback found no saved payment method/);
+  assert.doesNotMatch(script, /Next-Action/);
 });
 
 test('purchase-only browser path opens Add Credits amount modal before verifying the saved card', () => {
@@ -435,15 +437,21 @@ test('browser path recognizes updated Auto top-up buttons and scoped inputs', ()
 test('Auto top-up refresh and input fill do not use macOS Command shortcuts', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   const refreshBody = script.slice(script.indexOf('async function commandRefreshCreditsPage'), script.indexOf('async function detectNewAccountOverlay'));
+  const clearInputBody = script.slice(script.indexOf('async function clearFocusedFieldWithBackspaces'), script.indexOf('async function typeFocusedFieldWithKeyEvents'));
+  const typeInputBody = script.slice(script.indexOf('async function typeFocusedFieldWithKeyEvents'), script.indexOf('async function blurFocusedFieldWithTab'));
+  const blurInputBody = script.slice(script.indexOf('async function blurFocusedFieldWithTab'), script.indexOf('async function focusStripeFieldWithCdp'));
   const fillInputBody = script.slice(script.indexOf('async function replaceAutoTopupInputById'), script.indexOf('async function fillAutoTopupForm'));
   assert.match(refreshBody, /Page\.reload/);
   assert.match(refreshBody, /method: 'page_reload'/);
   assert.doesNotMatch(refreshBody, /MetaLeft|KeyR|command_r/);
   assert.match(fillInputBody, /input\.focus\(\{preventScroll:true\}\)/);
-  assert.match(fillInputBody, /key: 'End'/);
-  assert.match(fillInputBody, /type: 'char'/);
-  assert.match(fillInputBody, /Backspace/);
-  assert.match(fillInputBody, /key: 'Tab'/);
+  assert.match(clearInputBody, /key: 'End'/);
+  assert.match(typeInputBody, /type: 'char'/);
+  assert.match(clearInputBody, /Backspace/);
+  assert.match(fillInputBody, /clearFocusedFieldWithBackspaces/);
+  assert.match(blurInputBody, /key: 'Tab'/);
+  assert.match(fillInputBody, /typeFocusedFieldWithKeyEvents/);
+  assert.match(fillInputBody, /blurFocusedFieldWithTab/);
   assert.match(fillInputBody, /const blurred = document\.activeElement !== input/);
   assert.match(fillInputBody, /auto_topup_input_not_focused/);
   assert.doesNotMatch(fillInputBody, /MetaLeft|KeyA/);
@@ -594,6 +602,7 @@ test('browser path verifies Stripe card fields before saving payment method', ()
   assert.match(script, /ensureStripeCardReadyForSubmit/);
   assert.match(script, /Stripe payment fields are not ready before Save payment method/);
   assert.match(script, /typeFocusedFieldWithKeyEvents/);
+  assert.match(script, /focusAndTypeStripeField/);
   assert.match(script, /Input\.dispatchKeyEvent/);
   assert.match(script, /focusStripeFieldWithCdp/);
   assert.match(script, /client\.send\('DOM\.focus', \{objectId\}\)/);
@@ -612,6 +621,18 @@ test('browser path verifies Stripe card fields before saving payment method', ()
   assert.match(script, /verify-stripe-card-before-save-retry/);
   assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save'") < script.indexOf("runLoggedStep('click-save-payment-method'"));
   assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save-retry'") < script.indexOf("runLoggedStep('click-save-payment-method-retry'"));
+});
+
+test('Purchase Credits amount uses real per-key input events', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.indexOf('async function setPurchaseAmountInput');
+  const end = script.indexOf('async function ensureOneTimePaymentMethodsOff', start);
+  const body = script.slice(start, end);
+  assert.match(body, /data-or-purchase-amount-target/);
+  assert.match(body, /clearFocusedFieldWithBackspaces\(page/);
+  assert.match(body, /typeFocusedFieldWithKeyEvents\(page, value\)/);
+  assert.match(body, /blurFocusedFieldWithTab\(page\)/);
+  assert.doesNotMatch(body, /nativeValue|InputEvent|\.value\s*=/);
 });
 
 test('dryRunPayload reports row-level missing fields', async () => {

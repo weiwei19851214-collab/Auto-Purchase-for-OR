@@ -554,6 +554,7 @@ test('payment method surfaces use bounded waits within the three-minute row budg
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000/);
   assert.match(script, /const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000/);
+  assert.match(script, /const PAYMENT_TARGET_WAIT_MS = 30000/);
   assert.match(script, /Purchase modal is not ready after \$\{timeoutMs\}ms/);
 });
 

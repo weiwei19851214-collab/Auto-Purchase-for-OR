@@ -23,8 +23,8 @@ const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 30000;
 const DEFAULT_CREDITS_ENTRY_WAIT_MS = 30000;
 const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000;
 const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000;
-// 新增银行卡页面已出现后，给 Stripe iframe 最多 20 秒完成挂载。
-const PAYMENT_TARGET_WAIT_MS = 20000;
+// 新增银行卡页面已出现后，给 Stripe iframe 最多 30 秒完成挂载，兼容并发启动时的延迟。
+const PAYMENT_TARGET_WAIT_MS = 30000;
 // Credits 页新版金额卡片可能晚于操作按钮渲染，余额读取等待该金额进入 DOM。
 const CREDIT_BALANCE_READ_WAIT_MS = 20000;
 // 保存银行卡通常数秒完成；超过该时长仍显示 Saving 时停止本行，避免占满单行 3 分钟时限。

@@ -13,6 +13,7 @@ import {isRechargeBalanceIncreaseVerified} from './lib/balance-verification.mjs'
 import {writeCardBinding} from '../server/opom-client.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
+const OPENROUTER_PRIVACY_URL = 'https://openrouter.ai/settings/privacy';
 const OPENROUTER_GUARDRAILS_URL = 'https://openrouter.ai/workspaces/default/guardrails';
 const OPENROUTER_GUARDRAILS_MODELS_URL = 'https://openrouter.ai/workspaces/default/guardrails/default/models';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
@@ -652,7 +653,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'data-training-only') {
       args[key] = true;
       continue;
     }
@@ -787,6 +788,12 @@ function normalizeInput(args) {
   const zdrOnlyInput = args['zdr-only'] !== undefined
     ? args['zdr-only']
     : (json.zdrOnly ?? json.disableZdrOnly ?? json.disable_zdr_only ?? process.env.ZDR_ONLY);
+  const enableDataTrainingInput = args['enable-data-training'] !== undefined
+    ? args['enable-data-training']
+    : (json.enableDataTraining ?? json.enable_data_training ?? process.env.ENABLE_DATA_TRAINING);
+  const dataTrainingOnlyInput = args['data-training-only'] !== undefined
+    ? args['data-training-only']
+    : (json.dataTrainingOnly ?? json.data_training_only ?? process.env.DATA_TRAINING_ONLY);
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -816,6 +823,8 @@ function normalizeInput(args) {
     disableZdr: normalizeBooleanInput(disableZdrInput),
     enableZdr: normalizeBooleanInput(enableZdrInput),
     zdrOnly: normalizeBooleanInput(zdrOnlyInput),
+    enableDataTraining: normalizeBooleanInput(enableDataTrainingInput),
+    dataTrainingOnly: normalizeBooleanInput(dataTrainingOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
     purchase: {
@@ -873,14 +882,20 @@ function normalizeInput(args) {
   if (input.zdrOnly && !input.disableZdr && !input.enableZdr) {
     throw new Error('zdrOnly requires disableZdr or enableZdr');
   }
-  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly].filter(Boolean).length > 1) {
-    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, and zdrOnly cannot be combined');
+  if (input.dataTrainingOnly && !input.enableDataTraining) {
+    throw new Error('dataTrainingOnly requires enableDataTraining');
   }
-  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly) && input.purchase.confirmed) {
-    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, or zdrOnly');
+  if (input.enableDataTraining && !input.dataTrainingOnly) {
+    throw new Error('enableDataTraining must run in dataTrainingOnly mode');
   }
-  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly)) {
-    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, or zdrOnly');
+  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly, input.dataTrainingOnly].filter(Boolean).length > 1) {
+    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, and dataTrainingOnly cannot be combined');
+  }
+  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly) && input.purchase.confirmed) {
+    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, or dataTrainingOnly');
+  }
+  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly)) {
+    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, or dataTrainingOnly');
   }
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
@@ -892,7 +907,7 @@ function normalizeInput(args) {
     throw new Error('purchase.amount/--purchase-amount or a complete purchase.rule is required when purchase is confirmed or prepared');
   }
   if (input.purchase.confirmed || input.preparePurchaseOnly) input.openPurchaseForVerification = true;
-  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly;
+  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly;
   if (needsCard && (!input.card.number || !input.card.expiry || !input.card.cvc)) {
     throw new Error('card.number, card.expiry, and card.cvc are required');
   }
@@ -1883,6 +1898,198 @@ async function configureOpenRouterZdr(page, targetEnabled = false) {
     reopened,
     toggledCount: toggled.before.enabled.length,
     toggledClicks: toggled.clicks,
+  };
+}
+
+function initialDataTrainingResult(requested) {
+  return {
+    requested: !!requested,
+    configured: null,
+    changed: false,
+    status: requested ? 'pending' : 'skipped',
+    skipped: !requested,
+    reason: requested ? 'pending' : 'not_requested',
+  };
+}
+
+function dataTrainingDomExpression(action = 'read') {
+  return `(() => {
+    const action = ${JSON.stringify(action)};
+    const targetText = 'Allow paid endpoints that train on request data';
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    const checkedState = (node) => {
+      const aria = node.getAttribute?.('aria-checked');
+      if (/^(true|false)$/i.test(aria || '')) return aria === 'true';
+      const dataState = node.getAttribute?.('data-state') || '';
+      if (/^(checked|on|true)$/i.test(dataState)) return true;
+      if (/^(unchecked|off|false)$/i.test(dataState)) return false;
+      const input = node.matches?.('input') ? node : node.querySelector?.('input[type="checkbox"],input[role="switch"]');
+      return input && typeof input.checked === 'boolean' ? input.checked : null;
+    };
+    const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true' || node.getAttribute?.('data-disabled') === 'true';
+    const activate = (node) => {
+      node.scrollIntoView?.({block:'center', inline:'center'});
+      node.focus?.({preventScroll:true});
+      if (typeof node.click === 'function') node.click();
+      else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    };
+    const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')]
+      .filter((node) => visible(node) && /^Data\\s+Training$/i.test(textOf(node)));
+    const labels = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text:textOf(node), rect:node.getBoundingClientRect()}))
+      .filter((item) => item.text.startsWith(targetText) && item.text.length <= 320)
+      .filter((item) => headings.some((heading) => heading.compareDocumentPosition(item.node) & Node.DOCUMENT_POSITION_FOLLOWING))
+      .sort((left, right) => left.text.length - right.text.length || (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height));
+    const label = labels[0]?.node;
+    if (!label) {
+      return {found:false, reason:'paid_data_training_label_not_found', href:location.href, tail:textOf(document.body).slice(-1600)};
+    }
+    const switchSelector = '[role="switch"],button[aria-checked],input[type="checkbox"][role="switch"],input[type="checkbox"][aria-checked]';
+    let row = null;
+    let switches = [];
+    for (let current = label, depth = 0; current && depth < 9; current = current.parentElement, depth += 1) {
+      const candidates = [...current.querySelectorAll(switchSelector)].filter((node) => visible(node));
+      if (candidates.length) {
+        row = current;
+        switches = candidates;
+        break;
+      }
+    }
+    if (!row || !switches.length) {
+      return {found:false, reason:'paid_data_training_switch_not_found', href:location.href, tail:textOf(document.body).slice(-1600)};
+    }
+    const labelRect = label.getBoundingClientRect();
+    const target = switches
+      .map((node) => ({node, rect:node.getBoundingClientRect()}))
+      .sort((left, right) => Math.abs((left.rect.top + left.rect.height / 2) - (labelRect.top + labelRect.height / 2))
+        - Math.abs((right.rect.top + right.rect.height / 2) - (labelRect.top + labelRect.height / 2)))[0]?.node;
+    const checked = checkedState(target);
+    const isDisabled = disabled(target);
+    let clicked = false;
+    if (action === 'enable' && checked === false && !isDisabled) {
+      activate(target);
+      clicked = true;
+    }
+    return {
+      found:true,
+      href:location.href,
+      headingCount:headings.length,
+      label:textOf(label).slice(0, 320),
+      rowText:textOf(row).slice(0, 600),
+      checked,
+      disabled:isDisabled,
+      clicked,
+    };
+  })()`;
+}
+
+async function readDataTrainingSwitchState(page) {
+  const state = await evaluate(page, dataTrainingDomExpression('read'), 15000);
+  if (!state.found) throw new Error(`Data Training paid endpoint switch not found: ${state.reason}; tail=${state.tail || ''}`);
+  if (state.checked == null) throw new Error('Data Training paid endpoint switch state cannot be established');
+  if (state.checked === false && state.disabled) throw new Error('Data Training paid endpoint switch is disabled');
+  return state;
+}
+
+async function waitForDataTrainingPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await readDataTrainingSwitchState(page);
+    } catch (error) {
+      lastError = error;
+      await sleep(DEFAULT_DOM_POLL_MS);
+    }
+  }
+  throw lastError || new Error('Data Training panel did not load');
+}
+
+async function waitForDataTrainingSwitch(page, expectedEnabled = true, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readDataTrainingSwitchState(page);
+    if (lastState.checked === expectedEnabled) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Data Training paid endpoint switch did not become ${expectedEnabled ? 'enabled' : 'disabled'}; state=${JSON.stringify(lastState || {})}`);
+}
+
+async function enableCurrentDataTrainingSwitch(page) {
+  const before = await waitForDataTrainingPanel(page);
+  if (before.checked) return {changed:false, before, afterClick:before};
+  const clicked = await evaluate(page, dataTrainingDomExpression('enable'), 15000);
+  if (!clicked?.clicked) throw new Error(`Data Training paid endpoint switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+  const afterClick = await waitForDataTrainingSwitch(page, true);
+  return {changed:true, before, afterClick, clicked};
+}
+
+async function openDataTrainingGuardrailsPanel(page) {
+  await navigatePage(page, OPENROUTER_GUARDRAILS_MODELS_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const directState = await waitForDataTrainingPanel(page, 5000).catch(() => null);
+  if (directState) return {directUrl:OPENROUTER_GUARDRAILS_MODELS_URL, alreadyOpen:true, state:directState};
+
+  await navigatePage(page, OPENROUTER_GUARDRAILS_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const workspace = await openDefaultWorkspaceGuardrail(page);
+  await sleep(1000);
+  const tab = await clickGuardrailsVisibleControl(page, '\\bModel\\s*&\\s*Provider\\s+Access\\b', 'Model & Provider Access');
+  await sleep(PAGE_SETTLE_MS);
+  const state = await waitForDataTrainingPanel(page);
+  return {workspace, tab, state};
+}
+
+async function configurePrivacyDataTraining(page) {
+  await navigatePage(page, OPENROUTER_PRIVACY_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const toggled = await enableCurrentDataTrainingSwitch(page);
+  if (!toggled.changed) return {configured:true, changed:false, status:'already_enabled', state:toggled.before};
+
+  const save = await clickGuardrailsSave(page);
+  await sleep(PAGE_SETTLE_MS);
+  await navigatePage(page, OPENROUTER_PRIVACY_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const verified = await waitForDataTrainingSwitch(page, true);
+  return {configured:true, changed:true, status:'enabled', save, verified, toggled};
+}
+
+async function configureGuardrailDataTraining(page) {
+  const opened = await openDataTrainingGuardrailsPanel(page);
+  const toggled = await enableCurrentDataTrainingSwitch(page);
+  if (!toggled.changed) return {configured:true, changed:false, status:'already_enabled', opened, state:toggled.before};
+
+  const save = await clickGuardrailsSave(page);
+  const confirmation = await clickGuardrailsConfirmationIfPresent(page);
+  await sleep(PAGE_SETTLE_MS);
+  const reopened = await openDataTrainingGuardrailsPanel(page);
+  const verified = reopened.state || await waitForDataTrainingSwitch(page, true);
+  if (!verified.checked) throw new Error('Guardrail Data Training verification failed; paid endpoint switch is still disabled');
+  return {configured:true, changed:true, status:'enabled', opened, save, confirmation, reopened, verified, toggled};
+}
+
+async function configureOpenRouterDataTraining(page) {
+  // 账号级和默认 Guardrail 都开启后才算完成，避免只改一层导致实际路由仍被限制。
+  const privacy = await configurePrivacyDataTraining(page);
+  const guardrail = await configureGuardrailDataTraining(page);
+  const changed = privacy.changed || guardrail.changed;
+  return {
+    requested:true,
+    configured:true,
+    changed,
+    status:changed ? 'enabled' : 'already_enabled',
+    privacy,
+    guardrail,
   };
 }
 
@@ -5438,11 +5645,13 @@ async function run() {
       autoTopupEnabled: rawInput.autoTopup?.enabled,
       disableZdr: rawInput.disableZdr,
       enableZdr: rawInput.enableZdr,
+      dataTrainingOnly: rawInput.dataTrainingOnly,
+      enableDataTraining: rawInput.enableDataTraining,
     },
   });
   const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
   input.debugPort ||= debugPortFromWs(input.browserWs);
-  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly;
+  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly;
   const {last4, masked} = bindsCard ? maskCard(input.card.number) : {last4: '', masked: ''};
   const expectedExpiry = bindsCard ? displayExpiry(input.card.expiry) : '';
   if (bindsCard && !last4) throw new Error('Could not determine card last4');
@@ -5459,6 +5668,7 @@ async function run() {
   let recoveryPaymentMethodAction = 'uploaded_card_added';
   let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
   let zdrResult = initialZdrResult(input.disableZdr || input.enableZdr, input.enableZdr);
+  let dataTrainingResult = initialDataTrainingResult(input.enableDataTraining);
 
   try {
     await page.send('Runtime.enable');
@@ -5468,7 +5678,7 @@ async function run() {
     writeDiagnostic(debugDir, 'dialog-auto-accept', {kind: 'dialog_auto_accept', dialogAutoAccept});
 	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
 	    let accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
-      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly,
+      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly && !input.dataTrainingOnly,
     }), page);
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
@@ -5477,6 +5687,32 @@ async function run() {
 	      throw new Error(`OpenRouter account mismatch: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
     }
     accountForRecovery = accountState.account;
+
+    if (input.enableDataTraining) {
+      dataTrainingResult = await runLoggedStep('enable-openrouter-data-training', debugDir, () => configureOpenRouterDataTraining(page), page);
+      if (input.dataTrainingOnly) {
+        return {
+          ok: true,
+          status: dataTrainingResult.changed ? 'data_training_enabled' : 'data_training_unchanged',
+          account: accountState.account,
+          launch: input.launch,
+          zdr: zdrResult,
+          dataTraining: dataTrainingResult,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      await runLoggedStep('navigate-credits-page-after-data-training', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+      accountState = await runLoggedStep('wait-account-state-after-data-training', debugDir, () => waitForAccountState(page, {
+        requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+      }), page);
+      if (accountState.signin || !accountState.account) {
+        throw new Error(`login_required: OpenRouter credits page is not logged in after Data Training configuration; tail=${accountState.tail || ''}`);
+      }
+      if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
+        throw new Error(`OpenRouter account mismatch after Data Training configuration: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
+      }
+      accountForRecovery = accountState.account;
+    }
 
     if (input.disableZdr || input.enableZdr) {
       const zdrStepName = input.enableZdr ? 'enable-openrouter-zdr' : 'disable-openrouter-zdr';

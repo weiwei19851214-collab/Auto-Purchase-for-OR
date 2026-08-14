@@ -79,6 +79,7 @@ export function runnerArgs(options = {}) {
     scopeAutoTopup: options.scopeAutoTopup !== false,
     disableZdr: !!options.disableZdr,
     enableZdr: !!options.enableZdr,
+    enableDataTraining: !!options.enableDataTraining,
     autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
@@ -235,6 +236,7 @@ export function publicJob(row) {
       executionScope: plan.scopeSummary(args),
       disableZdr: args.disableZdr,
       enableZdr: args.enableZdr,
+      enableDataTraining: args.enableDataTraining,
       scopeBillingAddress: args.scopeBillingAddress,
       scopePaymentMethod: args.scopePaymentMethod,
       scopePurchase: args.scopePurchase,
@@ -302,6 +304,8 @@ export function publicRow(row) {
     balanceAfter: row.balance_after,
     zdrStatus: row.zdr_status || '',
     zdrChanged: row.zdr_changed || '',
+    dataTrainingStatus: row.data_training_status || '',
+    dataTrainingChanged: row.data_training_changed || '',
     autoTopupStatus: row.auto_topup_status,
     autoTopupThreshold: row.auto_topup_threshold,
     autoTopupAmount: row.auto_topup_amount,
@@ -485,7 +489,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const inactiveCardStatus = plan.inactiveOpomCardStatus(row);
   const scope = plan.executionScope(args);
   const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
-  if (inactiveCardStatus && !zdrOnly) {
+  const dataTrainingOnly = scope.dataTraining && !scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  if (inactiveCardStatus && !zdrOnly && !dataTrainingOnly) {
     const message = `OPOM card status ${inactiveCardStatus} is not ACTIVE; skipped recharge`;
     const details = {
       ...plan.rowMetadata(row, {automationLogDir}),
@@ -559,7 +564,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const zdrOk = !zdrRequested || (args.enableZdr
       ? /^(enabled|already_enabled)$/.test(details.zdrStatus)
       : /^(disabled|already_disabled)$/.test(details.zdrStatus));
-    let completed = purchaseOk && autoTopupOk && zdrOk;
+    const dataTrainingOk = !args.enableDataTraining || /^(enabled|already_enabled)$/.test(details.dataTrainingStatus);
+    let completed = purchaseOk && autoTopupOk && zdrOk && dataTrainingOk;
     const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
     if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
       try {
@@ -725,6 +731,10 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
       ? (result.zdr?.status || (result.zdr?.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured'))
       : 'skipped',
     zdrChanged: (args.disableZdr || args.enableZdr) ? String(Boolean(result.zdr?.changed)) : 'false',
+    dataTrainingStatus: args.enableDataTraining
+      ? (result.dataTraining?.status || (result.dataTraining?.configured ? 'enabled' : 'not_configured'))
+      : 'skipped',
+    dataTrainingChanged: args.enableDataTraining ? String(Boolean(result.dataTraining?.changed)) : 'false',
     autoTopupStatus: !args.scopeAutoTopup
       ? 'skipped'
       : result.autoTopup?.configured

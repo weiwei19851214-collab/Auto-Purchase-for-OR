@@ -109,6 +109,11 @@
               <input id="enableZdrOnly" type="checkbox" role="switch" />
               <span class="switch-track" aria-hidden="true"></span>
             </label>
+            <label class="switch-row zdr-only-row">
+              <span><strong>仅开启 Data Training，不执行其他操作</strong></span>
+              <input id="dataTrainingOnly" type="checkbox" role="switch" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
           </article>
 
           <article class="control-card auto-card">
@@ -253,6 +258,7 @@
           <div><span>子任务</span><strong id="confirmRows">0</strong></div>
           <div><span>充值规则</span><strong id="confirmRule">145/150/20</strong></div>
           <div><span>ZDR</span><strong id="confirmZdr">保持现状</strong></div>
+          <div><span>Data Training</span><strong id="confirmDataTraining">保持现状</strong></div>
           <div><span>安全检查</span><strong id="confirmReadiness">—</strong></div>
         </div>
         <p class="confirmation-warning">将创建正常执行任务。任务创建后即使关闭页面，后台 Worker 仍会继续处理。</p>

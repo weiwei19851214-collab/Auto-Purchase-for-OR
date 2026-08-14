@@ -117,12 +117,18 @@ export class AutoRechargeScheduler {
       && configuredOptions.scopePaymentMethod === false
       && configuredOptions.scopePurchase === false
       && configuredOptions.scopeAutoTopup === false;
+    const dataTrainingOnly = !!configuredOptions.enableDataTraining
+      && configuredOptions.scopeBillingAddress === false
+      && configuredOptions.scopePaymentMethod === false
+      && configuredOptions.scopePurchase === false
+      && configuredOptions.scopeAutoTopup === false;
+    const configurationOnly = zdrOnly || dataTrainingOnly;
     const options = {
       ...configuredOptions,
-      opomWriteback: zdrOnly ? false : true,
-      confirmPurchase: zdrOnly ? false : true,
+      opomWriteback: configurationOnly ? false : true,
+      confirmPurchase: configurationOnly ? false : true,
       preparePurchaseOnly: false,
-      scopePurchase: zdrOnly ? false : true,
+      scopePurchase: configurationOnly ? false : true,
     };
     const readyPayload = await readyToRechargePayload({
       ...options,
@@ -316,6 +322,7 @@ function publicState(state) {
       opomWriteback: args.opomWriteback,
       disableZdr: args.disableZdr,
       enableZdr: args.enableZdr,
+      enableDataTraining: args.enableDataTraining,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       hasAdspowerApiKey: !!args.adspowerApiKey,
       concurrency: args.concurrency,

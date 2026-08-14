@@ -113,6 +113,8 @@ export function resultColumns() {
     'payment_method_action',
     'zdr_status',
     'zdr_changed',
+    'data_training_status',
+    'data_training_changed',
     'auto_topup_status',
     'auto_topup_threshold',
     'auto_topup_amount',
@@ -231,6 +233,7 @@ export function safeAutoTopupPlan(row, args) {
 export function executionScope(args = {}) {
   return {
     zdr: !!args.disableZdr || !!args.enableZdr,
+    dataTraining: !!args.enableDataTraining,
     billingAddress: args.scopeBillingAddress !== false,
     paymentMethod: args.scopePaymentMethod !== false,
     purchase: args.scopePurchase !== false,
@@ -242,7 +245,10 @@ export function validateScope(args = {}) {
   const scope = executionScope(args);
   const missing = [];
   if (args.disableZdr && args.enableZdr) missing.push('execution_scope:zdr_action_conflict');
-  if (!scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
+  if (scope.dataTraining && (scope.zdr || scope.billingAddress || scope.paymentMethod || scope.purchase || scope.autoTopup)) {
+    missing.push('execution_scope:data_training_must_run_alone');
+  }
+  if (!scope.zdr && !scope.dataTraining && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
     missing.push('execution_scope');
   }
   if (scope.billingAddress && !scope.paymentMethod && (scope.purchase || scope.autoTopup)) {
@@ -255,6 +261,7 @@ export function scopeSummary(args = {}) {
   const scope = executionScope(args);
   const labels = [];
   if (scope.zdr) labels.push('zdr');
+  if (scope.dataTraining) labels.push('data_training');
   if (scope.billingAddress) labels.push('billing_address');
   if (scope.paymentMethod) labels.push('payment_method');
   if (scope.purchase) labels.push(args.confirmPurchase === false ? 'purchase_prepare' : 'purchase');
@@ -301,6 +308,7 @@ export function buildClosedLoopTask(row, args) {
   const autoTopupOnly = scope.autoTopup && !scope.paymentMethod && !scope.purchase && !scope.billingAddress;
   const purchaseOnly = scope.purchase && !scope.paymentMethod;
   const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  const dataTrainingOnly = scope.dataTraining && !scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
   const purchase = scope.purchase ? purchasePlan(row).purchase : {confirmed: false};
   return {
     profileNo: adsPowerSerialNumber(row) || undefined,
@@ -309,6 +317,8 @@ export function buildClosedLoopTask(row, args) {
     disableZdr: !!args.disableZdr,
     enableZdr: !!args.enableZdr,
     zdrOnly,
+    enableDataTraining: !!args.enableDataTraining,
+    dataTrainingOnly,
     removeExistingPaymentMethod: scope.paymentMethod && args.removeExisting,
     preserveExistingPaymentMethod: scope.paymentMethod && args.preserveExistingPaymentMethod,
     existingBillingAddress: !scope.billingAddress || !billingComplete,
@@ -500,6 +510,7 @@ export function successDetails(row, result, args) {
   const verification = purchase.balanceVerification || {};
   const autoTopup = result.autoTopup || {};
   const zdr = result.zdr || {};
+  const dataTraining = result.dataTraining || {};
   const scope = executionScope(args);
   const requestedAutoTopup = scope.autoTopup ? (autoTopup.requested || autoTopupPlan(row, args)) : {threshold: '', amount: ''};
   return {
@@ -518,6 +529,10 @@ export function successDetails(row, result, args) {
     paymentMethodAction: result.paymentMethodAction || '',
     zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured')) : 'skipped',
     zdrChanged: scope.zdr ? String(Boolean(zdr.changed)) : 'false',
+    dataTrainingStatus: scope.dataTraining
+      ? (dataTraining.status || (dataTraining.configured ? 'enabled' : 'not_configured'))
+      : 'skipped',
+    dataTrainingChanged: scope.dataTraining ? String(Boolean(dataTraining.changed)) : 'false',
     autoTopupStatus: scope.autoTopup
       ? (autoTopup.configured ? (autoTopup.changed ? 'updated' : 'unchanged') : 'not_configured')
       : 'skipped',
@@ -541,6 +556,8 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'payment_method_action', details.paymentMethodAction || '');
   setCell(header, row, 'zdr_status', details.zdrStatus || '');
   setCell(header, row, 'zdr_changed', details.zdrChanged || '');
+  setCell(header, row, 'data_training_status', details.dataTrainingStatus || '');
+  setCell(header, row, 'data_training_changed', details.dataTrainingChanged || '');
   setCell(header, row, 'auto_topup_status', details.autoTopupStatus || '');
   setCell(header, row, 'auto_topup_threshold', details.autoTopupThreshold || '');
   setCell(header, row, 'auto_topup_amount', details.autoTopupAmount || '');

@@ -285,13 +285,14 @@ export async function resolveRechargeAccounts(args, input = {}) {
   };
 }
 
-export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
+export function canonicalRowsFromOpomAccounts(accounts, defaults = {}, {ignoreCardBinding = false} = {}) {
   const useLocalRechargeRules = hasLocalRechargeRuleDefaults(defaults);
   return accounts.map((account) => {
     const policy = account.rechargePolicy || {};
     const ads = account.adsPower || {};
     const health = account.health || {};
-    const activeCard = account.activeCard || account.card || account.bankCard || {};
+    // 支付卡 CSV 代表本次明确换卡，此时 OPOM 旧绑卡不参与状态校验，也不能覆盖新卡分配。
+    const activeCard = ignoreCardBinding ? {} : (account.activeCard || account.card || account.bankCard || {});
     return {
       status: '',
       opom_account_id: account.opomAccountId || account.id || '',
@@ -302,11 +303,13 @@ export function canonicalRowsFromOpomAccounts(accounts, defaults = {}) {
       opom_account_status: account.status || account.accountStatus || '',
       opom_health_status: health.status || (health.eligible === false ? 'unknown_blocked' : 'ok'),
       opom_health_reason: health.reason || '',
-      opom_card_status: activeCard.status || account.cardStatus || account.bankCardStatus || account.bank_card_status || '',
+      opom_card_status: ignoreCardBinding
+        ? ''
+        : (activeCard.status || account.cardStatus || account.bankCardStatus || account.bank_card_status || ''),
       ads_match_status: 'not_verified',
       // OPOM 查询账号可能直接返回当前绑定卡；后续结果回调要用 orderNo + 完整卡号匹配禁卡。
-      order_no: activeCard.orderNo || activeCard.order_no || account.orderNo || account.order_no || '',
-      card_no: activeCard.cardNo || activeCard.card_no || account.cardNo || account.card_no || '',
+      order_no: ignoreCardBinding ? '' : (activeCard.orderNo || activeCard.order_no || account.orderNo || account.order_no || ''),
+      card_no: ignoreCardBinding ? '' : (activeCard.cardNo || activeCard.card_no || account.cardNo || account.card_no || ''),
       exp_month: '',
       exp_year: '',
       cvv: '',

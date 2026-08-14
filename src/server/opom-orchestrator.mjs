@@ -117,7 +117,9 @@ export async function readyToRechargePayload(payload = {}) {
     ...addressMappingsFromCsv(payload.addressCsvText || ''),
   ];
   const rows = applyAddressMappings(
-    opom.canonicalRowsFromOpomAccounts(accounts, payload.defaults || {}),
+    opom.canonicalRowsFromOpomAccounts(accounts, payload.defaults || {}, {
+      ignoreCardBinding: payload.ignoreCardBinding === true,
+    }),
     addressMappings,
   );
   return {
@@ -225,7 +227,7 @@ async function loadBestResolveIndex(args, rows, {group, status, maxPages}) {
   return best;
 }
 
-function mergeResolvedOpomRow(row, canonical) {
+function mergeResolvedOpomRow(row, canonical, {ignoreCardBinding = false} = {}) {
   return {
     ...row,
     opom_account_id: canonical.opom_account_id || row.opom_account_id || '',
@@ -236,10 +238,10 @@ function mergeResolvedOpomRow(row, canonical) {
     opom_account_status: canonical.opom_account_status || row.opom_account_status || '',
     opom_health_status: canonical.opom_health_status || 'ok',
     opom_health_reason: canonical.opom_health_reason || '',
-    opom_card_status: canonical.opom_card_status || row.opom_card_status || '',
-    // 上传/分配卡 CSV 的卡号优先级更高；只有本地行没有卡时，才采用 OPOM resolve 返回的当前绑卡。
-    order_no: row.order_no || canonical.order_no || '',
-    card_no: row.card_no || canonical.card_no || '',
+    opom_card_status: ignoreCardBinding ? '' : (canonical.opom_card_status || row.opom_card_status || ''),
+    // 换卡任务必须清掉此前已合并的旧绑卡；普通任务仍优先保留本地上传/分配的卡号。
+    order_no: ignoreCardBinding ? '' : (row.order_no || canonical.order_no || ''),
+    card_no: ignoreCardBinding ? '' : (row.card_no || canonical.card_no || ''),
     idempotency_key: canonical.idempotency_key || row.idempotency_key || '',
   };
 }
@@ -267,14 +269,14 @@ function normalizeResolveStatus(status) {
   return value ? `opom_${value}` : 'opom_not_found';
 }
 
-function mergeBatchResolvedRow(row, result = {}) {
+function mergeBatchResolvedRow(row, result = {}, {ignoreCardBinding = false} = {}) {
   if (String(result.status || '').toLowerCase() === 'matched' && result.account) {
-    // OPOM 批量 resolve 把当前绑定卡放在结果顶层 cardBinding；合并后才能沿用统一的卡状态和全卡号映射。
-    const account = result.cardBinding
+    // 上传支付卡时当前任务要换卡，只合并账号身份；未上传时继续读取 OPOM 当前绑卡并执行状态门禁。
+    const account = !ignoreCardBinding && result.cardBinding
       ? {...result.account, activeCard: result.cardBinding}
       : result.account;
-    const canonical = opom.canonicalRowsFromOpomAccounts([account], {})[0] || {};
-    return mergeResolvedOpomRow(row, canonical);
+    const canonical = opom.canonicalRowsFromOpomAccounts([account], {}, {ignoreCardBinding})[0] || {};
+    return mergeResolvedOpomRow(row, canonical, {ignoreCardBinding});
   }
   const status = normalizeResolveStatus(result.status);
   return {
@@ -284,7 +286,13 @@ function mergeBatchResolvedRow(row, result = {}) {
   };
 }
 
-async function resolveOpomAccountsBatch(args, rows, {group, status, includeAllStatus = false, fallbackAll = false} = {}) {
+async function resolveOpomAccountsBatch(args, rows, {
+  group,
+  status,
+  includeAllStatus = false,
+  fallbackAll = false,
+  ignoreCardBinding = false,
+} = {}) {
   const body = await opom.resolveRechargeAccounts(args, {
     rows,
     group,
@@ -306,11 +314,11 @@ async function resolveOpomAccountsBatch(args, rows, {group, status, includeAllSt
       return mergeBatchResolvedRow(row, {
         status: 'not_found',
         reason: 'OPOM batch resolve returned no result for this row',
-      });
+      }, {ignoreCardBinding});
     }
     if (String(result.status || '').toLowerCase() === 'matched' && result.account) matched += 1;
     else failed += 1;
-    return mergeBatchResolvedRow(row, result);
+    return mergeBatchResolvedRow(row, result, {ignoreCardBinding});
   });
   return {
     ok: true,
@@ -334,7 +342,9 @@ async function resolveOpomAccountsLegacy(args, rows, payload = {}) {
   const accounts = best.accounts;
   const index = best.index;
   const resolveSource = best.resolveSource;
-  const canonicalById = new Map(opom.canonicalRowsFromOpomAccounts(accounts, {}).map((row) => [String(row.opom_account_id), row]));
+  const canonicalById = new Map(opom.canonicalRowsFromOpomAccounts(accounts, {}, {
+    ignoreCardBinding: payload.ignoreCardBinding === true,
+  }).map((row) => [String(row.opom_account_id), row]));
   let matched = 0;
   let failed = 0;
   const resolvedRows = rows.map((row) => {
@@ -342,7 +352,9 @@ async function resolveOpomAccountsLegacy(args, rows, payload = {}) {
     if (candidates.length === 1) {
       matched += 1;
       const id = candidates[0].opomAccountId || candidates[0].id || '';
-      return mergeResolvedOpomRow(row, canonicalById.get(String(id)) || {});
+      return mergeResolvedOpomRow(row, canonicalById.get(String(id)) || {}, {
+        ignoreCardBinding: payload.ignoreCardBinding === true,
+      });
     }
     failed += 1;
     if (candidates.length > 1) {
@@ -381,6 +393,7 @@ export async function resolveOpomAccountsPayload(payload = {}) {
       status: payload.status || 'needs_recharge',
       includeAllStatus: payload.includeAllStatus === true,
       fallbackAll: payload.fallbackAll === true,
+      ignoreCardBinding: payload.ignoreCardBinding === true,
     });
   } catch (error) {
     if (![404, 405].includes(Number(error?.httpStatus))) throw error;

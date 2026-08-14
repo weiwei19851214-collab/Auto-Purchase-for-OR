@@ -102,6 +102,34 @@ test('readyToRechargePayload converts OPOM accounts into canonical CSV without c
   });
 });
 
+test('readyToRechargePayload omits the current card binding for payment card CSV replacement', async () => {
+  await withFetch(async () => Response.json({
+    data: [{
+      opomAccountId: 'acct_replace_card',
+      loginEmail: 'replace@example.com',
+      adsPower: {userId: 'profile_replace', serialNumber: '1416'},
+      health: {status: 'ok', eligible: true},
+      activeCard: {
+        orderNo: 'old_order',
+        cardNo: '4609001234567890',
+        status: 'DISABLED',
+      },
+    }],
+  }), async () => {
+    const result = await readyToRechargePayload({
+      group: 'recharge',
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      ignoreCardBinding: true,
+    });
+
+    assert.equal(result.rows[0].opom_account_id, 'acct_replace_card');
+    assert.equal(result.rows[0].opom_card_status, '');
+    assert.equal(result.rows[0].order_no, '');
+    assert.equal(result.rows[0].card_no, '');
+  });
+});
+
 test('canonical OPOM rows use local recharge rules instead of OPOM recharge policies', () => {
   const [row] = canonicalRowsFromOpomAccounts([{
     rechargePolicy: {
@@ -426,6 +454,47 @@ test('resolveOpomAccountsPayload marks OPOM batch resolve misses per row', async
     assert.equal(result.rows[0].opom_card_status, 'ACTIVE');
     assert.equal(result.rows[1].opom_health_status, 'opom_not_found');
     assert.match(result.rows[1].opom_health_reason, /no OPOM account matched/);
+  });
+});
+
+test('resolveOpomAccountsPayload ignores OPOM cardBinding when a payment card CSV is uploaded', async () => {
+  await withFetch(async () => Response.json({
+    results: [{
+      index: 0,
+      status: 'matched',
+      account: {
+        opomAccountId: 'acct_replace_card',
+        loginEmail: 'replace@example.com',
+        health: {status: 'ok', eligible: true},
+        adsPower: {userId: 'profile_replace', serialNumber: '1416'},
+      },
+      cardBinding: {
+        orderNo: 'old_order',
+        cardNo: '5257970000000099',
+        status: 'DISABLED',
+      },
+    }],
+    total: 1,
+    matched: 1,
+    failed: 0,
+  }), async () => {
+    const result = await resolveOpomAccountsPayload({
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      ignoreCardBinding: true,
+      rows: [{
+        login_email: 'replace@example.com',
+        opom_card_status: 'DISABLED',
+        order_no: 'stale_order',
+        card_no: '5257970000000088',
+      }],
+    });
+
+    assert.equal(result.rows[0].opom_account_id, 'acct_replace_card');
+    assert.equal(result.rows[0].ads_power_user_id, 'profile_replace');
+    assert.equal(result.rows[0].opom_card_status, '');
+    assert.equal(result.rows[0].order_no, '');
+    assert.equal(result.rows[0].card_no, '');
   });
 });
 
@@ -1695,13 +1764,14 @@ batch_1,1,EJH,MASTER_B1_3,completed,order_1,5257970000000001,06,2028,2028-06,456
 batch_1,2,EJH,MASTER_B1_3,completed,order_2,5257970000000002,07,2029,2029-07,789,0002
 `;
   const result = allocateCardsToRows([
-    {opom_account_id: 'acct_1', login_email: 'user1@example.com', ads_match_status: 'matched', postal_code: '97001'},
+    {opom_account_id: 'acct_1', login_email: 'user1@example.com', ads_match_status: 'matched', opom_card_status: 'DISABLED', postal_code: '97001'},
     {opom_account_id: 'acct_2', login_email: 'user2@example.com', ads_match_status: 'matched'},
   ], cardCsv, {postal_code: '97002'});
 
   assert.equal(result.summary.allocated, 2);
   assert.equal(result.rows[0].order_no, 'order_1');
   assert.equal(result.rows[0].card_no, '5257970000000001');
+  assert.equal(result.rows[0].opom_card_status, '');
   assert.equal(result.rows[0].card_provider, 'EJH');
   assert.equal(result.rows[0].card_type, 'MASTER_B1_3');
   assert.equal(result.rows[0].expires_at, '2028-06');

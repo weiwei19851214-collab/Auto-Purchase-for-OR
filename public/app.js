@@ -588,7 +588,7 @@
     if (!row.ads_power_user_id && !row.ads_power_serial_number) reasons.push('缺少 AdsPower');
     if (!healthOk(row)) reasons.push(row.opom_health_reason || row.opom_health_status || 'OPOM 异常');
     if (!el.skipMatch.checked && row.ads_match_status !== 'matched') reasons.push('Ads 匹配未完成');
-    if (row.opom_card_status && !/^(active|激活|1)$/i.test(row.opom_card_status)) {
+    if (!el.cardFile.files?.length && row.opom_card_status && !/^(active|激活|1)$/i.test(row.opom_card_status)) {
       reasons.push(`卡状态 ${row.opom_card_status}，执行时跳过`);
     }
     return reasons.join(' · ');
@@ -786,6 +786,8 @@
         ...runtimeConfig(),
         defaults: opomDefaults(),
         addressCsvText: '',
+        // 本次上传支付卡表示要换卡，只读取 OPOM 账号信息，不采用当前绑卡状态和卡号。
+        ignoreCardBinding: Boolean(el.cardFile.files?.length),
       },
     });
     state.rows = applyCurrentRules(applyAddresses(normalizeApiRows(data.rows, 'opom')));
@@ -861,6 +863,7 @@
             rows: state.rows,
             group: el.opomGroup.value.trim() || 'VIP',
             status: state.source === 'opom' ? opomStatusForRequest() : 'needs_recharge',
+            ignoreCardBinding: Boolean(el.cardFile.files?.length),
             ...runtimeConfig(),
           },
         });

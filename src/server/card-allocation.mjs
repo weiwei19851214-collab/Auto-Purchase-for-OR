@@ -124,6 +124,8 @@ export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}, 
     const card = usableCards[cardIndex];
     cardIndex += 1;
     const next = {...row};
+    // 新卡 CSV 是本次换卡的事实来源，OPOM 返回的旧卡状态不能再阻断该账号执行。
+    next.opom_card_status = '';
     next.order_no = card.orderNo;
     next.card_no = card.cardNo;
     if (card.provider) next.card_provider = card.provider;

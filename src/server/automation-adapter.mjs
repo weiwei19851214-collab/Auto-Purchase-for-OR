@@ -80,6 +80,7 @@ export function runnerArgs(options = {}) {
     disableZdr: !!options.disableZdr,
     enableZdr: !!options.enableZdr,
     enableDataTraining: !!options.enableDataTraining,
+    disableDataTraining: !!options.disableDataTraining,
     autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
@@ -237,6 +238,7 @@ export function publicJob(row) {
       disableZdr: args.disableZdr,
       enableZdr: args.enableZdr,
       enableDataTraining: args.enableDataTraining,
+      disableDataTraining: args.disableDataTraining,
       scopeBillingAddress: args.scopeBillingAddress,
       scopePaymentMethod: args.scopePaymentMethod,
       scopePurchase: args.scopePurchase,
@@ -564,7 +566,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const zdrOk = !zdrRequested || (args.enableZdr
       ? /^(enabled|already_enabled)$/.test(details.zdrStatus)
       : /^(disabled|already_disabled)$/.test(details.zdrStatus));
-    const dataTrainingOk = !args.enableDataTraining || /^(enabled|already_enabled)$/.test(details.dataTrainingStatus);
+    const dataTrainingRequested = args.enableDataTraining || args.disableDataTraining;
+    const dataTrainingOk = !dataTrainingRequested || (args.disableDataTraining
+      ? /^(disabled|already_disabled)$/.test(details.dataTrainingStatus)
+      : /^(enabled|already_enabled)$/.test(details.dataTrainingStatus));
     let completed = purchaseOk && autoTopupOk && zdrOk && dataTrainingOk;
     const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
     if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
@@ -731,10 +736,10 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
       ? (result.zdr?.status || (result.zdr?.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured'))
       : 'skipped',
     zdrChanged: (args.disableZdr || args.enableZdr) ? String(Boolean(result.zdr?.changed)) : 'false',
-    dataTrainingStatus: args.enableDataTraining
-      ? (result.dataTraining?.status || (result.dataTraining?.configured ? 'enabled' : 'not_configured'))
+    dataTrainingStatus: (args.enableDataTraining || args.disableDataTraining)
+      ? (result.dataTraining?.status || (result.dataTraining?.configured ? (args.disableDataTraining ? 'disabled' : 'enabled') : 'not_configured'))
       : 'skipped',
-    dataTrainingChanged: args.enableDataTraining ? String(Boolean(result.dataTraining?.changed)) : 'false',
+    dataTrainingChanged: (args.enableDataTraining || args.disableDataTraining) ? String(Boolean(result.dataTraining?.changed)) : 'false',
     autoTopupStatus: !args.scopeAutoTopup
       ? 'skipped'
       : result.autoTopup?.configured

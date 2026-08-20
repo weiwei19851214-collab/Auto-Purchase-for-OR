@@ -18,8 +18,15 @@ const DATA_TRAINING_OPTIONS = {
   opomWriteback: false,
 };
 
+const DISABLE_DATA_TRAINING_OPTIONS = {
+  ...DATA_TRAINING_OPTIONS,
+  enableDataTraining: false,
+  disableDataTraining: true,
+};
+
 test('Data Training is explicit, default-off, and can be the only execution scope', async () => {
   assert.equal(runnerArgs({}).enableDataTraining, false);
+  assert.equal(runnerArgs({}).disableDataTraining, false);
   assert.equal(runnerArgs(DATA_TRAINING_OPTIONS).enableDataTraining, true);
 
   const parsed = await parsePlan(DATA_TRAINING_CSV, DATA_TRAINING_OPTIONS);
@@ -34,6 +41,29 @@ test('Data Training is explicit, default-off, and can be the only execution scop
   assert.equal(task.dataTrainingOnly, true);
   assert.equal(task.purchase.confirmed, false);
   assert.equal(task.autoTopup.enabled, false);
+});
+
+test('Data Training disable can be the only execution scope', async () => {
+  const parsed = await parsePlan(DATA_TRAINING_CSV, DISABLE_DATA_TRAINING_OPTIONS);
+  assert.equal(parsed.rows[0].status, 'ready');
+  assert.equal(parsed.rows[0].executionScope, 'data_training');
+
+  const task = buildClosedLoopTask({
+    login_email: 'training-test@example.com',
+    ads_power_user_id: 'profile-training',
+  }, runnerArgs(DISABLE_DATA_TRAINING_OPTIONS));
+  assert.equal(task.enableDataTraining, false);
+  assert.equal(task.disableDataTraining, true);
+  assert.equal(task.dataTrainingOnly, true);
+});
+
+test('Data Training enable and disable cannot be combined', async () => {
+  const parsed = await parsePlan(DATA_TRAINING_CSV, {
+    ...DATA_TRAINING_OPTIONS,
+    disableDataTraining: true,
+  });
+  assert.equal(parsed.rows[0].status, 'missing_fields');
+  assert.ok(parsed.rows[0].missing.includes('execution_scope:data_training_action_conflict'));
 });
 
 test('Data Training cannot be combined with recharge scopes', async () => {
@@ -87,4 +117,28 @@ test('Data Training-only does not complete when browser verification is missing'
   assert.equal(result.status, 'purchase_unverified');
   assert.equal(result.stage, 'scope.verify');
   assert.equal(result.details.dataTrainingStatus, 'not_configured');
+});
+
+test('Data Training disable-only requires a verified disabled result', async () => {
+  const result = await executeRowWithAdapters(DATA_TRAINING_CSV, 0, DISABLE_DATA_TRAINING_OPTIONS, {
+    runClosedLoopChildAsync: async (_bindScript, task) => {
+      assert.equal(task.disableDataTraining, true);
+      assert.equal(task.dataTrainingOnly, true);
+      return {
+        ok: true,
+        result: {
+          ok: true,
+          status: 'data_training_disabled',
+          dataTraining: {configured: true, status: 'disabled', changed: true},
+        },
+      };
+    },
+    adspower: {
+      stopProfile: async () => ({attempted: true, ok: true}),
+    },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.details.dataTrainingStatus, 'disabled');
+  assert.equal(result.details.dataTrainingChanged, 'true');
 });

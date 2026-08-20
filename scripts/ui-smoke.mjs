@@ -41,17 +41,21 @@ try {
   add('preserve existing payment card switch present', /id=["']preserveExistingCard["'][^>]*role=["']switch["'][^>]*disabled/.test(html)
     && /preserveExistingPaymentMethod/.test(appJs)
     && /有卡保留 · 无卡新增/.test(appJs), 'default_replace_optional_preserve');
-  add('ZDR switch defaults off and is wired', /id=["']disableZdr["'][^>]*role=["']switch["']/.test(html)
-    && /disableZdr:\s*el\.zdrOnly\.checked\s*\|\|\s*\(!enableZdr\s*&&\s*el\.disableZdr\.checked\)/.test(appJs)
-    && !/id=["']disableZdr["'][^>]*checked/.test(html), 'default_off');
-  add('ZDR-only switches disable all other execution scopes', /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
+  add('configuration-only switches are grouped and ordinary ZDR switch is removed', /class=["']operation-mode-grid["']/.test(html)
+    && /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
     && /id=["']enableZdrOnly["'][^>]*role=["']switch["']/.test(html)
-    && /enableZdr,/.test(appJs)
-    && /scopeBillingAddress:\s*zdrOnly\s*\?\s*false/.test(appJs)
-    && /scopePaymentMethod:\s*zdrOnly\s*\?\s*false/.test(appJs)
-    && /scopePurchase:\s*!zdrOnly/.test(appJs)
-    && /scopeAutoTopup:\s*!zdrOnly/.test(appJs)
-    && /opomWriteback:\s*!zdrOnly/.test(appJs), 'zdr_only_scope');
+    && /id=["']dataTrainingOnly["'][^>]*role=["']switch["']/.test(html)
+    && /id=["']disableDataTrainingOnly["'][^>]*role=["']switch["']/.test(html)
+    && !/id=["']disableZdr["']/.test(html)
+    && /disableZdr:\s*el\.zdrOnly\.checked/.test(appJs)
+    && /disableDataTraining:\s*el\.disableDataTrainingOnly\.checked/.test(appJs), 'grouped_modes');
+  add('special operation automatically waives AdsPower matching', /if \(el\.autoTopupEnableOnly\.checked\) el\.skipMatch\.checked = true/.test(appJs)
+    && /if \(activeId\) el\.skipMatch\.checked = true/.test(appJs), 'auto_skip_match');
+  add('configuration-only modes disable all recharge scopes', /scopeBillingAddress:\s*configurationOnly\s*\?\s*false/.test(appJs)
+    && /scopePaymentMethod:\s*configurationOnly\s*\?\s*false/.test(appJs)
+    && /scopePurchase:\s*!configurationOnly/.test(appJs)
+    && /scopeAutoTopup:\s*!configurationOnly/.test(appJs)
+    && /opomWriteback:\s*!configurationOnly/.test(appJs), 'configuration_only_scope');
   add('auto recharge scheduler switch present', /id=["']autoRechargeEnabled["'][^>]*role=["']switch["']/.test(html)
     && /\/api\/scheduler/.test(appJs), 'present');
   add('mapping and concurrency controls present', /id=["']matchButton["']/.test(html) && /id=["']skipMatch["']/.test(html) && /id=["']concurrency["'][^>]*max=["']10["']/.test(html), 'present');
@@ -66,8 +70,8 @@ try {
     && /sessionRefreshPromise/.test(appJs)
     && /sessionRefreshPromise/.test(executionJs), 'one_retry');
   add('deprecated UI controls removed from main page', !/createCardsBtn|noPurchaseMode|adspowerStatusMode|adspowerDiscoverTargetsBtn|addressMappingCsv|EJH_APP_KEY|EJH_APP_SECRET|Python/.test(html), 'removed');
-  add('OPOM writeback is enabled for recharge and skipped for ZDR-only', !/id=["']opomWriteback["']/.test(html)
-    && /opomWriteback:\s*!zdrOnly/.test(appJs), 'scope_aware');
+  add('OPOM writeback is enabled for recharge and skipped for configuration-only modes', !/id=["']opomWriteback["']/.test(html)
+    && /opomWriteback:\s*!configurationOnly/.test(appJs), 'scope_aware');
   add('AdsPower status writeback forced disabled', /adspowerStatusMode:\s*['"]disabled['"]/.test(appJs) && !/group_move|remark_append|Discover groups/.test(html), 'disabled');
   add('light/dark/high-contrast tokens present', /color-scheme:\s*light dark/.test(css) && /body\.high-contrast/.test(css), 'themes');
   add('44px controls retained', /--control:\s*44px/.test(css), '44px');

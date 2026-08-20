@@ -262,7 +262,7 @@ async function pageStepState(page) {
       href: location.href,
       title: document.title || '',
       hasPaymentIssue: /Error:\\s*Payment\\s+Issue|Your card was declined/i.test(text),
-      hasServerError: /\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text),
+      hasServerError: /\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text),
       hasAutoTopup: /Auto\\s*Top[- ]?Up/i.test(text),
       hasPurchaseCredits: /Purchase Credits/i.test(text),
       hasAddCredits: /Add Credits/i.test(text),
@@ -305,7 +305,7 @@ async function dismissOpenRouterServerErrorToast(page) {
       target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
       return true;
     };
-    const errorPattern = /\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const errorPattern = /\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
     const exactDialogs = [...document.querySelectorAll('[data-slot="dialog-content"],[role="dialog"],[aria-modal="true"]')]
       .filter((node) => visible(node) && errorPattern.test(textOf(node)))
       .sort((a, b) => {
@@ -506,7 +506,7 @@ async function dismissInterferingOverlays(page) {
       }
     }
     const flowBlocker = /Purchase Credits|Add a Payment Method|Add Payment Method|Save payment method|Add a Billing Address|Complete address details|Update Address|Card number|Expiration date|CVC|Postal code|Payment Issue|3D Secure|hCaptcha|captcha|security code|bank verification|passkey/i;
-    const allowedNonFlowOverlay = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says|\\bError\\s*5\\d{2}\\b|\\b5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const allowedNonFlowOverlay = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says|\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
     const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],div,section')]
       .filter(visible)
       .map((node) => {
@@ -602,7 +602,7 @@ async function recoverInterferingUi(page) {
       .filter(Boolean);
     return activeDialogs.some((text) => /Save payment method|Card number|Expiration date|CVC|Add a Billing Address|Purchase Credits[\\s\\S]*Total due|Auto\\s*Top[- ]?Up/i.test(text));
   })()`).catch(() => false);
-  const refreshed = state.hasServerErrorRaw && !state.hasPaymentIssue && !paymentSurface
+  const refreshed = state.href?.startsWith(OPENROUTER_CREDITS_URL) && state.hasServerErrorRaw && !state.hasPaymentIssue && !paymentSurface
     ? await commandRefreshCreditsPage(page).catch(refreshErrorResult)
     : {refreshed: false};
   return {attempted: true, dismissedOverlay, dismissedServerError, paymentSurface, refreshed};
@@ -653,7 +653,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'data-training-only') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'disable-data-training' || key === 'data-training-only') {
       args[key] = true;
       continue;
     }
@@ -791,6 +791,9 @@ function normalizeInput(args) {
   const enableDataTrainingInput = args['enable-data-training'] !== undefined
     ? args['enable-data-training']
     : (json.enableDataTraining ?? json.enable_data_training ?? process.env.ENABLE_DATA_TRAINING);
+  const disableDataTrainingInput = args['disable-data-training'] !== undefined
+    ? args['disable-data-training']
+    : (json.disableDataTraining ?? json.disable_data_training ?? process.env.DISABLE_DATA_TRAINING);
   const dataTrainingOnlyInput = args['data-training-only'] !== undefined
     ? args['data-training-only']
     : (json.dataTrainingOnly ?? json.data_training_only ?? process.env.DATA_TRAINING_ONLY);
@@ -824,6 +827,7 @@ function normalizeInput(args) {
     enableZdr: normalizeBooleanInput(enableZdrInput),
     zdrOnly: normalizeBooleanInput(zdrOnlyInput),
     enableDataTraining: normalizeBooleanInput(enableDataTrainingInput),
+    disableDataTraining: normalizeBooleanInput(disableDataTrainingInput),
     dataTrainingOnly: normalizeBooleanInput(dataTrainingOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
@@ -882,11 +886,14 @@ function normalizeInput(args) {
   if (input.zdrOnly && !input.disableZdr && !input.enableZdr) {
     throw new Error('zdrOnly requires disableZdr or enableZdr');
   }
-  if (input.dataTrainingOnly && !input.enableDataTraining) {
-    throw new Error('dataTrainingOnly requires enableDataTraining');
+  if (input.enableDataTraining && input.disableDataTraining) {
+    throw new Error('enableDataTraining and disableDataTraining cannot be combined');
   }
-  if (input.enableDataTraining && !input.dataTrainingOnly) {
-    throw new Error('enableDataTraining must run in dataTrainingOnly mode');
+  if (input.dataTrainingOnly && !input.enableDataTraining && !input.disableDataTraining) {
+    throw new Error('dataTrainingOnly requires enableDataTraining or disableDataTraining');
+  }
+  if ((input.enableDataTraining || input.disableDataTraining) && !input.dataTrainingOnly) {
+    throw new Error('Data Training changes must run in dataTrainingOnly mode');
   }
   if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly, input.dataTrainingOnly].filter(Boolean).length > 1) {
     throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, and dataTrainingOnly cannot be combined');
@@ -1901,9 +1908,10 @@ async function configureOpenRouterZdr(page, targetEnabled = false) {
   };
 }
 
-function initialDataTrainingResult(requested) {
+function initialDataTrainingResult(requested, targetEnabled = true) {
   return {
     requested: !!requested,
+    targetEnabled: !!targetEnabled,
     configured: null,
     changed: false,
     status: requested ? 'pending' : 'skipped',
@@ -1975,7 +1983,7 @@ function dataTrainingDomExpression(action = 'read') {
     const checked = checkedState(target);
     const isDisabled = disabled(target);
     let clicked = false;
-    if (action === 'enable' && checked === false && !isDisabled) {
+    if (((action === 'enable' && checked === false) || (action === 'disable' && checked === true)) && !isDisabled) {
       activate(target);
       clicked = true;
     }
@@ -1996,7 +2004,6 @@ async function readDataTrainingSwitchState(page) {
   const state = await evaluate(page, dataTrainingDomExpression('read'), 15000);
   if (!state.found) throw new Error(`Data Training paid endpoint switch not found: ${state.reason}; tail=${state.tail || ''}`);
   if (state.checked == null) throw new Error('Data Training paid endpoint switch state cannot be established');
-  if (state.checked === false && state.disabled) throw new Error('Data Training paid endpoint switch is disabled');
   return state;
 }
 
@@ -2025,12 +2032,13 @@ async function waitForDataTrainingSwitch(page, expectedEnabled = true, timeoutMs
   throw new Error(`Data Training paid endpoint switch did not become ${expectedEnabled ? 'enabled' : 'disabled'}; state=${JSON.stringify(lastState || {})}`);
 }
 
-async function enableCurrentDataTrainingSwitch(page) {
+async function setCurrentDataTrainingSwitch(page, targetEnabled) {
   const before = await waitForDataTrainingPanel(page);
-  if (before.checked) return {changed:false, before, afterClick:before};
-  const clicked = await evaluate(page, dataTrainingDomExpression('enable'), 15000);
+  if (before.checked === targetEnabled) return {changed:false, before, afterClick:before};
+  const action = targetEnabled ? 'enable' : 'disable';
+  const clicked = await evaluate(page, dataTrainingDomExpression(action), 15000);
   if (!clicked?.clicked) throw new Error(`Data Training paid endpoint switch could not be clicked: ${JSON.stringify(clicked || {})}`);
-  const afterClick = await waitForDataTrainingSwitch(page, true);
+  const afterClick = await waitForDataTrainingSwitch(page, targetEnabled);
   return {changed:true, before, afterClick, clicked};
 }
 
@@ -2050,23 +2058,29 @@ async function openDataTrainingGuardrailsPanel(page) {
   return {workspace, tab, state};
 }
 
-async function configurePrivacyDataTraining(page) {
+async function configurePrivacyDataTraining(page, targetEnabled = true) {
   await navigatePage(page, OPENROUTER_PRIVACY_URL);
   await sleep(PAGE_SETTLE_MS);
-  const toggled = await enableCurrentDataTrainingSwitch(page);
-  if (!toggled.changed) return {configured:true, changed:false, status:'already_enabled', state:toggled.before};
+  const toggled = await setCurrentDataTrainingSwitch(page, targetEnabled);
+  const targetStatus = targetEnabled ? 'enabled' : 'disabled';
+  if (!toggled.changed) return {configured:true, changed:false, status:`already_${targetStatus}`, state:toggled.before};
 
   const save = await clickGuardrailsSave(page);
+  if (!targetEnabled) {
+    // 关闭账号级总开关并点击保存后即可结束；不再刷新 Privacy 或进入 Guardrails。
+    const verified = await waitForDataTrainingSwitch(page, false, 2000);
+    return {configured:true, changed:true, status:targetStatus, save, verified, toggled};
+  }
   await sleep(PAGE_SETTLE_MS);
   await navigatePage(page, OPENROUTER_PRIVACY_URL);
   await sleep(PAGE_SETTLE_MS);
-  const verified = await waitForDataTrainingSwitch(page, true);
-  return {configured:true, changed:true, status:'enabled', save, verified, toggled};
+  const verified = await waitForDataTrainingSwitch(page, targetEnabled);
+  return {configured:true, changed:true, status:targetStatus, save, verified, toggled};
 }
 
 async function configureGuardrailDataTraining(page) {
   const opened = await openDataTrainingGuardrailsPanel(page);
-  const toggled = await enableCurrentDataTrainingSwitch(page);
+  const toggled = await setCurrentDataTrainingSwitch(page, true);
   if (!toggled.changed) return {configured:true, changed:false, status:'already_enabled', opened, state:toggled.before};
 
   const save = await clickGuardrailsSave(page);
@@ -2078,9 +2092,20 @@ async function configureGuardrailDataTraining(page) {
   return {configured:true, changed:true, status:'enabled', opened, save, confirmation, reopened, verified, toggled};
 }
 
-async function configureOpenRouterDataTraining(page) {
-  // 账号级和默认 Guardrail 都开启后才算完成，避免只改一层导致实际路由仍被限制。
-  const privacy = await configurePrivacyDataTraining(page);
+async function configureOpenRouterDataTraining(page, targetEnabled = true) {
+  const privacy = await configurePrivacyDataTraining(page, targetEnabled);
+  if (!targetEnabled) {
+    // Privacy 总开关关闭后 Guardrail 会随之失效，本任务不再操作第二层开关。
+    return {
+      requested:true,
+      configured:true,
+      changed:privacy.changed,
+      status:privacy.changed ? 'disabled' : 'already_disabled',
+      privacy,
+    };
+  }
+
+  // 开启时账号级和默认 Guardrail 都要打开，避免只改一层导致实际路由仍受限制。
   const guardrail = await configureGuardrailDataTraining(page);
   const changed = privacy.changed || guardrail.changed;
   return {
@@ -5647,6 +5672,7 @@ async function run() {
       enableZdr: rawInput.enableZdr,
       dataTrainingOnly: rawInput.dataTrainingOnly,
       enableDataTraining: rawInput.enableDataTraining,
+      disableDataTraining: rawInput.disableDataTraining,
     },
   });
   const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
@@ -5668,7 +5694,8 @@ async function run() {
   let recoveryPaymentMethodAction = 'uploaded_card_added';
   let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
   let zdrResult = initialZdrResult(input.disableZdr || input.enableZdr, input.enableZdr);
-  let dataTrainingResult = initialDataTrainingResult(input.enableDataTraining);
+  const dataTrainingRequested = input.enableDataTraining || input.disableDataTraining;
+  let dataTrainingResult = initialDataTrainingResult(dataTrainingRequested, input.enableDataTraining);
 
   try {
     await page.send('Runtime.enable');
@@ -5688,12 +5715,20 @@ async function run() {
     }
     accountForRecovery = accountState.account;
 
-    if (input.enableDataTraining) {
-      dataTrainingResult = await runLoggedStep('enable-openrouter-data-training', debugDir, () => configureOpenRouterDataTraining(page), page);
+    if (dataTrainingRequested) {
+      const dataTrainingStepName = input.disableDataTraining ? 'disable-openrouter-data-training' : 'enable-openrouter-data-training';
+      dataTrainingResult = await runLoggedStep(
+        dataTrainingStepName,
+        debugDir,
+        () => configureOpenRouterDataTraining(page, input.enableDataTraining),
+        page,
+      );
       if (input.dataTrainingOnly) {
         return {
           ok: true,
-          status: dataTrainingResult.changed ? 'data_training_enabled' : 'data_training_unchanged',
+          status: dataTrainingResult.changed
+            ? (input.disableDataTraining ? 'data_training_disabled' : 'data_training_enabled')
+            : 'data_training_unchanged',
           account: accountState.account,
           launch: input.launch,
           zdr: zdrResult,

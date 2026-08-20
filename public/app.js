@@ -76,7 +76,6 @@
     pendingWindowBlocked: false,
     creatingJob: false,
     cardAllocationSignature: '',
-    disableZdrBeforeOnly: false,
   };
 
   function escapeHtml(value) {
@@ -165,7 +164,8 @@
   }
 
   function ruleText() {
-    if (isDataTrainingOnlyMode()) return '仅 Data Training';
+    if (el.dataTrainingOnly.checked) return '仅开启 Data Training';
+    if (el.disableDataTrainingOnly.checked) return '仅关闭 Data Training';
     if (isZdrOnlyMode()) return '仅 ZDR';
     const rule = ruleValues();
     return `${rule.threshold}/${rule.below}/${rule.atOrAbove}`;
@@ -180,7 +180,7 @@
   function zdrText() {
     if (el.zdrOnly.checked) return '仅关闭';
     if (el.enableZdrOnly.checked) return '仅开启';
-    return el.disableZdr.checked ? '关闭' : '保持现状';
+    return '保持现状';
   }
 
   function isZdrOnlyMode() {
@@ -188,7 +188,7 @@
   }
 
   function isDataTrainingOnlyMode() {
-    return el.dataTrainingOnly.checked;
+    return el.dataTrainingOnly.checked || el.disableDataTrainingOnly.checked;
   }
 
   function isConfigurationOnlyMode() {
@@ -703,13 +703,10 @@
     const opom = state.source === 'opom';
     const configurationOnly = isConfigurationOnlyMode();
     const cardFile = el.cardFile.files?.[0];
-    if (el.zdrOnly.checked) el.disableZdr.checked = true;
-    if (el.enableZdrOnly.checked) el.disableZdr.checked = false;
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
     el.ruleSummary.textContent = ruleText();
     el.autoTopupSummary.textContent = autoTopupText();
-    el.disableZdr.disabled = configurationOnly;
     el.balanceThreshold.disabled = configurationOnly;
     el.amountBelow.disabled = configurationOnly;
     el.amountAtOrAbove.disabled = configurationOnly;
@@ -724,7 +721,7 @@
       : '未选择';
     el.billingState.disabled = configurationOnly;
     document.querySelector('.three-inputs')?.classList.toggle('scope-control-disabled', configurationOnly);
-    document.querySelector('.auto-card')?.classList.toggle('scope-control-disabled', configurationOnly);
+    document.querySelector('.auto-rule-section')?.classList.toggle('scope-control-disabled', configurationOnly);
     for (const button of document.querySelectorAll('[data-source]')) {
       const selected = button.dataset.source === state.source;
       button.classList.toggle('is-selected', selected);
@@ -835,9 +832,10 @@
       scopePaymentMethod: configurationOnly ? false : hasCardCsv,
       scopePurchase: !configurationOnly,
       scopeAutoTopup: !configurationOnly,
-      disableZdr: el.zdrOnly.checked || (!enableZdr && el.disableZdr.checked),
+      disableZdr: el.zdrOnly.checked,
       enableZdr,
       enableDataTraining: el.dataTrainingOnly.checked,
+      disableDataTraining: el.disableDataTrainingOnly.checked,
       removeExisting: !configurationOnly && hasCardCsv && !preserveExistingPaymentMethod,
       preserveExistingPaymentMethod,
       stopProfiles: true,
@@ -1044,7 +1042,9 @@
       el.confirmRows.textContent = String(selectedRows().length);
       el.confirmRule.textContent = ruleText();
       el.confirmZdr.textContent = zdrText();
-      el.confirmDataTraining.textContent = isDataTrainingOnlyMode() ? '仅开启' : '保持现状';
+      el.confirmDataTraining.textContent = el.dataTrainingOnly.checked
+        ? '仅开启'
+        : (el.disableDataTrainingOnly.checked ? '仅关闭' : '保持现状');
       el.confirmReadiness.textContent = `${dryRun.ready} 可执行 / ${dryRun.blocked} 阻塞`;
       el.confirmDialog.showModal();
     } finally {
@@ -1192,7 +1192,9 @@
         ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
         : el.dataTrainingOnly.checked
           ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 Data Training 的任务，不执行充值或 Auto Top-Up。确认启用？'
-          : '启用后，服务端将在每小时 15 和 45 分按当前页面参数自动创建真实充值任务。确认启用？';
+          : el.disableDataTrainingOnly.checked
+            ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 Data Training 的任务，不执行充值或 Auto Top-Up。确认启用？'
+            : '启用后，服务端将在每小时 15 和 45 分按当前页面参数自动创建真实充值任务。确认启用？';
     if (enabled && !window.confirm(confirmation)) {
       el.autoRechargeEnabled.checked = false;
       return;
@@ -1252,11 +1254,10 @@
     el.autoTopupThreshold.value = '100';
     el.autoTopupAmount.value = '150';
     el.autoTopupEnableOnly.checked = false;
-    el.disableZdr.checked = false;
     el.zdrOnly.checked = false;
     el.enableZdrOnly.checked = false;
     el.dataTrainingOnly.checked = false;
-    state.disableZdrBeforeOnly = false;
+    el.disableDataTrainingOnly.checked = false;
     el.skipMatch.checked = false;
     el.concurrency.value = '1';
     invalidatePreparation();
@@ -1325,42 +1326,32 @@
       });
 
     el.autoTopupEnableOnly.addEventListener('change', () => {
+      if (el.autoTopupEnableOnly.checked) el.skipMatch.checked = true;
       invalidatePreparation();
       renderControls();
     });
-    el.disableZdr.addEventListener('change', invalidatePreparation);
-    function setZdrOnlyMode(mode) {
-      const wasConfigurationOnly = isConfigurationOnlyMode();
-      if (mode && !wasConfigurationOnly) state.disableZdrBeforeOnly = el.disableZdr.checked;
-      el.zdrOnly.checked = mode === 'disable';
-      el.enableZdrOnly.checked = mode === 'enable';
-      if (mode) el.dataTrainingOnly.checked = false;
-      if (mode === 'disable') el.disableZdr.checked = true;
-      if (mode === 'enable') el.disableZdr.checked = false;
-      if (!mode) el.disableZdr.checked = state.disableZdrBeforeOnly;
+    function setConfigurationOnlyMode(activeId) {
+      // ZDR 和 Data Training 专项任务互斥，避免一次任务同时修改多组账号配置。
+      for (const id of ['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly']) {
+        if (id !== activeId) el[id].checked = false;
+      }
+      // 专项操作不依赖充值前匹配，开启时同步采用用户已人工确认的匹配结果。
+      if (activeId) el.skipMatch.checked = true;
       state.cardAllocationSignature = '';
       invalidatePreparation();
       renderControls();
     }
     el.zdrOnly.addEventListener('change', () => {
-      setZdrOnlyMode(el.zdrOnly.checked ? 'disable' : null);
+      setConfigurationOnlyMode(el.zdrOnly.checked ? 'zdrOnly' : '');
     });
     el.enableZdrOnly.addEventListener('change', () => {
-      setZdrOnlyMode(el.enableZdrOnly.checked ? 'enable' : null);
+      setConfigurationOnlyMode(el.enableZdrOnly.checked ? 'enableZdrOnly' : '');
     });
     el.dataTrainingOnly.addEventListener('change', () => {
-      if (el.dataTrainingOnly.checked) {
-        const wasZdrOnly = isZdrOnlyMode();
-        if (!wasZdrOnly) state.disableZdrBeforeOnly = el.disableZdr.checked;
-        el.zdrOnly.checked = false;
-        el.enableZdrOnly.checked = false;
-        el.disableZdr.checked = false;
-      } else {
-        el.disableZdr.checked = state.disableZdrBeforeOnly;
-      }
-      state.cardAllocationSignature = '';
-      invalidatePreparation();
-      renderControls();
+      setConfigurationOnlyMode(el.dataTrainingOnly.checked ? 'dataTrainingOnly' : '');
+    });
+    el.disableDataTrainingOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.disableDataTrainingOnly.checked ? 'disableDataTrainingOnly' : '');
     });
     el.skipMatch.addEventListener('change', () => {
       state.cardAllocationSignature = '';

@@ -233,6 +233,7 @@ function publicOptions(options) {
     disableZdr: args.disableZdr,
     enableZdr: args.enableZdr,
     enableDataTraining: args.enableDataTraining,
+    disableDataTraining: args.disableDataTraining,
     autoTopupThreshold: args.autoTopupThreshold,
     autoTopupAmount: args.autoTopupAmount,
     rowTimeoutMs: args.rowTimeoutMs,
@@ -256,6 +257,7 @@ function runnerScope(args) {
   if (args.disableZdr) labels.push('zdr_disable');
   if (args.enableZdr) labels.push('zdr_enable');
   if (args.enableDataTraining) labels.push('data_training_enable');
+  if (args.disableDataTraining) labels.push('data_training_disable');
   if (args.scopeBillingAddress) labels.push('billing_address');
   if (args.scopePaymentMethod) labels.push('payment_method');
   if (args.scopePurchase) labels.push(args.confirmPurchase ? 'purchase' : 'purchase_prepare');

@@ -32,6 +32,7 @@ export function normalizedOptions(options = {}) {
     disableZdr: args.disableZdr,
     enableZdr: args.enableZdr,
     enableDataTraining: args.enableDataTraining,
+    disableDataTraining: args.disableDataTraining,
     autoTopupThreshold: args.autoTopupThreshold,
     autoTopupAmount: args.autoTopupAmount,
     rowTimeoutMs: args.rowTimeoutMs,

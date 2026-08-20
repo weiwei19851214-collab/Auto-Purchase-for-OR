@@ -117,7 +117,7 @@ export class AutoRechargeScheduler {
       && configuredOptions.scopePaymentMethod === false
       && configuredOptions.scopePurchase === false
       && configuredOptions.scopeAutoTopup === false;
-    const dataTrainingOnly = !!configuredOptions.enableDataTraining
+    const dataTrainingOnly = (!!configuredOptions.enableDataTraining || !!configuredOptions.disableDataTraining)
       && configuredOptions.scopeBillingAddress === false
       && configuredOptions.scopePaymentMethod === false
       && configuredOptions.scopePurchase === false
@@ -323,6 +323,7 @@ function publicState(state) {
       disableZdr: args.disableZdr,
       enableZdr: args.enableZdr,
       enableDataTraining: args.enableDataTraining,
+      disableDataTraining: args.disableDataTraining,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       hasAdspowerApiKey: !!args.adspowerApiKey,
       concurrency: args.concurrency,

@@ -94,48 +94,53 @@
                 <input id="amountAtOrAbove" type="number" min="0" step="1" value="20" inputmode="decimal" />
               </label>
             </div>
-            <label class="switch-row zdr-row">
-              <span><strong>关闭 ZDR</strong></span>
-              <input id="disableZdr" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <label class="switch-row zdr-only-row">
-              <span><strong>仅关闭 ZDR，不执行其他操作</strong></span>
-              <input id="zdrOnly" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <label class="switch-row zdr-only-row">
-              <span><strong>仅开启 ZDR，不执行其他操作</strong></span>
-              <input id="enableZdrOnly" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <label class="switch-row zdr-only-row">
-              <span><strong>仅开启 Data Training，不执行其他操作</strong></span>
-              <input id="dataTrainingOnly" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"></span>
-            </label>
+            <div class="auto-rule-section">
+              <div class="auto-rule-heading">
+                <span class="field-title">Auto Top-Up</span>
+                <strong class="compact-value" id="autoTopupSummary">100/150</strong>
+              </div>
+              <div class="two-inputs">
+                <label>
+                  <span>阈值</span>
+                  <input id="autoTopupThreshold" type="number" min="0.01" step="1" value="100" inputmode="decimal" />
+                </label>
+                <label>
+                  <span>充值金额</span>
+                  <input id="autoTopupAmount" type="number" min="0.01" step="1" value="150" inputmode="decimal" />
+                </label>
+              </div>
+            </div>
           </article>
 
-          <article class="control-card auto-card">
+          <article class="control-card operations-card" aria-labelledby="operationModesTitle">
             <div class="card-heading">
-              <span class="auto-title">
-                <strong>Auto Top-Up</strong>
-                <small id="autoTopupSummary">100/150</small>
-              </span>
-              <label class="switch-label">
-                <span>仅开启</span>
+              <span class="field-title" id="operationModesTitle">专项操作</span>
+            </div>
+            <div class="operation-mode-grid">
+              <label class="switch-row mode-switch-row">
+                <span><strong>仅开启Auto Top-Up</strong></span>
                 <input id="autoTopupEnableOnly" type="checkbox" role="switch" />
                 <span class="switch-track" aria-hidden="true"></span>
               </label>
-            </div>
-            <div class="two-inputs">
-              <label>
-                <span>阈值</span>
-                <input id="autoTopupThreshold" type="number" min="0.01" step="1" value="100" inputmode="decimal" />
+              <label class="switch-row mode-switch-row">
+                <span><strong>仅关闭 ZDR，不执行其他操作</strong></span>
+                <input id="zdrOnly" type="checkbox" role="switch" />
+                <span class="switch-track" aria-hidden="true"></span>
               </label>
-              <label>
-                <span>充值金额</span>
-                <input id="autoTopupAmount" type="number" min="0.01" step="1" value="150" inputmode="decimal" />
+              <label class="switch-row mode-switch-row">
+                <span><strong>仅开启 ZDR，不执行其他操作</strong></span>
+                <input id="enableZdrOnly" type="checkbox" role="switch" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+              <label class="switch-row mode-switch-row">
+                <span><strong>仅开启 Data Training，不执行其他操作</strong></span>
+                <input id="dataTrainingOnly" type="checkbox" role="switch" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+              <label class="switch-row mode-switch-row">
+                <span><strong>仅关闭 Data Training，不执行其他操作</strong></span>
+                <input id="disableDataTrainingOnly" type="checkbox" role="switch" />
+                <span class="switch-track" aria-hidden="true"></span>
               </label>
             </div>
           </article>

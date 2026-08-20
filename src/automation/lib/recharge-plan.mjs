@@ -233,7 +233,7 @@ export function safeAutoTopupPlan(row, args) {
 export function executionScope(args = {}) {
   return {
     zdr: !!args.disableZdr || !!args.enableZdr,
-    dataTraining: !!args.enableDataTraining,
+    dataTraining: !!args.enableDataTraining || !!args.disableDataTraining,
     billingAddress: args.scopeBillingAddress !== false,
     paymentMethod: args.scopePaymentMethod !== false,
     purchase: args.scopePurchase !== false,
@@ -245,6 +245,7 @@ export function validateScope(args = {}) {
   const scope = executionScope(args);
   const missing = [];
   if (args.disableZdr && args.enableZdr) missing.push('execution_scope:zdr_action_conflict');
+  if (args.enableDataTraining && args.disableDataTraining) missing.push('execution_scope:data_training_action_conflict');
   if (scope.dataTraining && (scope.zdr || scope.billingAddress || scope.paymentMethod || scope.purchase || scope.autoTopup)) {
     missing.push('execution_scope:data_training_must_run_alone');
   }
@@ -318,6 +319,7 @@ export function buildClosedLoopTask(row, args) {
     enableZdr: !!args.enableZdr,
     zdrOnly,
     enableDataTraining: !!args.enableDataTraining,
+    disableDataTraining: !!args.disableDataTraining,
     dataTrainingOnly,
     removeExistingPaymentMethod: scope.paymentMethod && args.removeExisting,
     preserveExistingPaymentMethod: scope.paymentMethod && args.preserveExistingPaymentMethod,
@@ -530,7 +532,7 @@ export function successDetails(row, result, args) {
     zdrStatus: scope.zdr ? (zdr.status || (zdr.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured')) : 'skipped',
     zdrChanged: scope.zdr ? String(Boolean(zdr.changed)) : 'false',
     dataTrainingStatus: scope.dataTraining
-      ? (dataTraining.status || (dataTraining.configured ? 'enabled' : 'not_configured'))
+      ? (dataTraining.status || (dataTraining.configured ? (args.disableDataTraining ? 'disabled' : 'enabled') : 'not_configured'))
       : 'skipped',
     dataTrainingChanged: scope.dataTraining ? String(Boolean(dataTraining.changed)) : 'false',
     autoTopupStatus: scope.autoTopup

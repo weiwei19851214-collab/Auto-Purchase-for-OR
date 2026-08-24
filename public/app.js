@@ -525,6 +525,7 @@
 
   function rowKeys(row) {
     return [
+      row.idempotency_key,
       row.opom_account_id,
       row.login_email,
       row.ads_power_user_id,
@@ -661,7 +662,6 @@
     syncSelectAllRows(rows);
     el.selectAllRows.onchange = () => {
       state.rows.forEach((row) => { row.execute = el.selectAllRows.checked; });
-      state.cardAllocationSignature = '';
       invalidatePreparation();
       renderRows();
     };
@@ -670,7 +670,6 @@
       checkbox.addEventListener('change', () => {
         const row = state.rows[Number(checkbox.dataset.index)];
         if (row) row.execute = checkbox.checked;
-        state.cardAllocationSignature = '';
         invalidatePreparation();
         syncSelectAllRows();
         renderCounts();
@@ -920,8 +919,7 @@
     if (!file) return '';
     return JSON.stringify({
       file: [file.name, file.size, file.lastModified],
-      rows: selectedRows().map((row) => rowKeys(row)[0] || ''),
-      skip: el.skipMatch.checked,
+      rows: state.rows.map((row, index) => rowKeys(row)[0] || `row:${index}`),
       preserveExistingPaymentMethod: el.preserveExistingCard.checked,
     });
   }
@@ -936,16 +934,17 @@
       state.cardAllocationSignature = '';
       return;
     }
-    if (!selectedRows().length) throw new Error('请先选择执行账号');
+    if (!state.rows.length) throw new Error('请先导入账号');
     const signature = allocationSignature();
     if (signature === state.cardAllocationSignature) return;
-    if (!el.skipMatch.checked && !selectedRows().some((row) => row.ads_match_status === 'matched')) {
+    if (!el.skipMatch.checked && !state.rows.some((row) => row.ads_match_status === 'matched')) {
       throw new Error('请先完成 AdsPower 匹配');
     }
     const data = await requestJson('/api/cards/allocate', {
       method: 'POST',
       body: {
-        rows: applyCurrentRules(selectedRows()),
+        // 分卡使用完整账号源顺序；用户勾选只控制任务执行范围，不能参与账号与卡号的配对。
+        rows: applyCurrentRules(state.rows),
         skipAdsPowerMatch: el.skipMatch.checked,
         cardCsvText: await file.text(),
         defaults: opomDefaults(),
@@ -957,7 +956,16 @@
         cardholder: '',
       },
     });
-    state.rows = mergeRows(state.rows, data.rows || []);
+    const allocatedRows = data.rows || [];
+    if (allocatedRows.length !== state.rows.length) {
+      throw new Error(`支付卡分配结果行数不一致：账号 ${state.rows.length} 行，返回 ${allocatedRows.length} 行`);
+    }
+    // 分卡接口保证按位置返回，按同一位置合并可避免邮箱或 AdsPower 字段变化造成串卡。
+    state.rows = state.rows.map((row, index) => ({
+      ...row,
+      ...allocatedRows[index],
+      execute: row.execute !== false,
+    }));
     state.cardAllocationSignature = signature;
     invalidatePreparation();
     renderRows();

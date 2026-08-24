@@ -1780,9 +1780,10 @@ batch_1,2,EJH,MASTER_B1_3,completed,order_2,5257970000000002,07,2029,2029-07,789
   assert.match(result.csvText, /opom_account_id,login_email/);
 });
 
-test('allocateCardsToRows does not consume EJH cards for unmatched OPOM rows', () => {
+test('allocateCardsToRows preserves positional card pairing when an OPOM row is unmatched', () => {
   const cardCsv = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
 batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
+batch_1,2,EJH,completed,order_2,5257970000000002,07,2029,789,0002
 `;
   const result = allocateCardsToRows([
     {opom_account_id: 'acct_1', login_email: 'user1@example.com', ads_match_status: 'profile_not_found'},
@@ -1792,9 +1793,40 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
   assert.equal(result.summary.requestedRows, 2);
   assert.equal(result.summary.eligibleRows, 1);
   assert.equal(result.summary.skippedNotMatched, 1);
-  assert.equal(result.summary.allocated, 1);
-  assert.equal(result.rows[0].order_no, undefined);
-  assert.equal(result.rows[1].order_no, 'order_1');
+  assert.equal(result.summary.allocated, 2);
+  assert.equal(result.rows[0].order_no, 'order_1');
+  assert.equal(result.rows[1].order_no, 'order_2');
+});
+
+test('allocateCardsToRows preserves positional card pairing when only some rows are selected', () => {
+  const cardCsv = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
+batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
+batch_1,2,EJH,completed,order_2,5257970000000002,07,2029,789,0002
+batch_1,3,EJH,completed,order_3,5257970000000003,08,2030,123,0003
+`;
+  const result = allocateCardsToRows([
+    {login_email: 'user1@example.com', ads_match_status: 'matched', execute: true},
+    {login_email: 'user2@example.com', ads_match_status: 'matched', execute: false},
+    {login_email: 'user3@example.com', ads_match_status: 'matched', execute: true},
+  ], cardCsv);
+
+  assert.equal(result.rows[0].order_no, 'order_1');
+  assert.equal(result.rows[1].order_no, 'order_2');
+  assert.equal(result.rows[2].order_no, 'order_3');
+});
+
+test('allocateCardsToRows rejects an invalid paired card instead of shifting a later card forward', () => {
+  const cardCsv = `card_batch_id,row_number,card_provider,open_status,order_no,card_no,expiry_month,expiry_year,cvv,pan_last4
+batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
+batch_1,2,EJH,failed,order_2,5257970000000002,07,2029,789,0002
+batch_1,3,EJH,completed,order_3,5257970000000003,08,2030,123,0003
+`;
+
+  assert.throws(() => allocateCardsToRows([
+    {login_email: 'user1@example.com', ads_match_status: 'matched'},
+    {login_email: 'user2@example.com', ads_match_status: 'matched'},
+    {login_email: 'user3@example.com', ads_match_status: 'matched'},
+  ], cardCsv), /Card CSV row 2 cannot be paired with account row 2/);
 });
 
 test('allocateCardsToRows accepts manually confirmed AdsPower mappings', () => {

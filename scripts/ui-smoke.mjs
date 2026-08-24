@@ -41,6 +41,9 @@ try {
   add('preserve existing payment card switch present', /id=["']preserveExistingCard["'][^>]*role=["']switch["'][^>]*disabled/.test(html)
     && /preserveExistingPaymentMethod/.test(appJs)
     && /有卡保留 · 无卡新增/.test(appJs), 'default_replace_optional_preserve');
+  add('payment cards stay paired to full account source order', /rows:\s*applyCurrentRules\(state\.rows\)/.test(appJs)
+    && /rows:\s*state\.rows\.map\(\(row, index\)/.test(appJs)
+    && /allocatedRows\.length !== state\.rows\.length/.test(appJs), 'full_rows_positional');
   add('configuration-only switches are grouped and ordinary ZDR switch is removed', /class=["']operation-mode-grid["']/.test(html)
     && /id=["']zdrOnly["'][^>]*role=["']switch["']/.test(html)
     && /id=["']enableZdrOnly["'][^>]*role=["']switch["']/.test(html)

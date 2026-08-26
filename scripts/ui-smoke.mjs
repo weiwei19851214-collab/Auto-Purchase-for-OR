@@ -35,7 +35,7 @@ try {
   add('default rule values', /id=["']balanceThreshold["'][^>]*value=["']145["']/.test(html)
     && /id=["']amountBelow["'][^>]*value=["']150["']/.test(html)
     && /id=["']amountAtOrAbove["'][^>]*value=["']20["']/.test(html)
-    && /id=["']autoTopupThreshold["'][^>]*value=["']100["']/.test(html)
+    && /id=["']autoTopupThreshold["'][^>]*value=["']30["']/.test(html)
     && /id=["']autoTopupAmount["'][^>]*value=["']150["']/.test(html), '145/150/20 auto=100/150');
   add('auto top-up enable-only switch present', /id=["']autoTopupEnableOnly["'][^>]*role=["']switch["']/.test(html), 'present');
   add('preserve existing payment card switch present', /id=["']preserveExistingCard["'][^>]*role=["']switch["'][^>]*disabled/.test(html)

@@ -6,6 +6,16 @@ import {DatabaseSync} from 'node:sqlite';
 import test from 'node:test';
 import {openDatabase} from '../server/db.mjs';
 import {publicRow} from '../server/automation-adapter.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
+
+test('refund confirmation errors are not misclassified by Auto Top-Up warning text', () => {
+  const error = simplifyError(
+    'Refund was clicked but completion notice was not visible: Confirm refund Auto top-up will be disabled when you accept this refund.',
+    {stage: 'automation'},
+  );
+  assert.equal(error.errorCode, 'refund_failed');
+  assert.equal(error.message, '退款操作失败');
+});
 
 test('database migration preserves historical raw errors as detail and exposes a short message', () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-error-migration-'));

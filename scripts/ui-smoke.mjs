@@ -49,9 +49,11 @@ try {
     && /id=["']enableZdrOnly["'][^>]*role=["']switch["']/.test(html)
     && /id=["']dataTrainingOnly["'][^>]*role=["']switch["']/.test(html)
     && /id=["']disableDataTrainingOnly["'][^>]*role=["']switch["']/.test(html)
+    && /id=["']refundOnly["'][^>]*role=["']switch["']/.test(html)
     && !/id=["']disableZdr["']/.test(html)
     && /disableZdr:\s*el\.zdrOnly\.checked/.test(appJs)
-    && /disableDataTraining:\s*el\.disableDataTrainingOnly\.checked/.test(appJs), 'grouped_modes');
+    && /disableDataTraining:\s*el\.disableDataTrainingOnly\.checked/.test(appJs)
+    && /refundOnly:\s*el\.refundOnly\.checked/.test(appJs), 'grouped_modes');
   add('special operation automatically waives AdsPower matching', /if \(el\.autoTopupEnableOnly\.checked\) el\.skipMatch\.checked = true/.test(appJs)
     && /if \(activeId\) el\.skipMatch\.checked = true/.test(appJs), 'auto_skip_match');
   add('configuration-only modes disable all recharge scopes', /scopeBillingAddress:\s*configurationOnly\s*\?\s*false/.test(appJs)

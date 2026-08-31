@@ -20,7 +20,7 @@ test('portal exposes mutually exclusive Data Training-only modes', () => {
   assert.match(app, /disableDataTraining: el\.disableDataTrainingOnly\.checked/);
   assert.match(app, /scopePurchase: !configurationOnly/);
   assert.match(app, /opomWriteback: !configurationOnly/);
-  assert.match(app, /\['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly'\]/);
+  assert.match(app, /\['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly', 'refundOnly'\]/);
   assert.doesNotMatch(html, /id="disableZdr"/);
 });
 

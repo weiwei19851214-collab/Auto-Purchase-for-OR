@@ -653,7 +653,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'disable-data-training' || key === 'data-training-only') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'refund-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'disable-data-training' || key === 'data-training-only') {
       args[key] = true;
       continue;
     }
@@ -797,6 +797,9 @@ function normalizeInput(args) {
   const dataTrainingOnlyInput = args['data-training-only'] !== undefined
     ? args['data-training-only']
     : (json.dataTrainingOnly ?? json.data_training_only ?? process.env.DATA_TRAINING_ONLY);
+  const refundOnlyInput = args['refund-only'] !== undefined
+    ? args['refund-only']
+    : (json.refundOnly ?? json.refund_only ?? process.env.REFUND_ONLY);
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -829,6 +832,7 @@ function normalizeInput(args) {
     enableDataTraining: normalizeBooleanInput(enableDataTrainingInput),
     disableDataTraining: normalizeBooleanInput(disableDataTrainingInput),
     dataTrainingOnly: normalizeBooleanInput(dataTrainingOnlyInput),
+    refundOnly: normalizeBooleanInput(refundOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
     purchase: {
@@ -895,14 +899,14 @@ function normalizeInput(args) {
   if ((input.enableDataTraining || input.disableDataTraining) && !input.dataTrainingOnly) {
     throw new Error('Data Training changes must run in dataTrainingOnly mode');
   }
-  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly, input.dataTrainingOnly].filter(Boolean).length > 1) {
-    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, and dataTrainingOnly cannot be combined');
+  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly, input.dataTrainingOnly, input.refundOnly].filter(Boolean).length > 1) {
+    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, and refundOnly cannot be combined');
   }
-  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly) && input.purchase.confirmed) {
-    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, or dataTrainingOnly');
+  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly || input.refundOnly) && input.purchase.confirmed) {
+    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, or refundOnly');
   }
-  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly)) {
-    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, or dataTrainingOnly');
+  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly || input.refundOnly)) {
+    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, or refundOnly');
   }
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
@@ -914,7 +918,7 @@ function normalizeInput(args) {
     throw new Error('purchase.amount/--purchase-amount or a complete purchase.rule is required when purchase is confirmed or prepared');
   }
   if (input.purchase.confirmed || input.preparePurchaseOnly) input.openPurchaseForVerification = true;
-  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly;
+  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly;
   if (needsCard && (!input.card.number || !input.card.expiry || !input.card.cvc)) {
     throw new Error('card.number, card.expiry, and card.cvc are required');
   }
@@ -3614,6 +3618,154 @@ async function getPurchaseModalState(page) {
   })()`);
 }
 
+async function refundOpenRouterTransactions(page) {
+  const refundableTransactions = await evaluate(page, `(() => {
+    const visible = (node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+    const buttons = [...document.querySelectorAll('button,[role="button"]')]
+      .filter((node) => visible(node) && !node.disabled && /^Refund$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label'))));
+    const occurrences = new Map();
+    return buttons.map((button) => {
+      const row = button.closest('tr,[role="row"]') || button.parentElement;
+      const rowText = normalize(row?.innerText || row?.textContent || '');
+      const occurrence = occurrences.get(rowText) || 0;
+      occurrences.set(rowText, occurrence + 1);
+      return {
+        rowText,
+        occurrence,
+        amount: (rowText.match(/\\$\\s*[0-9][\\d,]*(?:\\.\\d+)?/) || [''])[0],
+      };
+    });
+  })()`);
+
+  const refunded = [];
+  // 从末行向前处理；即使相同日期和金额的上一笔退款后从列表消失，也不会让后续索引顺延错位。
+  for (const transaction of [...refundableTransactions].reverse()) {
+    const click = await evaluate(page, `((target) => {
+      const visible = (node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+      const matches = [...document.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node) && !node.disabled && /^Refund$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label'))))
+        .filter((button) => normalize((button.closest('tr,[role="row"]') || button.parentElement)?.innerText || '') === target.rowText);
+      const button = matches[target.occurrence];
+      if (!button) return {clicked:false, reason:'refund_button_not_found'};
+      button.scrollIntoView({block:'center', inline:'center'});
+      button.click();
+      return {clicked:true};
+    })(${JSON.stringify(transaction)})`);
+    if (!click.clicked) {
+      throw new Error(`Refund button disappeared before it could be clicked: ${JSON.stringify(transaction)}`);
+    }
+
+    const deadline = Date.now() + 10000;
+    let feedback = null;
+    let confirmationAccepted = false;
+    while (Date.now() < deadline) {
+      feedback = await evaluate(page, `(() => {
+        const text = document.body?.innerText || '';
+        const visible = (node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+        const title = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
+          .find((node) => visible(node) && /^Confirm refund$/i.test(normalize(node.innerText || node.textContent || '')));
+        const accept = title && [...document.querySelectorAll('button,[role="button"]')]
+          .find((node) => visible(node) && !node.disabled
+            && /^Accept$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label')))
+            && ((button) => {
+              let ancestor = button.parentElement;
+              for (let depth = 0; ancestor && ancestor !== document.body && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+                if (ancestor.contains(title)) return true;
+              }
+              return false;
+            })(node));
+        return {
+          confirmationVisible: !!title,
+          acceptReady: !!accept,
+          initiated: /Refund initiated|Your refund has been created/i.test(text),
+          tail: text.slice(-1200),
+        };
+      })()`);
+      if (feedback.confirmationVisible) {
+        if (!feedback.acceptReady) {
+          // OpenRouter 会先显示 Checking refund details，此时 Accept 暂时禁用，等待其完成即可。
+          await sleep(250);
+          continue;
+        }
+        if (!confirmationAccepted) {
+          const accepted = await evaluate(page, `(() => {
+            const visible = (node) => {
+              const rect = node.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+            const title = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
+              .find((node) => visible(node) && /^Confirm refund$/i.test(normalize(node.innerText || node.textContent || '')));
+            const accept = title && [...document.querySelectorAll('button,[role="button"]')]
+              .find((node) => visible(node) && !node.disabled
+                && /^Accept$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label')))
+                && ((button) => {
+                  let ancestor = button.parentElement;
+                  for (let depth = 0; ancestor && ancestor !== document.body && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+                    if (ancestor.contains(title)) return true;
+                  }
+                  return false;
+                })(node));
+            if (!accept) return {clicked:false};
+            accept.click();
+            return {clicked:true};
+          })()`);
+          if (!accepted.clicked) throw new Error('Refund confirmation Accept button disappeared before it could be clicked');
+          confirmationAccepted = true;
+        }
+        await sleep(250);
+        continue;
+      }
+      if (confirmationAccepted || feedback.initiated) break;
+      await sleep(250);
+    }
+    if (!confirmationAccepted && !feedback?.initiated) {
+      throw new Error(`Refund confirmation Accept button did not become ready: ${feedback?.tail || ''}`);
+    }
+    refunded.push({
+      amount: transaction.amount,
+      occurrence: transaction.occurrence,
+      confirmationAccepted,
+      noticeVerified: feedback?.initiated === true,
+    });
+    await sleep(500);
+  }
+
+  // 退款后可能残留 0.01 美元以内的舍入余额，小于等于 0.01 即视为退款完成。
+  const balanceDeadline = Date.now() + CREDIT_BALANCE_READ_WAIT_MS;
+  let balanceState = null;
+  while (Date.now() < balanceDeadline) {
+    balanceState = await getCurrentCreditBalance(page, 1000);
+    if (balanceState.balance <= 0.01) break;
+    await sleep(250);
+  }
+  if (!Number.isFinite(balanceState?.balance) || balanceState.balance > 0.01) {
+    throw new Error(`Refund did not reduce OpenRouter credit balance to 0.01 or below: balance=${balanceState?.balance ?? 'unreadable'}`);
+  }
+
+  return {
+    verified: true,
+    status: refunded.length ? 'refunded' : 'already_zero',
+    refundableCount: refundableTransactions.length,
+    refundedCount: refunded.length,
+    afterBalance: balanceState.balance,
+    balanceSource: balanceState.source,
+    transactions: refunded,
+  };
+}
+
 async function getCurrentCreditBalance(page, timeoutMs = CREDIT_BALANCE_READ_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
@@ -5680,11 +5832,12 @@ async function run() {
       dataTrainingOnly: rawInput.dataTrainingOnly,
       enableDataTraining: rawInput.enableDataTraining,
       disableDataTraining: rawInput.disableDataTraining,
+      refundOnly: rawInput.refundOnly,
     },
   });
   const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
   input.debugPort ||= debugPortFromWs(input.browserWs);
-  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly;
+  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly;
   const {last4, masked} = bindsCard ? maskCard(input.card.number) : {last4: '', masked: ''};
   const expectedExpiry = bindsCard ? displayExpiry(input.card.expiry) : '';
   if (bindsCard && !last4) throw new Error('Could not determine card last4');
@@ -5712,7 +5865,7 @@ async function run() {
     writeDiagnostic(debugDir, 'dialog-auto-accept', {kind: 'dialog_auto_accept', dialogAutoAccept});
 	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
 	    let accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
-      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly && !input.dataTrainingOnly,
+      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly,
     }), page);
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
@@ -5721,6 +5874,19 @@ async function run() {
 	      throw new Error(`OpenRouter account mismatch: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
     }
     accountForRecovery = accountState.account;
+
+    if (input.refundOnly) {
+      const refund = await runLoggedStep('refund-openrouter-transactions', debugDir, () => refundOpenRouterTransactions(page), page);
+      return {
+        ok: true,
+        status: refund.refundedCount ? 'refund_completed' : 'refund_unchanged',
+        account: accountState.account,
+        launch: input.launch,
+        refund,
+        paymentMethodAction: refund.refundedCount ? `refunded_${refund.refundedCount}_transactions` : 'no_refundable_transactions',
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
 
     if (dataTrainingRequested) {
       const dataTrainingStepName = input.disableDataTraining ? 'disable-openrouter-data-training' : 'enable-openrouter-data-training';

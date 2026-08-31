@@ -81,6 +81,7 @@ export function runnerArgs(options = {}) {
     enableZdr: !!options.enableZdr,
     enableDataTraining: !!options.enableDataTraining,
     disableDataTraining: !!options.disableDataTraining,
+    refundOnly: !!options.refundOnly,
     autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
@@ -239,6 +240,7 @@ export function publicJob(row) {
       enableZdr: args.enableZdr,
       enableDataTraining: args.enableDataTraining,
       disableDataTraining: args.disableDataTraining,
+      refundOnly: args.refundOnly,
       scopeBillingAddress: args.scopeBillingAddress,
       scopePaymentMethod: args.scopePaymentMethod,
       scopePurchase: args.scopePurchase,
@@ -492,7 +494,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const scope = plan.executionScope(args);
   const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
   const dataTrainingOnly = scope.dataTraining && !scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
-  if (inactiveCardStatus && !zdrOnly && !dataTrainingOnly) {
+  const refundOnly = scope.refund && !scope.zdr && !scope.dataTraining && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  if (inactiveCardStatus && !zdrOnly && !dataTrainingOnly && !refundOnly) {
     const message = `OPOM card status ${inactiveCardStatus} is not ACTIVE; skipped recharge`;
     const details = {
       ...plan.rowMetadata(row, {automationLogDir}),
@@ -570,7 +573,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const dataTrainingOk = !dataTrainingRequested || (args.disableDataTraining
       ? /^(disabled|already_disabled)$/.test(details.dataTrainingStatus)
       : /^(enabled|already_enabled)$/.test(details.dataTrainingStatus));
-    let completed = purchaseOk && autoTopupOk && zdrOk && dataTrainingOk;
+    const refundOk = !args.refundOnly || outcome.result.refund?.verified === true;
+    let completed = purchaseOk && autoTopupOk && zdrOk && dataTrainingOk && refundOk;
     const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
     if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
       try {
@@ -751,6 +755,7 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
 }
 
 function completionMessage(args) {
+  if (args.refundOnly) return 'completed selected scope: refund';
   if (!args.scopePurchase) return `completed selected scope: ${plan.scopeSummary(args)}`;
   if (!args.confirmPurchase) return 'completed without purchase submission (test mode)';
   return 'completed';

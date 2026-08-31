@@ -283,6 +283,12 @@ const RULES = [
       || /^purchase\.verify/i.test(stage),
   },
   {
+    errorCode: 'refund_failed',
+    message: '退款操作失败',
+    matches: ({text, stage}) => /Refund was clicked|Refund confirmation|Confirm refund/i.test(text)
+      || /^refund\./i.test(stage),
+  },
+  {
     errorCode: 'auto_topup_action_unavailable',
     message: '自动充值入口未加载',
     matches: ({text}) => /Auto top-up (?:Enable|Manage) button not found/i.test(text),

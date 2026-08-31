@@ -232,6 +232,7 @@ export function safeAutoTopupPlan(row, args) {
 
 export function executionScope(args = {}) {
   return {
+    refund: !!args.refundOnly,
     zdr: !!args.disableZdr || !!args.enableZdr,
     dataTraining: !!args.enableDataTraining || !!args.disableDataTraining,
     billingAddress: args.scopeBillingAddress !== false,
@@ -246,10 +247,13 @@ export function validateScope(args = {}) {
   const missing = [];
   if (args.disableZdr && args.enableZdr) missing.push('execution_scope:zdr_action_conflict');
   if (args.enableDataTraining && args.disableDataTraining) missing.push('execution_scope:data_training_action_conflict');
-  if (scope.dataTraining && (scope.zdr || scope.billingAddress || scope.paymentMethod || scope.purchase || scope.autoTopup)) {
+  if (scope.refund && (scope.zdr || scope.dataTraining || scope.billingAddress || scope.paymentMethod || scope.purchase || scope.autoTopup)) {
+    missing.push('execution_scope:refund_must_run_alone');
+  }
+  if (scope.dataTraining && (scope.refund || scope.zdr || scope.billingAddress || scope.paymentMethod || scope.purchase || scope.autoTopup)) {
     missing.push('execution_scope:data_training_must_run_alone');
   }
-  if (!scope.zdr && !scope.dataTraining && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
+  if (!scope.refund && !scope.zdr && !scope.dataTraining && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup) {
     missing.push('execution_scope');
   }
   if (scope.billingAddress && !scope.paymentMethod && (scope.purchase || scope.autoTopup)) {
@@ -261,6 +265,7 @@ export function validateScope(args = {}) {
 export function scopeSummary(args = {}) {
   const scope = executionScope(args);
   const labels = [];
+  if (scope.refund) labels.push('refund');
   if (scope.zdr) labels.push('zdr');
   if (scope.dataTraining) labels.push('data_training');
   if (scope.billingAddress) labels.push('billing_address');
@@ -315,6 +320,7 @@ export function buildClosedLoopTask(row, args) {
     profileNo: adsPowerSerialNumber(row) || undefined,
     profileId: adsPowerUserId(row) || undefined,
     expectedAccount: loginEmail(row),
+    refundOnly: scope.refund,
     disableZdr: !!args.disableZdr,
     enableZdr: !!args.enableZdr,
     zdrOnly,

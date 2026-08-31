@@ -202,6 +202,9 @@ function validateEnabledSettings(settings, payload = {}) {
   if (payload.confirmAutomaticPurchase !== true) {
     throw httpError(409, '启用自动充值需要明确确认允许按 15/45 分自动创建真实充值任务');
   }
+  if (settings.options?.refundOnly) {
+    throw httpError(409, '仅退款属于人工专项操作，不允许加入自动充值定时任务');
+  }
   const args = runnerArgs({
     ...settings.options,
     opomWriteback: true,

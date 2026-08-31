@@ -164,6 +164,7 @@
   }
 
   function ruleText() {
+    if (el.refundOnly.checked) return '仅退款';
     if (el.dataTrainingOnly.checked) return '仅开启 Data Training';
     if (el.disableDataTrainingOnly.checked) return '仅关闭 Data Training';
     if (isZdrOnlyMode()) return '仅 ZDR';
@@ -191,8 +192,12 @@
     return el.dataTrainingOnly.checked || el.disableDataTrainingOnly.checked;
   }
 
+  function isRefundOnlyMode() {
+    return el.refundOnly.checked;
+  }
+
   function isConfigurationOnlyMode() {
-    return isZdrOnlyMode() || isDataTrainingOnlyMode();
+    return isZdrOnlyMode() || isDataTrainingOnlyMode() || isRefundOnlyMode();
   }
 
   function runtimeConfig() {
@@ -835,6 +840,7 @@
       enableZdr,
       enableDataTraining: el.dataTrainingOnly.checked,
       disableDataTraining: el.disableDataTrainingOnly.checked,
+      refundOnly: el.refundOnly.checked,
       removeExisting: !configurationOnly && hasCardCsv && !preserveExistingPaymentMethod,
       preserveExistingPaymentMethod,
       stopProfiles: true,
@@ -1194,6 +1200,10 @@
 
   async function toggleAutoRecharge() {
     const enabled = el.autoRechargeEnabled.checked;
+    if (enabled && el.refundOnly.checked) {
+      el.autoRechargeEnabled.checked = false;
+      throw new Error('仅退款属于人工专项操作，不支持自动定时执行');
+    }
     const confirmation = el.zdrOnly.checked
       ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
       : el.enableZdrOnly.checked
@@ -1266,6 +1276,7 @@
     el.enableZdrOnly.checked = false;
     el.dataTrainingOnly.checked = false;
     el.disableDataTrainingOnly.checked = false;
+    el.refundOnly.checked = false;
     el.skipMatch.checked = false;
     el.concurrency.value = '1';
     invalidatePreparation();
@@ -1339,8 +1350,8 @@
       renderControls();
     });
     function setConfigurationOnlyMode(activeId) {
-      // ZDR 和 Data Training 专项任务互斥，避免一次任务同时修改多组账号配置。
-      for (const id of ['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly']) {
+      // 所有专项任务互斥，避免一次任务同时执行退款和账号配置修改。
+      for (const id of ['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly', 'refundOnly']) {
         if (id !== activeId) el[id].checked = false;
       }
       // 专项操作不依赖充值前匹配，开启时同步采用用户已人工确认的匹配结果。
@@ -1360,6 +1371,9 @@
     });
     el.disableDataTrainingOnly.addEventListener('change', () => {
       setConfigurationOnlyMode(el.disableDataTrainingOnly.checked ? 'disableDataTrainingOnly' : '');
+    });
+    el.refundOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.refundOnly.checked ? 'refundOnly' : '');
     });
     el.skipMatch.addEventListener('change', () => {
       state.cardAllocationSignature = '';

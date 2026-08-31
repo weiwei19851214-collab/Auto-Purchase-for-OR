@@ -36,7 +36,7 @@ try {
     && /id=["']amountBelow["'][^>]*value=["']150["']/.test(html)
     && /id=["']amountAtOrAbove["'][^>]*value=["']20["']/.test(html)
     && /id=["']autoTopupThreshold["'][^>]*value=["']30["']/.test(html)
-    && /id=["']autoTopupAmount["'][^>]*value=["']150["']/.test(html), '145/150/20 auto=100/150');
+    && /id=["']autoTopupAmount["'][^>]*value=["']70["']/.test(html), '145/150/20 auto=30/70');
   add('auto top-up enable-only switch present', /id=["']autoTopupEnableOnly["'][^>]*role=["']switch["']/.test(html), 'present');
   add('preserve existing payment card switch present', /id=["']preserveExistingCard["'][^>]*role=["']switch["'][^>]*disabled/.test(html)
     && /preserveExistingPaymentMethod/.test(appJs)

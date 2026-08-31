@@ -174,7 +174,7 @@
   function autoTopupText() {
     if (isConfigurationOnlyMode()) return '跳过';
     if (el.autoTopupEnableOnly.checked) return '仅开启';
-    return `${numericValue(el.autoTopupThreshold, 100)}/${numericValue(el.autoTopupAmount, 150)}`;
+    return `${numericValue(el.autoTopupThreshold, 30)}/${numericValue(el.autoTopupAmount, 70)}`;
   }
 
   function zdrText() {
@@ -495,8 +495,8 @@
   function applyCurrentRules(rows = state.rows) {
     const rule = ruleValues();
     const onlyEnable = el.autoTopupEnableOnly.checked;
-    const topupThreshold = String(numericValue(el.autoTopupThreshold, 100));
-    const topupAmount = String(numericValue(el.autoTopupAmount, 150));
+    const topupThreshold = String(numericValue(el.autoTopupThreshold, 30));
+    const topupAmount = String(numericValue(el.autoTopupAmount, 70));
     return rows.map((row) => ({
       ...row,
       amount: '',
@@ -774,8 +774,8 @@
       balanceThreshold: String(rule.threshold),
       amountBelowThreshold: String(rule.below),
       amountAtOrAboveThreshold: String(rule.atOrAbove),
-      autoTopupThreshold: enableOnly ? '' : String(numericValue(el.autoTopupThreshold, 100)),
-      autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 150)),
+      autoTopupThreshold: enableOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
+      autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
     };
   }
 
@@ -842,8 +842,8 @@
       concurrency: String(clampInteger(el.concurrency, 1, 10, 1)),
       confirmPurchase: !configurationOnly,
       preparePurchaseOnly: false,
-      autoTopupThreshold: configurationOnly ? '' : String(numericValue(el.autoTopupThreshold, 100)),
-      autoTopupAmount: configurationOnly ? '' : String(numericValue(el.autoTopupAmount, 150)),
+      autoTopupThreshold: configurationOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
+      autoTopupAmount: configurationOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
       autoTopupEnableOnly: configurationOnly ? false : el.autoTopupEnableOnly.checked,
       cardProvider: 'EJH',
       ...runtimeConfig(),
@@ -1259,8 +1259,8 @@
     el.balanceThreshold.value = '145';
     el.amountBelow.value = '150';
     el.amountAtOrAbove.value = '20';
-    el.autoTopupThreshold.value = '100';
-    el.autoTopupAmount.value = '150';
+    el.autoTopupThreshold.value = '30';
+    el.autoTopupAmount.value = '70';
     el.autoTopupEnableOnly.checked = false;
     el.zdrOnly.checked = false;
     el.enableZdrOnly.checked = false;

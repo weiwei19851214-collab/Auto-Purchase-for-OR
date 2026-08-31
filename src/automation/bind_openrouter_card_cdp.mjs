@@ -3392,9 +3392,9 @@ async function waitUntilSaveModalCloses(page, payment, timeoutMs = SAVE_PAYMENT_
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
-    // 拒卡是保存后的支付结果，必须在 iframe 和主页面同时识别，保留其优先级高于超时恢复。
-    const paymentIssue = await detectPaymentIssue(page, payment);
-    if (paymentIssue.found) throw new Error(`payment_issue_card_declined: ${paymentIssue.message || 'Payment Issue'}`);
+    // 先检查主页面拒卡提示；保存成功后 Stripe iframe 会失效，不能让旧 iframe 阻塞 Purchase 页面识别。
+    const pagePaymentIssue = await detectPaymentIssue(page);
+    if (pagePaymentIssue.found) throw new Error(`payment_issue_card_declined: ${pagePaymentIssue.message || 'Payment Issue'}`);
     const state = await evaluate(page, `(() => {
       const text = document.body?.innerText || '';
       return {
@@ -3408,6 +3408,9 @@ async function waitUntilSaveModalCloses(page, payment, timeoutMs = SAVE_PAYMENT_
     lastState = state;
     if (state.challenge) throw new Error(`Security challenge visible: ${state.tail}`);
     if (!state.stillSaving && state.hasAddCredits) return state;
+    // 只有保存页仍存在时才读取 Stripe iframe，继续覆盖 iframe 内出现的拒卡提示。
+    const stripeFrameIssue = payment ? await detectPaymentIssue(payment) : {found: false};
+    if (stripeFrameIssue.found) throw new Error(`payment_issue_card_declined: ${stripeFrameIssue.message || 'Payment Issue'}`);
     await sleep(SLOW_DOM_POLL_MS);
   }
   throw new Error(`Save modal did not close after ${timeoutMs}ms: ${lastState?.tail || ''}`);
@@ -4460,8 +4463,11 @@ async function removeSavedPaymentMethodsFromPicker(page) {
     const state = await evaluate(page, `(() => {
         const text = document.body?.innerText || '';
         const removedCard = ${JSON.stringify(result.card)};
+        // 卡片按钮文本会被浏览器按行展示，统一空白后再判断，避免点击删除后立即误报“旧卡已消失”。
+        const normalizedText = text.replace(/\\s+/g, ' ').trim();
+        const normalizedRemovedCard = String(removedCard || '').replace(/\\s+/g, ' ').trim();
         return {
-          cardStillVisible: removedCard ? text.includes(removedCard) : false,
+          cardStillVisible: normalizedRemovedCard ? normalizedText.includes(normalizedRemovedCard) : false,
           hasSave: /Save payment method/.test(text),
           tail: text.slice(-1500),
         };
@@ -4648,11 +4654,12 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
   if (!isPaymentEntryStateReady(initial, expectedLast4) && !initial.canAddCredits && !initial.hasAddCredits) {
     throw new Error(`Payment method entry not ready after ${options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS}ms, refreshed once and retried; tail=${initial.tail || ''}`);
   }
-  if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
-    return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
-  }
+  // 删除旧卡后页面背景可能短暂残留旧卡文字；当前绑卡表单优先，确保重试会重新填写银行卡。
   if (initial.hasSavePaymentMethod || initial.hasCardFormText || initial.hasAddBillingAddress || initial.hasAddressForm) {
     return {alreadyBound: false, entry: 'already_open', state: initial};
+  }
+  if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
+    return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
   }
 
   if (initial.canAddPaymentMethod || initial.hasAddPaymentMethod) {

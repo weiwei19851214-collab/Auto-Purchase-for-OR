@@ -331,7 +331,9 @@ test('browser path removes a saved card through one semantic trash-button click'
   assert.doesNotMatch(script, /elementFromPoint/);
   const removalStart = script.indexOf('async function removeSavedPaymentMethodsFromPicker');
   const removalEnd = script.indexOf('async function openAddCreditsPaymentPath', removalStart);
-  assert.doesNotMatch(script.slice(removalStart, removalEnd), /for \(let i = 0; i < 8/);
+  const removalBody = script.slice(removalStart, removalEnd);
+  assert.doesNotMatch(removalBody, /for \(let i = 0; i < 8/);
+  assert.match(removalBody, /normalizedText\.includes\(normalizedRemovedCard\)/);
 });
 
 test('browser path keeps Stripe inspection fallback independent from saved-card removal', () => {
@@ -394,6 +396,13 @@ test('card save waits for the Saving state to finish before opening Purchase Cre
   assert.match(script, /const SAVE_PAYMENT_METHOD_WAIT_MS = 20000/);
   assert.match(saveWaitBody, /Save payment method\|\\\\bSaving\\\\b/);
   assert.match(saveWaitBody, /Save modal did not close after/);
+  assert.ok(saveWaitBody.indexOf('if (!state.stillSaving && state.hasAddCredits) return state;') < saveWaitBody.indexOf('const stripeFrameIssue'));
+});
+
+test('retry card binding prefers an already-open card form over stale saved-card text', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const entryBody = script.slice(script.indexOf('async function openPaymentMethodEntryPath'), script.indexOf('function isRetryablePageLoadError'));
+  assert.ok(entryBody.indexOf('initial.hasSavePaymentMethod || initial.hasCardFormText') < entryBody.indexOf('initial.purchase && initial.targetCardVisible'));
 });
 
 test('stalled card-save recovery refreshes and verifies the existing card without another Save click', () => {
@@ -616,7 +625,8 @@ test('browser path verifies Stripe card fields before saving payment method', ()
   assert.match(script, /ariaInvalid/);
   assert.match(script, /expiration.*date\|month\|year/);
   assert.match(script, /waitUntilSaveModalCloses\(page, payment\)/);
-  assert.match(script, /detectPaymentIssue\(page, payment\)/);
+  assert.match(script, /detectPaymentIssue\(page\)/);
+  assert.match(script, /detectPaymentIssue\(payment\)/);
   assert.doesNotMatch(script, /native_value_setter/);
   assert.match(script, /verify-stripe-card-before-save/);
   assert.match(script, /verify-stripe-card-before-save-retry/);

@@ -17,8 +17,10 @@ export function parseChildJson(stdout, stderr) {
 }
 
 export function runClosedLoopChild(bindScript, task, args) {
-  const childArgs = [bindScript, '--stdin', '--confirm-purchase', '--configure-auto-topup'];
-  if (args.removeExisting) childArgs.push('--remove-existing');
+  const childArgs = [bindScript, '--stdin'];
+  if (args.scopeAutoTopup) childArgs.push('--configure-auto-topup');
+  if (args.scopePurchase && args.confirmPurchase) childArgs.push('--confirm-purchase');
+  if (args.scopePaymentMethod && args.removeExisting) childArgs.push('--remove-existing');
   const child = spawnSync(process.execPath, childArgs, {
     input: JSON.stringify(task),
     encoding: 'utf8',

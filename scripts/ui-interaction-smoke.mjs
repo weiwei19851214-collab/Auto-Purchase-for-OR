@@ -8,13 +8,7 @@ import {redact} from '../src/server/redact.mjs';
 const SELECTOR_CSV = `login_email,ads_power_serial_number
 ui-smoke@example.com,1415
 `;
-
-const ADDRESS_CSV = `LastName,FirstName,Street,City,State,Zip,PhoneNumber
-Ignored,UI Smoke,1 Main St,Portland,OR,97001,5551112222
-`;
-
 const DEFAULT_PLAYWRIGHT_PATH = '/Users/weiwei/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
-
 const args = parseArgs(process.argv.slice(2));
 const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
@@ -25,6 +19,7 @@ function add(label, ok, status = '') {
 
 let browser;
 let tempDir = '';
+const popups = [];
 
 try {
   const playwright = await loadPlaywright();
@@ -32,14 +27,16 @@ try {
   if (!chromium) throw new Error('Loaded Playwright package does not expose chromium');
   tempDir = mkdtempSync(join(tmpdir(), 'recharge-ui-smoke-'));
   const csvPath = join(tempDir, 'selector.csv');
-  const addressCsvPath = join(tempDir, 'addresses.csv');
   writeFileSync(csvPath, SELECTOR_CSV, 'utf8');
-  writeFileSync(addressCsvPath, ADDRESS_CSV, 'utf8');
 
-  browser = await chromium.launch({headless: true});
+  browser = await launchChromium(chromium, {headless: true});
   const page = await browser.newPage({viewport: {width: 1440, height: 1200}});
   const consoleErrors = [];
   const pageErrors = [];
+  page.on('popup', async (popup) => {
+    popups.push(popup);
+    await popup.close().catch(() => {});
+  });
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
     const text = message.text();
@@ -48,63 +45,9 @@ try {
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  await page.goto(baseUrl, {waitUntil: 'networkidle'});
-  add('operator page loaded', (await page.title()) === 'OpenRouter 充值执行器', 'title_present');
-  add('Load OPOM group button visible', await page.locator('#opomReadyBtn').isVisible(), 'visible');
-  add('AdsPower match button visible', await page.locator('#adsPowerMatchBtn').isVisible(), 'visible');
-  add('AdsPower status writeback UI hidden', await page.locator('#adspowerStatusMode, #adspowerDiscoverTargetsBtn, #adspowerUseDiscoveredTargetsBtn').count() === 0, 'hidden');
-
-  await page.route('**/api/opom/ready', async (route) => {
-    if (route.request().method() !== 'POST') return route.fallback();
-    const payload = route.request().postDataJSON?.() || {};
-    const hasAddressCsv = Boolean(String(payload.addressCsvText || '').trim());
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        ok: true,
-        count: 1,
-        nextCursor: '',
-        addressMappingCount: hasAddressCsv ? 1 : 0,
-        csvText: '',
-        rows: [{
-          status: '',
-          opom_account_id: 'acct-ui-opom-1',
-          login_email: 'opom-ui-smoke@example.com',
-          ads_power_user_id: 'profile-ui-opom-1',
-          ads_power_serial_number: '1416',
-          ads_power_group_name: 'VIP',
-          opom_health_status: 'ok',
-          opom_health_reason: '',
-          ads_match_status: '',
-          order_no: '',
-          card_no: '',
-          exp_month: '',
-          exp_year: '',
-          cvv: '',
-          amount: '0',
-          postal_code: hasAddressCsv ? '97001' : '',
-          holder_name: hasAddressCsv ? 'UI Smoke' : '',
-          country: hasAddressCsv ? 'US' : '',
-          address_line1: hasAddressCsv ? '1 Main St' : '',
-          city: hasAddressCsv ? 'Portland' : '',
-          state: hasAddressCsv ? 'OR' : '',
-          balance_threshold: '40',
-          amount_below_threshold: '150',
-          amount_at_or_above_threshold: '100',
-          auto_topup_threshold: '100',
-          auto_topup_amount: '100',
-          idempotency_key: 'recharge_plan:acct-ui-opom-1:v1',
-        }],
-      }),
-    });
-  });
-
   await page.route('**/api/opom/resolve', async (route) => {
-    if (route.request().method() !== 'POST') return route.fallback();
     const payload = route.request().postDataJSON?.() || {};
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
-    const usesQueueFilter = payload.group === 'VIP' && payload.status === 'needs_recharge';
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -113,21 +56,18 @@ try {
         total: rows.length,
         matched: rows.length,
         failed: 0,
-        resolveSource: 'VIP/needs_recharge',
-        csvText: '',
+        resolveSource: `${payload.group}/${payload.status}`,
         rows: rows.map((row, index) => ({
           ...row,
           opom_account_id: `acct-ui-selector-${index + 1}`,
-          ads_power_user_id: row.ads_power_user_id || `profile-ui-selector-${index + 1}`,
-          opom_health_status: usesQueueFilter ? 'ok' : 'wrong_filter',
-          opom_health_reason: usesQueueFilter ? '' : 'resolve did not use selected queue filter',
+          opom_health_status: 'ok',
+          opom_health_reason: '',
         })),
       }),
     });
   });
 
   await page.route('**/api/adspower/match', async (route) => {
-    if (route.request().method() !== 'POST') return route.fallback();
     const payload = route.request().postDataJSON?.() || {};
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
     await route.fulfill({
@@ -136,11 +76,12 @@ try {
       body: JSON.stringify({
         ok: true,
         total: rows.length,
-        matched: rows.length,
-        failed: 0,
+        matched: 0,
+        failed: rows.length,
         results: rows.map((row, index) => ({
           index,
-          status: 'matched',
+          status: 'identity_mismatch',
+          error: 'AdsPower profile belongs to a different OpenRouter account',
           profile: {
             userId: row.ads_power_user_id || `profile-ui-selector-${index + 1}`,
             serialNumber: row.ads_power_serial_number,
@@ -151,61 +92,133 @@ try {
     });
   });
 
-  await page.click('#opomReadyBtn');
-  await page.waitForFunction(() => /group=VIP status=needs_recharge rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  const opomPreviewText = await page.locator('#opomPreviewBody').textContent();
-  add('Load OPOM group works without Billing CSV', /opom-ui-smoke/.test(opomPreviewText || '') && /missing_fields/.test(opomPreviewText || ''), 'loaded_with_missing_billing');
+  await page.goto(baseUrl, {waitUntil: 'networkidle'});
+  add('operator page loaded', (await page.title()) === 'OpenRouter 充值准备', 'title_present');
+  add('CSV source is default', await page.locator('[data-source="csv"].is-selected').count() === 1, 'csv_default');
+  add('OPOM source option visible', await page.locator('[data-source="opom"]').isVisible(), 'visible');
+  add('AdsPower match button visible', await page.locator('#matchButton').isVisible(), 'visible');
+  add('ZDR-only switch is visible and defaults off', await page.locator('#zdrOnly').isVisible()
+    && !(await page.locator('#zdrOnly').isChecked()), 'default_off');
+  await page.click('label.zdr-only-row');
+  const disabledScopeControls = await page.locator(
+    '#balanceThreshold:disabled, #amountBelow:disabled, #amountAtOrAbove:disabled, #autoTopupEnableOnly:disabled, #autoTopupThreshold:disabled, #autoTopupAmount:disabled, #cardFileButton:disabled, #billingState:disabled',
+  ).count();
+  add('ZDR-only forces ZDR on and disables recharge controls', await page.locator('#disableZdr').isChecked()
+    && await page.locator('#disableZdr').isDisabled()
+    && disabledScopeControls === 8, `disabled=${disabledScopeControls}`);
+  await page.click('label.zdr-only-row');
+  add('leaving ZDR-only restores normal controls', !(await page.locator('#disableZdr').isChecked())
+    && !(await page.locator('#disableZdr').isDisabled())
+    && !(await page.locator('#balanceThreshold').isDisabled()), 'restored');
+  add('ZDR enable-only switch is visible and defaults off', await page.locator('#enableZdrOnly').isVisible()
+    && !(await page.locator('#enableZdrOnly').isChecked()), 'default_off');
+  await page.click('#enableZdrOnly');
+  add('ZDR enable-only disables recharge controls without enabling the close action', !(await page.locator('#disableZdr').isChecked())
+    && await page.locator('#disableZdr').isDisabled()
+    && await page.locator('#balanceThreshold').isDisabled(), 'enable_only_scope');
+  await page.click('#enableZdrOnly');
 
-  await page.setInputFiles('#csvFile', csvPath);
-  await page.waitForFunction(() => /local selector rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('local selector CSV creates one canonical row before address upload', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
-  await page.click('#adsPowerMatchBtn');
-  await page.waitForFunction(() => /AdsPower matched=1 failed=0/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  const matchSummary = await page.locator('#opomSummary').textContent();
-  const previewAfterMatch = await page.locator('#opomPreviewBody').textContent();
-  add('local selector match completes AdsPower lookup', /AdsPower matched=1 failed=0/.test(matchSummary || '') && /OPOM resolved=1\/1/.test(matchSummary || '') && /source=VIP\/needs_recharge/.test(matchSummary || ''), 'matched=1_opom_resolved');
-  add('local selector OPOM health resolves through selected queue filter', /acct-ui-selector-1/.test(previewAfterMatch || '') && /completed/.test(previewAfterMatch || ''), 'opom_health=ok');
-  await page.setInputFiles('#addressMappingCsv', addressCsvPath);
-  await page.check('#confirmLive');
-  await page.click('#liveRunBtn');
-  await page.waitForFunction(() => {
-    const summary = document.querySelector('#dryRunSummary')?.textContent || '';
-    return /ready\s*[:=]\s*0|blocked\s*[:=]\s*1|missing_fields|缺/.test(summary);
+  await page.setInputFiles('#accountFile', csvPath);
+  await page.waitForFunction(() => /1 个账号/.test(document.querySelector('#detailTitle')?.textContent || ''));
+  add('local account CSV creates one canonical row', await page.locator('#matchBody tr').count() === 1, 'rows=1');
+  const previewBeforeMatch = await page.locator('#matchBody').textContent();
+  add('unmatched CSV row is neutral before AdsPower match', /-/.test(previewBeforeMatch || '') && await page.locator('#matchBody .pill.error').count() === 0, 'neutral_before_match');
+
+  await page.click('#selectAllRows');
+  add('header checkbox can cancel all selections', await page.locator('#matchBody .row-check:checked').count() === 0, 'cleared');
+  await page.click('#selectAllRows');
+  add('header checkbox can select all rows', await page.locator('#matchBody .row-check:checked').count() === 1, 'selected');
+
+  await page.click('#matchButton');
+  await page.waitForFunction(() => /失败/.test(document.querySelector('#matchBody')?.textContent || ''));
+  const previewAfterMatch = await page.locator('#matchBody').textContent();
+  add('AdsPower mismatch visible as error not percent', /失败/.test(previewAfterMatch || '') && !/%/.test(previewAfterMatch || ''), 'match_error');
+
+  add('start remains disabled for failed match', await page.locator('#startButton').isDisabled(), 'disabled');
+  add('confirmation dialog not opened for blocked row', !(await page.locator('#confirmDialog').evaluate((node) => node.open)), 'dialog_closed');
+  let zdrOnlyOptions = null;
+  await page.route('**/api/jobs/dry-run', async (route) => {
+    zdrOnlyOptions = route.request().postDataJSON?.()?.options || null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        planned: 1,
+        ready: 1,
+        blocked: 0,
+        skipped: 0,
+        liveConfirmationToken: 'ui-zdr-only-token',
+        rows: [],
+      }),
+    });
   });
-
-  const dryRunSummary = await page.locator('#dryRunSummary').textContent();
+  await page.click('label[for="skipMatch"], label.switch-row:has(#skipMatch)');
+  await page.click('label.zdr-only-row');
+  await page.click('#startButton');
+  await page.waitForFunction(() => document.querySelector('#confirmDialog')?.open === true);
+  add('ZDR-only dry-run payload skips every other scope', Boolean(zdrOnlyOptions)
+    && zdrOnlyOptions.disableZdr === true
+    && zdrOnlyOptions.scopeBillingAddress === false
+    && zdrOnlyOptions.scopePaymentMethod === false
+    && zdrOnlyOptions.scopePurchase === false
+    && zdrOnlyOptions.scopeAutoTopup === false
+    && zdrOnlyOptions.confirmPurchase === false
+    && zdrOnlyOptions.opomWriteback === false, JSON.stringify(zdrOnlyOptions || {}));
+  await page.locator('#confirmDialog .close-button').click();
+  let enableZdrOnlyOptions = null;
+  await page.route('**/api/jobs/dry-run', async (route) => {
+    enableZdrOnlyOptions = route.request().postDataJSON?.()?.options || null;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true,
+        planned: 1,
+        ready: 1,
+        blocked: 0,
+        skipped: 0,
+        liveConfirmationToken: 'ui-zdr-enable-only-token',
+        rows: [],
+      }),
+    });
+  });
+  await page.click('#enableZdrOnly');
+  await page.click('#startButton');
+  await page.waitForFunction(() => document.querySelector('#confirmDialog')?.open === true);
+  add('ZDR enable-only dry-run payload skips every other scope', Boolean(enableZdrOnlyOptions)
+    && enableZdrOnlyOptions.disableZdr === false
+    && enableZdrOnlyOptions.enableZdr === true
+    && enableZdrOnlyOptions.scopeBillingAddress === false
+    && enableZdrOnlyOptions.scopePaymentMethod === false
+    && enableZdrOnlyOptions.scopePurchase === false
+    && enableZdrOnlyOptions.scopeAutoTopup === false
+    && enableZdrOnlyOptions.confirmPurchase === false
+    && enableZdrOnlyOptions.opomWriteback === false, JSON.stringify(enableZdrOnlyOptions || {}));
+  await page.locator('#confirmDialog .close-button').click();
   const bodyText = await page.locator('body').textContent();
-  add('blocked auto preflight summary rendered', /ready\s*[:=]\s*0|blocked\s*[:=]\s*1|missing_fields|缺/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('blocked auto preflight stays local-only', !(await page.locator('#confirmLive').isChecked()), 'live_confirmation_reset');
-  add('UI text redaction after auto preflight', !containsSensitive(bodyText), 'no_sensitive_values');
+  add('UI text redaction after auto dry-run', !containsSensitive(bodyText), 'no_sensitive_values');
   add('no browser console errors', consoleErrors.length === 0, consoleErrors.length ? redact(consoleErrors.join(' | ')) : 'none');
   add('no page runtime errors', pageErrors.length === 0, pageErrors.length ? redact(pageErrors.join(' | ')) : 'none');
 } catch (error) {
   add('ui interaction smoke exception', false, redact(error.message || 'unknown error'));
 } finally {
+  for (const popup of popups) await popup.close().catch(() => {});
   if (browser) await browser.close();
   if (tempDir) rmSync(tempDir, {recursive: true, force: true});
 }
 
 const failed = checks.filter((check) => !check.ok);
 const result = {ok: failed.length === 0, failed: failed.length, baseUrl, checks};
-if (args.json) {
-  console.log(JSON.stringify(result, null, 2));
-} else {
-  for (const check of checks) {
-    console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
-  }
+if (args.json) console.log(JSON.stringify(result, null, 2));
+else {
+  for (const check of checks) console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
   console.log(result.ok ? 'ui interaction smoke passed' : `ui interaction smoke failed: ${failed.length} check(s)`);
 }
 process.exitCode = result.ok ? 0 : 1;
 
 async function loadPlaywright() {
-  const candidates = [
-    process.env.PLAYWRIGHT_IMPORT_PATH || '',
-    DEFAULT_PLAYWRIGHT_PATH,
-    'playwright',
-  ].filter(Boolean);
-
+  const candidates = [process.env.PLAYWRIGHT_IMPORT_PATH || '', DEFAULT_PLAYWRIGHT_PATH, 'playwright'].filter(Boolean);
   const errors = [];
   for (const candidate of candidates) {
     try {
@@ -222,18 +235,26 @@ async function loadPlaywright() {
   throw new Error(`Unable to load Playwright. Set PLAYWRIGHT_IMPORT_PATH. ${errors.join(' | ')}`);
 }
 
+async function launchChromium(chromium, options) {
+  const executablePath = String(process.env.PLAYWRIGHT_EXECUTABLE_PATH || '').trim();
+  if (executablePath) return chromium.launch({...options, executablePath});
+  try {
+    return await chromium.launch(options);
+  } catch (error) {
+    if (!/Executable doesn't exist|browser executable/i.test(error.message || '')) throw error;
+    return chromium.launch({...options, channel: 'chrome'});
+  }
+}
+
 function parseArgs(argv) {
   const parsed = {base: '', json: false};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--json') {
-      parsed.json = true;
-    } else if (arg === '--base') {
+    if (arg === '--json') parsed.json = true;
+    else if (arg === '--base') {
       parsed.base = argv[index + 1] || '';
       index += 1;
-    } else if (arg.startsWith('--base=')) {
-      parsed.base = arg.split('=').slice(1).join('=');
-    }
+    } else if (arg.startsWith('--base=')) parsed.base = arg.split('=').slice(1).join('=');
   }
   return parsed;
 }

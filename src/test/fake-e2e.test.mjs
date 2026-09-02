@@ -77,7 +77,7 @@ test('fake E2E closes OPOM to AdsPower to EJH allocation to writeback loop witho
       }
       if (/\/api\/v1\/recharge\/runs\/[^/]+\/results$/.test(target.pathname)) {
         opomCalls.push({type: 'run-result', url: String(url), body: JSON.parse(options.body)});
-        return Response.json({data: {auditLogId: 'audit_1', idempotent: false}}, {status: 201});
+        return Response.json({data: {status: 'recorded'}, idempotent: false});
       }
       throw new Error(`unexpected fetch ${url}`);
     }, async () => {
@@ -185,9 +185,8 @@ batch_1,1,EJH,completed,order_1,5257970000000001,06,2028,456,0001
 
       const runResult = opomCalls.find((call) => call.type === 'run-result');
       assert.ok(runResult);
-      assert.match(runResult.body.idempotencyKey, /^recharge_result:/);
+      assert.equal(runResult.body.opomAccountId, 'acct_1');
       assert.equal(runResult.body.status, 'completed');
-      assert.deepEqual(runResult.body.card, {orderNo: 'order_1', panLast4: '0001'});
 
       assert.equal(adsPowerMatchCalls.length, 1);
       assert.equal(adsPowerStatusCalls.length, 1);

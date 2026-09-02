@@ -14,7 +14,10 @@ export const BIND_SCRIPT = join(AUTOMATION_DIR, 'bind_openrouter_card_cdp.mjs');
 export const BATCH_SCRIPT = join(AUTOMATION_DIR, 'batch_recharge_openrouter_cards_cdp.mjs');
 
 export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4100);
-export const DEFAULT_ROW_TIMEOUT_MS = Number(process.env.ROW_TIMEOUT_MS || 600000);
+// 单行主流程最多 175 秒，预留 5 秒终止子进程并关闭 AdsPower，保证总时长不超过 3 分钟。
+export const MAX_ROW_TIMEOUT_MS = 175000;
+export const DEFAULT_ROW_TIMEOUT_MS = Math.min(Number(process.env.ROW_TIMEOUT_MS || MAX_ROW_TIMEOUT_MS), MAX_ROW_TIMEOUT_MS);
+export const AUTOMATION_LOG_RETENTION_HOURS = Number(process.env.AUTOMATION_LOG_RETENTION_HOURS || 48);
 
 export const LIVE_STATUSES = new Set([
   'queued',

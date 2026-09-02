@@ -2,6 +2,7 @@ import {mkdirSync} from 'node:fs';
 import {DatabaseSync} from 'node:sqlite';
 import {DATA_DIR, DB_PATH} from './config.mjs';
 import {nowIso} from './ids.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 
 export function openDatabase(path = DB_PATH) {
   mkdirSync(DATA_DIR, {recursive: true});
@@ -51,16 +52,26 @@ function migrate(db) {
       ejh_order_no TEXT NOT NULL DEFAULT '',
       card_no TEXT NOT NULL DEFAULT '',
       card_last4 TEXT NOT NULL DEFAULT '',
+      payment_method_action TEXT NOT NULL DEFAULT '',
+      card_provider TEXT NOT NULL DEFAULT '',
+      card_type TEXT NOT NULL DEFAULT '',
+      expires_at TEXT NOT NULL DEFAULT '',
       purchase_plan TEXT NOT NULL DEFAULT '',
       amount TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL,
       stage TEXT NOT NULL DEFAULT '',
+      error_code TEXT NOT NULL DEFAULT '',
       message TEXT NOT NULL DEFAULT '',
+      error_detail TEXT NOT NULL DEFAULT '',
       missing_json TEXT NOT NULL DEFAULT '[]',
       purchase_status TEXT NOT NULL DEFAULT '',
       purchase_amount TEXT NOT NULL DEFAULT '',
       balance_before TEXT NOT NULL DEFAULT '',
       balance_after TEXT NOT NULL DEFAULT '',
+      zdr_status TEXT NOT NULL DEFAULT '',
+      zdr_changed TEXT NOT NULL DEFAULT '',
+      data_training_status TEXT NOT NULL DEFAULT '',
+      data_training_changed TEXT NOT NULL DEFAULT '',
       auto_topup_status TEXT NOT NULL DEFAULT '',
       auto_topup_threshold TEXT NOT NULL DEFAULT '',
       auto_topup_amount TEXT NOT NULL DEFAULT '',
@@ -92,6 +103,18 @@ function migrate(db) {
       path TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS scheduler_state (
+      id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      last_slot TEXT NOT NULL DEFAULT '',
+      last_run_at TEXT NOT NULL DEFAULT '',
+      next_run_at TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'disabled',
+      message TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
   `);
   const columns = db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name);
   if (!columns.includes('options_json')) {
@@ -109,13 +132,53 @@ function migrate(db) {
     'ads_match_status',
     'ejh_order_no',
     'card_no',
+    'payment_method_action',
+    'card_provider',
+    'card_type',
+    'expires_at',
+    'zdr_status',
+    'zdr_changed',
+    'data_training_status',
+    'data_training_changed',
     'opom_card_writeback_status',
     'opom_result_writeback_status',
     'adspower_tag_status',
     'adspower_status_mode',
     'adspower_status_target',
     'adspower_status_reason',
+    'error_code',
+    'error_detail',
   ]) addRowColumn(name);
+  backfillSimplifiedRowErrors(db);
+}
+
+function backfillSimplifiedRowErrors(db) {
+  const rows = db.prepare(`
+    SELECT id, status, stage, message, error_code, error_detail
+    FROM job_rows
+    WHERE status IN (
+      'failed', 'missing_fields', 'login_required', 'identity_mismatch',
+      'payment_issue_card_declined', 'manual_security_blocker', 'purchase_unverified'
+    )
+      AND (
+        error_code = ''
+        OR error_detail = ''
+        OR error_code IN ('auto_topup_not_enabled', 'auto_topup_manage_missing')
+      )
+  `).all();
+  if (!rows.length) return;
+  const update = db.prepare(`
+    UPDATE job_rows
+    SET error_code = ?, message = ?, error_detail = ?
+    WHERE id = ?
+  `);
+  for (const row of rows) {
+    const error = simplifyError(row.error_detail || row.message, {
+      status: row.status,
+      stage: row.stage,
+    });
+    update.run(error.errorCode, error.message, error.detail, row.id);
+  }
 }
 
 export function addEvent(db, jobId, type, message = '', data = {}, rowId = '') {
@@ -183,7 +246,8 @@ export function updateJobCounts(db, jobId) {
 
 export function recoverInterruptedWork(db) {
   const now = nowIso();
-  const message = 'server restarted during row execution; verify balance before rerun';
+  const detail = 'server restarted during row execution; verify balance before rerun';
+  const error = simplifyError(detail, {status: 'purchase_unverified', stage: 'worker.interrupted'});
   const runningRows = db.prepare(`
     SELECT id, job_id FROM job_rows
     WHERE status = 'running'
@@ -194,13 +258,18 @@ export function recoverInterruptedWork(db) {
       UPDATE job_rows
       SET status = 'purchase_unverified',
         stage = 'worker.interrupted',
+        error_code = ?,
         message = ?,
+        error_detail = ?,
         finished_at = COALESCE(finished_at, ?),
         updated_at = ?
       WHERE status = 'running'
-    `).run(message, now, now);
+    `).run(error.errorCode, error.message, error.detail, now, now);
     for (const row of runningRows) {
-      addEvent(db, row.job_id, 'row.interrupted', message, {}, row.id);
+      addEvent(db, row.job_id, 'row.interrupted', error.message, {
+        errorCode: error.errorCode,
+        errorDetail: error.detail,
+      }, row.id);
     }
   }
 

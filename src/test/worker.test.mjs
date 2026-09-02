@@ -74,10 +74,63 @@ test('worker records row exceptions and continues safe batches', async () => {
     assert.equal(details.job.status, 'completed');
     assert.equal(details.rows[0].status, 'failed');
     assert.equal(details.rows[0].stage, 'automation');
-    assert.match(details.rows[0].message, /simulated browser process exited/);
+    assert.equal(details.rows[0].errorCode, 'automation_failed');
+    assert.equal(details.rows[0].message, '自动化执行失败');
+    assert.match(details.rows[0].errorDetail, /simulated browser process exited/);
     assert.equal(details.rows[1].status, 'completed');
     assert.equal(details.events.some((event) => event.type === 'row.error'), true);
     assert.equal(existsSync(getJob(db, created.job.id).result_csv_path), true);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('worker clears the unused CSV card from preserved-card row state and result CSV', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-preserved-card-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {preserveExistingPaymentMethod: true};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_STATUS_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_STATUS_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async () => ({
+        status: 'completed',
+        stage: 'closed_loop.complete',
+        message: 'completed',
+        details: {
+          purchaseStatus: 'verified',
+          purchaseAmount: '10',
+          balanceBefore: '20',
+          balanceAfter: '30',
+          cardLast4: '4321',
+          paymentMethodAction: 'existing_preserved',
+          autoTopupStatus: 'updated',
+          autoTopupThreshold: '2',
+          autoTopupAmount: '25',
+        },
+        safeToContinue: true,
+        stopProfile: true,
+        profileStop: {attempted: false},
+      }),
+    });
+
+    await worker.runJob(created.job.id);
+
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].status, 'completed');
+    assert.equal(details.rows[0].paymentMethodAction, 'existing_preserved');
+    assert.equal(details.rows[0].cardNo, '');
+    assert.equal(details.rows[0].ejhOrderNo, '');
+    assert.equal(details.rows[0].cardLast4, '4321');
+    const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.match(resultCsv, /existing_preserved/);
+    assert.doesNotMatch(resultCsv, /5257970000000001|order_1/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -142,11 +195,16 @@ test('worker continues later rows after manual security blocker', async () => {
   }
 });
 
-test('worker runs queued rows concurrently when job concurrency is greater than one', async () => {
+test('worker runs payment-method rows concurrently when job concurrency is greater than one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-concurrency-'));
   try {
     const db = openDatabase(join(dir, 'test.sqlite'));
-    const options = {concurrency: 2};
+    const options = {
+      concurrency: 2,
+      scopePaymentMethod: true,
+      scopeBillingAddress: false,
+      scopeAutoTopup: false,
+    };
     const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: TWO_ROW_CSV, options});
     const created = await createJob(db, {
       fileName: 'account.csv',
@@ -238,9 +296,11 @@ test('worker writes OPOM failure result when an unexpected row exception occurs'
     assert.equal(calls[0].url, `http://opom.local/api/v1/recharge/runs/${created.job.id}/results`);
     assert.equal(calls[0].body.opomAccountId, 'acct_1');
     assert.equal(calls[0].body.status, 'failed');
-    assert.equal(calls[0].body.errorCode, 'failed');
+    assert.equal(calls[0].body.errorCode, 'automation_failed');
+    assert.equal(calls[0].body.errorMessage, '自动化执行失败');
     assert.match(calls[0].body.idempotencyKey, new RegExp(`^recharge_result:${created.job.id}:2:1:failed:worker\\.exception$`));
-    assert.doesNotMatch(JSON.stringify(calls[0].body), /5257970000000001|cvv=456|token=secret/);
+    assert.equal(calls[0].body.card.cardNo, '5257970000000001');
+    assert.doesNotMatch(JSON.stringify(calls[0].body), /cvv=456|token=secret/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -310,6 +370,52 @@ test('worker writes AdsPower status through injected fetch after row completion'
   }
 });
 
+test('worker lazily updates AdsPower user id and serial number from row outcome details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-adspower-lazy-id-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const csv = `status,login_email,ads_power_serial_number,ads_match_status,amount,card_number,exp_month,exp_year,cvv,postal_code,auto_topup_threshold,auto_topup_amount
+,first@example.com,1415,matched,10,5257970000000001,06,28,456,97001,2,25
+`;
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: csv});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: csv,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async () => ({
+        status: 'completed',
+        stage: 'closed_loop.complete',
+        message: 'completed',
+        details: {
+          adsPowerUserId: 'profile_lazy_1',
+          adsPowerSerialNumber: '1415',
+          purchaseStatus: 'verified',
+          purchaseAmount: '10',
+          balanceBefore: '20',
+          balanceAfter: '30',
+          cardLast4: '0001',
+          autoTopupStatus: 'updated',
+          autoTopupThreshold: '2',
+          autoTopupAmount: '25',
+        },
+        safeToContinue: true,
+        stopProfile: true,
+        profileStop: {attempted: false},
+      }),
+    });
+
+    await worker.runJob(created.job.id);
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.rows[0].adsPowerUserId, 'profile_lazy_1');
+    assert.equal(details.rows[0].adsPowerSerialNumber, '1415');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('recovery blocks interrupted running work and rewrites sanitized result CSV', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-recovery-'));
   try {
@@ -340,7 +446,9 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     assert.equal(details.job.status, 'blocked');
     assert.equal(details.rows[0].status, 'purchase_unverified');
     assert.equal(details.rows[0].stage, 'worker.interrupted');
-    assert.match(details.rows[0].message, /server restarted during row execution/);
+    assert.equal(details.rows[0].errorCode, 'worker_interrupted');
+    assert.equal(details.rows[0].message, '执行中断，结果待确认');
+    assert.match(details.rows[0].errorDetail, /server restarted during row execution/);
     assert.equal(details.events.some((event) => event.type === 'row.interrupted'), true);
     assert.equal(details.events.some((event) => event.type === 'job.recovered_blocked'), true);
 
@@ -349,7 +457,9 @@ test('recovery blocks interrupted running work and rewrites sanitized result CSV
     assert.equal(existsSync(job.result_csv_path), true);
     const resultCsv = readFileSync(job.result_csv_path, 'utf8');
     assert.match(resultCsv, /purchase_unverified/);
-    assert.match(resultCsv, /server restarted during row execution/);
+    assert.match(resultCsv, /worker_interrupted/);
+    assert.match(resultCsv, /执行中断，结果待确认/);
+    assert.doesNotMatch(resultCsv, /server restarted during row execution/);
     assert.doesNotMatch(resultCsv, /,456,|card_number|cvv/i);
   } finally {
     rmSync(dir, {recursive: true, force: true});

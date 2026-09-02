@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server/index.mjs",
+    "start": "node src/server/start.mjs",
     "test": "node --test src/test/*.test.mjs",
     "check": "find src scripts public \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check",
     "preflight:production": "node scripts/production-preflight.mjs",

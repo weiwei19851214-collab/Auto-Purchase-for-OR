@@ -19,10 +19,12 @@ import {adsPowerDefaults, stopProfile} from './lib/adspower.mjs';
 import {runClosedLoopChild} from './lib/child-runner.mjs';
 import {defaultOutputCsv, ensureColumns, padRows, parseCsv, rowObject, stringifyCsv} from './lib/csv.mjs';
 import {cardLast4, normalizeMoneyValue, redact} from './lib/common.mjs';
+import {simplifyError} from './lib/error-message-contract.mjs';
 import {
   baseRowResult,
   buildClosedLoopTask,
   dryRunResult,
+  adsPowerProfileIdentifier,
   isEligible,
   requiredColumns,
   resultColumns,
@@ -51,7 +53,7 @@ Options:
   --auto-topup-amount N      fallback Auto top-up amount when row column is empty
   --stop-profiles            stop each profile after non-security completion/failure; default true
   --keep-profiles-open       do not stop profiles automatically
-  --row-timeout-ms N         max runtime per child row; default 600000
+  --row-timeout-ms N         max runtime per child row; default 180000
   --verbose                  include child stdout/stderr tails in redacted summary
 
 This runner is one closed-loop business action. It does not expose a separate
@@ -69,7 +71,7 @@ function parseArgs(argv) {
     autoTopupThreshold: '',
     autoTopupAmount: '',
     stopProfiles: true,
-    rowTimeoutMs: 600000,
+    rowTimeoutMs: 180000,
     verbose: false,
     ...defaults,
   };
@@ -174,16 +176,16 @@ function makeSummary(args, plan, dataRows, outputCsv) {
   };
 }
 
-async function closeOtherProfiles(args, currentProfileNo, plannedProfileNos, processedProfileNos) {
+async function closeOtherProfiles(args, currentProfileIdentifier, plannedProfileIdentifiers, processedProfileIdentifiers) {
   if (!args.stopProfiles) return;
-  for (const profileNo of plannedProfileNos) {
-    if (profileNo !== String(currentProfileNo || '')) {
-      await stopProfile(args, profileNo);
+  for (const profileIdentifier of plannedProfileIdentifiers) {
+    if (profileIdentifier.value !== String(currentProfileIdentifier.value || '')) {
+      await stopProfile(args, profileIdentifier);
     }
   }
-  for (const profileNo of [...processedProfileNos]) {
-    if (String(profileNo) !== String(currentProfileNo || '')) {
-      await stopProfile(args, profileNo);
+  for (const profileIdentifier of processedProfileIdentifiers.values()) {
+    if (String(profileIdentifier.value) !== String(currentProfileIdentifier.value || '')) {
+      await stopProfile(args, profileIdentifier);
     }
   }
 }
@@ -194,15 +196,30 @@ function isCompleted(details) {
 
 async function processLiveRow({args, header, dataRows, item, summary, plannedProfileNos, processedProfileNos}) {
   const {index, rowNumber, row} = item;
-  await closeOtherProfiles(args, row.ID, plannedProfileNos, processedProfileNos);
+  const profileIdentifier = adsPowerProfileIdentifier(row);
+  await closeOtherProfiles(args, profileIdentifier, plannedProfileNos, processedProfileNos);
 
   const csvRow = dataRows[index];
   const missing = validateRow(row, args);
   const baseResult = baseRowResult(rowNumber, row);
   if (missing.length) {
+    const error = simplifyError(missing.join(','), {
+      status: STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+    });
     summary.blocked += 1;
-    summary.results.push({...baseResult, status: STATUSES.MISSING_FIELDS, missing});
-    writeOutcome(header, csvRow, STATUSES.MISSING_FIELDS, missing.join(','), {cardLast4: cardLast4(row.card_number)});
+    summary.results.push({
+      ...baseResult,
+      status: STATUSES.MISSING_FIELDS,
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
+      missing,
+    });
+    writeOutcome(header, csvRow, STATUSES.MISSING_FIELDS, error.message, {
+      errorCode: error.errorCode,
+      cardLast4: cardLast4(row.card_number),
+    });
     return;
   }
 
@@ -216,14 +233,20 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
     const completed = isCompleted(details);
     if (completed) summary.completed += 1;
     else summary.failed += 1;
-    if (args.stopProfiles) profileStop = await stopProfile(args, row.ID);
-    processedProfileNos.add(row.ID);
+    if (args.stopProfiles) profileStop = await stopProfile(args, profileIdentifier);
+    if (profileIdentifier.value) processedProfileNos.set(profileIdentifier.value, profileIdentifier);
 
     const status = completed ? STATUSES.COMPLETED : STATUSES.PURCHASE_UNVERIFIED;
     const statusContract = completed ? completedRecord(details) : {
       ...classifyError('purchase_unverified: purchase or auto top-up was not fully verified'),
       evidence: details,
     };
+    const error = completed
+      ? {errorCode: '', message: 'completed', detail: ''}
+      : simplifyError('purchase_unverified: purchase or auto top-up was not fully verified', {
+        status,
+        stage: statusContract.stage,
+      });
     summary.results.push({
       ...baseResult,
       status,
@@ -233,28 +256,43 @@ async function processLiveRow({args, header, dataRows, item, summary, plannedPro
       balanceBefore: details.balanceBefore,
       balanceAfter: details.balanceAfter,
       autoTopupStatus: details.autoTopupStatus,
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
       profileStop,
     });
-    writeOutcome(header, csvRow, status, completed ? 'completed' : 'purchase or auto top-up was not fully verified', details);
+    writeOutcome(header, csvRow, status, error.message, {
+      ...details,
+      errorCode: error.errorCode,
+    });
     return;
   }
 
   const statusContract = classifyError(outcome.error);
   if (statusContract.status === STATUSES.FAILED) summary.failed += 1;
   else summary.blocked += 1;
-  if (args.stopProfiles && statusContract.stopProfile) profileStop = await stopProfile(args, row.ID);
-  if (statusContract.stopProfile) processedProfileNos.add(row.ID);
+  if (args.stopProfiles && statusContract.stopProfile) profileStop = await stopProfile(args, profileIdentifier);
+  if (statusContract.stopProfile && profileIdentifier.value) processedProfileNos.set(profileIdentifier.value, profileIdentifier);
 
   const redactedError = redact(outcome.error);
+  const error = simplifyError(redactedError, {
+    status: statusContract.status,
+    stage: statusContract.stage,
+  });
   summary.results.push({
     ...baseResult,
     status: statusContract.status,
     stage: statusContract.stage,
-    error: redactedError,
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     profileStop,
     ...(outcome.child ? {child: outcome.child} : {}),
   });
-  writeOutcome(header, csvRow, statusContract.status, redactedError, {cardLast4: cardLast4(row.card_number)});
+  writeOutcome(header, csvRow, statusContract.status, error.message, {
+    errorCode: error.errorCode,
+    cardLast4: cardLast4(row.card_number),
+  });
   if (!statusContract.safeToContinueBatch) {
     summary.halted = true;
   }
@@ -272,8 +310,11 @@ async function main() {
     return;
   }
 
-  const plannedProfileNos = new Set(plan.map(({row}) => row.ID).filter(Boolean).map(String));
-  const processedProfileNos = new Set();
+  const plannedProfileNos = [...new Map(plan
+    .map(({row}) => adsPowerProfileIdentifier(row))
+    .filter((identifier) => identifier.value)
+    .map((identifier) => [identifier.value, identifier])).values()];
+  const processedProfileNos = new Map();
   for (const item of plan) {
     await processLiveRow({args, header, dataRows, item, summary, plannedProfileNos, processedProfileNos});
     if (summary.halted) break;

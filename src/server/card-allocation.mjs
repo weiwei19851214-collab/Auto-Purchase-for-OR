@@ -8,12 +8,13 @@ import {canonicalCsvFromRows} from './opom-orchestrator.mjs';
 const RAW_EJH_FIELDS = new Set(['requestPayload', 'encryptedParam', 'rawResponse']);
 const DEFAULT_BILLING_FIELDS = ['postal_code', 'holder_name', 'country', 'address_line1', 'city', 'state'];
 
-export function cardAllocationEligibleRows(rows = []) {
+export function cardAllocationEligibleRows(rows = [], {skipAdsPowerMatch = false} = {}) {
   return rows
     .map((row, index) => ({row, index}))
     .filter(({row}) => {
       const opomAccountId = row.opom_account_id || row.opomAccountId;
       const matchStatus = row.ads_match_status || row.adsMatchStatus || '';
+      if (skipAdsPowerMatch) return Boolean(row.ads_power_user_id || row.adsPowerUserId || row.ads_power_serial_number || row.adsPowerSerialNumber || row.ID);
       if (!opomAccountId && !matchStatus) return true;
       return matchStatus === 'matched';
     });
@@ -52,6 +53,10 @@ function expiryParts(row) {
   return {month: '', year: ''};
 }
 
+function expiryValue(row) {
+  return firstValue(row, ['expires_at', 'validityDate', 'validity_date', 'expiry', 'expires']);
+}
+
 export function parseSafeCardCsv(cardCsvText = '') {
   const parsed = csv.parseCsv(cardCsvText);
   if (parsed.length < 2) return [];
@@ -69,6 +74,9 @@ export function parseSafeCardCsv(cardCsvText = '') {
       openStatus: status,
       orderNo: firstValue(source, ['order_no', 'orderNo']),
       cardNo,
+      provider: firstValue(source, ['card_provider', 'cardProvider', 'provider']),
+      cardType: firstValue(source, ['card_type', 'cardType', 'card_product', 'cardProduct']),
+      expiresAt: expiryValue(source),
       expMonth: expiry.month,
       expYear: expiry.year,
       cvv: firstValue(source, ['cvv', 'cvvPassword']),
@@ -91,33 +99,39 @@ function validateUsableCard(card) {
   return missing;
 }
 
-export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) {
+export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) throw new Error('rows are required for card allocation');
-  const eligibleRows = cardAllocationEligibleRows(rows);
-  if (!eligibleRows.length) {
-    throw new Error('No rows are eligible for card allocation; run AdsPower match first and resolve failed matches');
-  }
+  const eligibleRows = cardAllocationEligibleRows(rows, options);
   const cards = parseSafeCardCsv(cardCsvText);
-  const usableCards = [];
   const rejectedCards = [];
   for (const card of cards) {
     const missing = validateUsableCard(card);
     if (missing.length) rejectedCards.push({...card, missing});
-    else usableCards.push(card);
   }
-  if (usableCards.length < eligibleRows.length) {
-    throw new Error(`Not enough completed EJH cards for allocation: rows=${eligibleRows.length}, cards=${usableCards.length}`);
+  if (cards.length < rows.length) {
+    throw new Error(`Not enough EJH card rows for positional allocation: rows=${rows.length}, cards=${cards.length}`);
+  }
+  const pairedCards = cards.slice(0, rows.length);
+  const invalidPairIndex = pairedCards.findIndex((card) => validateUsableCard(card).length > 0);
+  if (invalidPairIndex >= 0) {
+    const card = pairedCards[invalidPairIndex];
+    const missing = validateUsableCard(card);
+    throw new Error(
+      `Card CSV row ${card.sourceRowNumber || invalidPairIndex + 1} cannot be paired with account row ${invalidPairIndex + 1}: missing ${missing.join(', ')}`,
+    );
   }
 
-  let cardIndex = 0;
-  const eligibleIndexes = new Set(eligibleRows.map(({index}) => index));
   const allocatedRows = rows.map((row, index) => {
-    if (!eligibleIndexes.has(index)) return {...row};
-    const card = usableCards[cardIndex];
-    cardIndex += 1;
+    // 账号源第 N 行只绑定支付卡 CSV 第 N 行；匹配失败或取消勾选都不能让后续卡号前移。
+    const card = pairedCards[index];
     const next = {...row};
+    // 新卡 CSV 是本次换卡的事实来源，OPOM 返回的旧卡状态不能再阻断该账号执行。
+    next.opom_card_status = '';
     next.order_no = card.orderNo;
     next.card_no = card.cardNo;
+    if (card.provider) next.card_provider = card.provider;
+    if (card.cardType) next.card_type = card.cardType;
+    if (card.expiresAt) next.expires_at = card.expiresAt;
     next.exp_month = card.expMonth;
     next.exp_year = card.expYear;
     next.cvv = card.cvv;
@@ -136,7 +150,7 @@ export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) 
       eligibleRows: eligibleRows.length,
       skippedNotMatched: rows.length - eligibleRows.length,
       inputCards: cards.length,
-      allocated: eligibleRows.length,
+      allocated: allocatedRows.length,
       rejected: rejectedCards.length,
       firstRejected: rejectedCards[0] ? {
         rowNumber: rejectedCards[0].sourceRowNumber,
@@ -144,7 +158,7 @@ export function allocateCardsToRows(rows = [], cardCsvText = '', defaults = {}) 
         errorCode: rejectedCards[0].errorCode,
       } : null,
     },
-    cards: usableCards.slice(0, eligibleRows.length).map((card, index) => ({
+    cards: pairedCards.map((card, index) => ({
       index,
       sourceRowNumber: card.sourceRowNumber,
       orderNo: card.orderNo,
@@ -174,18 +188,26 @@ export async function allocateCardsPayload(payload = {}) {
 
   if (payload.createCards) {
     if (!payload.confirmCreateCards) throw new Error('Real EJH card creation requires confirmCreateCards=true');
-    const eligibleRows = cardAllocationEligibleRows(payload.rows || []);
+    const sourceRows = payload.rows || [];
+    const eligibleRows = cardAllocationEligibleRows(sourceRows, {skipAdsPowerMatch: !!payload.skipAdsPowerMatch});
     if (!eligibleRows.length) {
       throw new Error('No rows are eligible for EJH card creation; run AdsPower match first and resolve failed matches');
+    }
+    // 实时开卡不可为未匹配行创建闲置卡；先要求全部账号完成匹配，才能保持严格的一行一卡。
+    if (eligibleRows.length !== sourceRows.length) {
+      throw new Error(`All rows must be eligible before EJH card creation: rows=${sourceRows.length}, eligible=${eligibleRows.length}`);
     }
     await mkdir(RESULT_DIR, {recursive: true});
     cardCsvPath = join(RESULT_DIR, `ejh_cards-${timestamp()}.csv`);
     ejhResult = await createCardsWithEjh({
-      count: payload.count || eligibleRows.length,
+      count: payload.count || sourceRows.length,
       amount: payload.amount,
       activeDate: payload.activeDate,
       cardholder: payload.cardholder,
       cardBatchId: payload.cardBatchId,
+      appKey: payload.ejhAppKey,
+      appSecret: payload.ejhAppSecret,
+      python: payload.python,
       output: cardCsvPath,
     });
     if (!ejhResult.ok) throw new Error(`EJH card creation failed: ${ejhResult.stderr || ejhResult.stdout || ejhResult.error || 'unknown error'}`);
@@ -193,7 +215,7 @@ export async function allocateCardsPayload(payload = {}) {
   }
 
   if (!cardCsvText.trim()) throw new Error('cardCsvText is required unless createCards=true');
-  const allocation = allocateCardsToRows(payload.rows || [], cardCsvText, payload.defaults || {});
+  const allocation = allocateCardsToRows(payload.rows || [], cardCsvText, payload.defaults || {}, {skipAdsPowerMatch: !!payload.skipAdsPowerMatch});
   return {
     ok: true,
     cardCsvPath,

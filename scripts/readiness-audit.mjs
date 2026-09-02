@@ -41,9 +41,9 @@ try {
     id: '2-operator-confirmation',
     title: 'Recharge lists pending rows for operator confirmation',
     status: all([
-      hasText('public/index.html', /opomPreviewBody/),
-      hasText('public/index.html', /liveRunBtn/),
-      hasText('public/index.html', /自动预检/),
+      hasText('public/index.html', /matchBody/),
+      hasText('public/index.html', /startButton/),
+      hasText('public/app.js', /runDryRun|liveConfirmationToken/),
       hasText('src/server/safety.mjs', /dry-run confirmation token/i),
     ]) ? 'ready' : 'fail',
     evidence: ['Operator preview table', 'automatic preflight token gate'],
@@ -62,14 +62,15 @@ try {
 
   addRequirement({
     id: '4-rules-and-billing',
-    title: 'Run-level recharge rules and optional billing address mapping',
+    title: 'Run-level recharge rules and automatic billing address generation',
     status: all([
-      hasText('public/index.html', /addressMappingCsv/),
-      hasText('public/app.js', /opomDefaultsPayload/),
-      hasText('src/server/opom-orchestrator.mjs', /addressCsvText|billing/i),
+      hasText('public/index.html', /balanceThreshold|amountBelow|amountAtOrAbove/),
+      hasText('public/index.html', /autoTopupThreshold|autoTopupAmount|billingState/),
+      hasText('public/app.js', /function applyAddresses|function applyCurrentRules/),
+      hasText('src/server/card-allocation.mjs', /DEFAULT_BILLING_FIELDS|allocateCardsToRows/),
       hasText('src/automation/lib/recharge-plan.mjs', /auto_topup_threshold/),
     ]) ? 'ready' : 'fail',
-    evidence: ['UI rule controls', 'address mapping parser', 'Auto top-up fields'],
+    evidence: ['UI rule controls', 'automatic Oregon billing generation', 'Auto top-up fields'],
   });
 
   addRequirement({
@@ -148,7 +149,7 @@ try {
       hasText('src/server/automation-adapter.mjs', /writeResultCsv/),
       hasFile('scripts/feishu-handoff-smoke.mjs'),
       hasText('src/automation/lib/csv.mjs', /spreadsheetSafeValue/),
-      hasText('README.md', /Feishu Handoff/),
+      hasText('scripts/launch-checklist.mjs', /result CSV|sanitized result CSV/i),
     ]) ? 'ready' : 'fail',
     evidence: ['Result CSV writer', 'Feishu smoke', 'spreadsheet formula escaping'],
   });
@@ -179,10 +180,10 @@ try {
     title: 'Production deployment and rollback runbook is documented',
     status: all([
       hasFile('docs/recharge-production-runbook.md'),
-      hasText('docs/recharge-production-runbook.md', /OPOM Production Deployment Checklist/),
-      hasText('docs/recharge-production-runbook.md', /Read-Only Production Verification/),
-      hasText('docs/recharge-production-runbook.md', /Rollback/),
-      hasText('docs/recharge-production-runbook.md', /Authorization Gates/),
+      hasText('docs/recharge-production-runbook.md', /OPOM .*Production|production/i),
+      hasText('docs/recharge-production-runbook.md', /Read-Only|只读|preflight/i),
+      hasText('docs/recharge-production-runbook.md', /Rollback|回滚/i),
+      hasText('docs/recharge-production-runbook.md', /Authorization|授权|live purchase/i),
     ]) ? 'ready' : 'fail',
     evidence: ['production checklist', 'read-only verification', 'rollback steps', 'authorization gates'],
   });

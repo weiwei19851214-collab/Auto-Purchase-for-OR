@@ -1,1283 +1,1442 @@
-let selectedJobId = '';
-let lastDryRun = null;
-let selectedFile = null;
-let selectedCsvText = '';
-let opomRows = [];
-let opomNextCursor = '';
-let dryRunSignature = '';
-let liveConfirmationToken = '';
-let loadSequence = 0;
-let sessionToken = '';
-let sessionConfig = {};
-let lastAdsPowerTargets = null;
-let jobsPage = 1;
-let lastJobs = [];
-const JOBS_PAGE_SIZE = 10;
+(() => {
+  'use strict';
 
-const els = {
-  file: document.querySelector('#csvFile'),
-  opomReady: document.querySelector('#opomReadyBtn'),
-  opomLoadMore: document.querySelector('#opomLoadMoreBtn'),
-  adsPowerMatch: document.querySelector('#adsPowerMatchBtn'),
-  allocateCards: document.querySelector('#allocateCardsBtn'),
-  createCards: document.querySelector('#createCardsBtn'),
-  opomGroup: document.querySelector('#opomGroup'),
-  opomStatus: document.querySelector('#opomStatus'),
-  opomLimit: document.querySelector('#opomLimit'),
-  opomWriteback: document.querySelector('#opomWriteback'),
-  defaultAmount: document.querySelector('#defaultAmount'),
-  defaultBalanceThreshold: document.querySelector('#defaultBalanceThreshold'),
-  defaultAmountBelow: document.querySelector('#defaultAmountBelow'),
-  defaultAmountAtOrAbove: document.querySelector('#defaultAmountAtOrAbove'),
-  defaultAutoTopupThreshold: document.querySelector('#defaultAutoTopupThreshold'),
-  defaultAutoTopupAmount: document.querySelector('#defaultAutoTopupAmount'),
-  addressMappingCsv: document.querySelector('#addressMappingCsv'),
-  ejhAmount: document.querySelector('#ejhAmount'),
-  ejhActiveDate: document.querySelector('#ejhActiveDate'),
-  ejhCardholder: document.querySelector('#ejhCardholder'),
-  ejhSafeCsv: document.querySelector('#ejhSafeCsv'),
-  opomSummary: document.querySelector('#opomSummary'),
-  liveRun: document.querySelector('#liveRunBtn'),
-  refresh: document.querySelector('#refreshBtn'),
-  dryRunSummary: document.querySelector('#dryRunSummary'),
-  opomPreviewMeta: document.querySelector('#opomPreviewMeta'),
-  opomPreviewBody: document.querySelector('#opomPreviewBody'),
-  jobsBody: document.querySelector('#jobsBody'),
-  jobsPrevPage: document.querySelector('#jobsPrevPageBtn'),
-  jobsNextPage: document.querySelector('#jobsNextPageBtn'),
-  jobsPageInfo: document.querySelector('#jobsPageInfo'),
-  rowsBody: document.querySelector('#rowsBody'),
-  eventsBody: document.querySelector('#eventsBody'),
-  worker: document.querySelector('#worker'),
-  jobMeta: document.querySelector('#jobMeta'),
-  cancel: document.querySelector('#cancelBtn'),
-  download: document.querySelector('#downloadLink'),
-  removeExisting: document.querySelector('#removeExisting'),
-  stopProfiles: document.querySelector('#stopProfiles'),
-  noPurchaseMode: document.querySelector('#noPurchaseMode'),
-  concurrency: document.querySelector('#concurrency'),
-  adspowerStatusMode: document.querySelector('#adspowerStatusMode'),
-  adspowerSuccessGroupId: document.querySelector('#adspowerSuccessGroupId'),
-  adspowerFailureGroupId: document.querySelector('#adspowerFailureGroupId'),
-  adspowerBlockerGroupId: document.querySelector('#adspowerBlockerGroupId'),
-  adspowerDiscoverTargets: document.querySelector('#adspowerDiscoverTargetsBtn'),
-  adspowerUseDiscoveredTargets: document.querySelector('#adspowerUseDiscoveredTargetsBtn'),
-  adspowerTargetsSummary: document.querySelector('#adspowerTargetsSummary'),
-  scopeBillingAddress: document.querySelector('#scopeBillingAddress'),
-  scopePaymentMethod: document.querySelector('#scopePaymentMethod'),
-  scopePurchase: document.querySelector('#scopePurchase'),
-  scopeAutoTopup: document.querySelector('#scopeAutoTopup'),
-  confirmLive: document.querySelector('#confirmLive'),
-  confirmLiveText: document.querySelector('#confirmLiveText'),
-  confirmationState: document.querySelector('#confirmationState'),
-  preflight: document.querySelector('#preflight'),
-  alert: document.querySelector('#alert'),
-  statQueue: document.querySelector('#statQueue'),
-  statMatch: document.querySelector('#statMatch'),
-  statBilling: document.querySelector('#statBilling'),
-  statCards: document.querySelector('#statCards'),
-  statDryRun: document.querySelector('#statDryRun'),
-};
+  const RUNTIME_CONFIG_KEY = 'autoPurchaseRuntimeConfigV1';
+  const UI_PREFS_KEY = 'autoPurchaseUiPrefsV1';
+  const HEALTHY_OPOM = new Set(['', 'ok', 'local_selector', 'completed']);
+  const CANONICAL_HEADER = [
+    'status',
+    'opom_account_id',
+    'login_email',
+    'ads_power_user_id',
+    'ads_power_serial_number',
+    'ads_power_group_name',
+    'opom_account_status',
+    'opom_health_status',
+    'opom_health_reason',
+    'opom_card_status',
+    'ads_match_status',
+    'order_no',
+    'card_no',
+    'card_provider',
+    'card_type',
+    'expires_at',
+    'exp_month',
+    'exp_year',
+    'cvv',
+    'amount',
+    'postal_code',
+    'holder_name',
+    'country',
+    'address_line1',
+    'city',
+    'state',
+    'balance_threshold',
+    'amount_below_threshold',
+    'amount_at_or_above_threshold',
+    'auto_topup_threshold',
+    'auto_topup_amount',
+    'idempotency_key',
+  ];
 
-const CANONICAL_HEADER = [
-  'status',
-  'opom_account_id',
-  'login_email',
-  'ads_power_user_id',
-  'ads_power_serial_number',
-  'ads_power_group_name',
-  'opom_health_status',
-  'opom_health_reason',
-  'ads_match_status',
-  'order_no',
-  'card_no',
-  'exp_month',
-  'exp_year',
-  'cvv',
-  'amount',
-  'postal_code',
-  'holder_name',
-  'country',
-  'address_line1',
-  'city',
-  'state',
-  'balance_threshold',
-  'amount_below_threshold',
-  'amount_at_or_above_threshold',
-  'auto_topup_threshold',
-  'auto_topup_amount',
-  'idempotency_key',
-];
+  const CONFIG_FIELDS = [
+    'adspowerApiBase',
+    'adspowerApiKey',
+    'adspowerStartTimeoutMs',
+    'opomBaseUrl',
+    'opomRechargeToken',
+    'opomSecondaryBaseUrl',
+    'opomSecondaryRechargeToken',
+    'opomRequestTimeoutMs',
+    'opomRequestRetries',
+    'opomWritebackRetries',
+    'opomRetryDelayMs',
+    'rowTimeoutMs',
+  ];
 
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(sessionToken ? {'X-Runner-Session': sessionToken} : {}),
-      ...(options.headers || {}),
-    },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
+  const el = Object.fromEntries(
+    [...document.querySelectorAll('[id]')].map((node) => [node.id, node]),
+  );
 
-async function initSession() {
-  const res = await fetch('/api/session');
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
-  sessionToken = data.token;
-  sessionConfig = data.integrations || {};
-  els.opomWriteback.disabled = !sessionConfig.opomWritebackConfigured;
-  if (!sessionConfig.opomWritebackConfigured) els.opomWriteback.checked = false;
-}
-
-function optionsPayload() {
-  const scopePurchase = els.scopePurchase.checked;
-  return {
-    scopeBillingAddress: els.scopeBillingAddress.checked,
-    scopePaymentMethod: els.scopePaymentMethod.checked,
-    scopePurchase,
-    scopeAutoTopup: els.scopeAutoTopup.checked,
-    removeExisting: els.removeExisting.checked,
-    stopProfiles: els.stopProfiles.checked,
-    concurrency: els.concurrency.value.trim(),
-    confirmPurchase: scopePurchase && !els.noPurchaseMode.checked,
-    preparePurchaseOnly: scopePurchase && els.noPurchaseMode.checked,
-    autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
-    autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
-    opomWriteback: els.opomWriteback.checked && !els.opomWriteback.disabled,
-    adspowerStatusMode: els.adspowerStatusMode?.value || 'disabled',
-    adspowerSuccessGroupId: els.adspowerSuccessGroupId?.value.trim() || '',
-    adspowerFailureGroupId: els.adspowerFailureGroupId?.value.trim() || '',
-    adspowerBlockerGroupId: els.adspowerBlockerGroupId?.value.trim() || '',
+  const state = {
+    source: 'csv',
+    rows: [],
+    fileName: '',
+    sessionToken: '',
+    sessionConfig: {},
+    jobs: [],
+    worker: {},
+    scheduler: {},
+    refreshTimer: 0,
+    opomConfirmed: false,
+    lastDryRun: null,
+    dryRunSignature: '',
+    liveConfirmationToken: '',
+    pendingWindow: null,
+    pendingWindowBlocked: false,
+    creatingJob: false,
+    cardAllocationSignature: '',
   };
-}
 
-function selectedScopeLabels() {
-  const labels = [];
-  if (els.scopeBillingAddress.checked) labels.push('添加付款地址');
-  if (els.scopePaymentMethod.checked) labels.push('换卡');
-  if (els.scopePurchase.checked) labels.push(els.noPurchaseMode.checked ? '预填充值' : '充值');
-  if (els.scopeAutoTopup.checked) labels.push('自动充值规则');
-  return labels;
-}
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
 
-function executionMode() {
-  if (!els.scopePurchase.checked) {
+  function sanitizeMessage(value) {
+    return String(value ?? '')
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+      .replace(/\b(cvv|cvc)\s*[:=]\s*\d{3,4}\b/gi, '$1=[redacted]')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[account]')
+      .slice(0, 600);
+  }
+
+  function showError(error) {
+    el.errorText.textContent = sanitizeMessage(error?.message || error || '操作失败');
+    el.errorNotice.hidden = false;
+  }
+
+  function clearError() {
+    el.errorNotice.hidden = true;
+    el.errorText.textContent = '';
+  }
+
+  async function requestJson(path, options = {}, retriedAfterSessionRefresh = false) {
+    const {method = 'GET', body, headers = {}} = options;
+    const response = await fetch(path, {
+      method,
+      headers: {
+        ...(body === undefined ? {} : {'Content-Type': 'application/json'}),
+        ...(state.sessionToken ? {'X-Runner-Session': state.sessionToken} : {}),
+        ...headers,
+      },
+      ...(body === undefined ? {} : {body: JSON.stringify(body)}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401 && !retriedAfterSessionRefresh) {
+      // 本地服务重启会更换内存 token；仅重新取一次会话后重放原请求，避免无限重试。
+      await initSession();
+      return requestJson(path, options, true);
+    }
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    return data;
+  }
+
+  async function initSession() {
+    if (state.sessionRefreshPromise) return state.sessionRefreshPromise;
+    state.sessionRefreshPromise = (async () => {
+      const response = await fetch('/api/session');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.token) throw new Error(data.error || '无法初始化本地会话');
+      state.sessionToken = data.token;
+      state.sessionConfig = data.integrations || {};
+      renderConnectionSummary();
+    })();
+    try {
+      await state.sessionRefreshPromise;
+    } finally {
+      state.sessionRefreshPromise = null;
+    }
+  }
+
+  function numericValue(input, fallback = 0) {
+    const value = Number(input.value);
+    return Number.isFinite(value) && value >= 0 ? value : fallback;
+  }
+
+  function clampInteger(input, minimum, maximum, fallback) {
+    const value = Math.floor(Number(input.value));
+    const normalized = Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
+    input.value = String(normalized);
+    return normalized;
+  }
+
+  function ruleValues() {
     return {
-      label: '非充值执行',
-      button: '启动执行',
-      confirm: '我确认待执行清单无误，允许启动前自动预检并执行所选非充值步骤。',
-      requireText: '请先勾选执行确认',
-      action: '即将启动所选非充值步骤',
+      threshold: numericValue(el.balanceThreshold, 145),
+      below: numericValue(el.amountBelow, 150),
+      atOrAbove: numericValue(el.amountAtOrAbove, 20),
     };
   }
-  if (els.noPurchaseMode.checked) {
-    return {
-      label: 'No-purchase 测试',
-      button: '启动 No-purchase Run',
-      confirm: '我确认待充值清单和金额规则无误，允许启动前自动预检并执行 no-purchase 测试；不会点击 Purchase。',
-      requireText: '请先勾选 no-purchase 执行确认',
-      action: '即将启动 no-purchase 测试；不会点击 Purchase',
-    };
+
+  function ruleText() {
+    if (el.refundOnly.checked) return '仅退款';
+    if (el.dataTrainingOnly.checked) return '仅开启 Data Training';
+    if (el.disableDataTrainingOnly.checked) return '仅关闭 Data Training';
+    if (isZdrOnlyMode()) return '仅 ZDR';
+    const rule = ruleValues();
+    return `${rule.threshold}/${rule.below}/${rule.atOrAbove}`;
   }
-  return {
-    label: 'Live Run',
-    button: '启动 Live Run',
-    confirm: '我确认待充值清单和金额规则无误，允许启动前自动预检并执行真实充值闭环。',
-    requireText: '请先勾选真实充值确认',
-    action: '即将启动真实充值 Live Run',
-  };
-}
 
-function syncExecutionCopy() {
-  const mode = executionMode();
-  els.liveRun.textContent = mode.button;
-  els.confirmLiveText.textContent = mode.confirm;
-}
+  function autoTopupText() {
+    if (isConfigurationOnlyMode()) return '跳过';
+    if (el.autoTopupEnableOnly.checked) return '仅开启';
+    return `${numericValue(el.autoTopupThreshold, 30)}/${numericValue(el.autoTopupAmount, 70)}`;
+  }
 
-function updateRunStats() {
-  if (!els.statQueue) return;
-  const total = opomRows.length;
-  const matched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
-  const billing = opomRows.filter((row) => isAddressReady(row)).length;
-  const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
-  els.statQueue.textContent = total ? `${total} 行` : (selectedFile ? 'CSV' : '未拉取');
-  els.statMatch.textContent = total ? `${matched}/${total}` : '0/0';
-  els.statBilling.textContent = total ? `${billing}/${total}` : '0/0';
-  els.statCards.textContent = total ? `${cards}/${total}` : '0/0';
-  els.statDryRun.textContent = lastDryRun
-    ? `${lastDryRun.ready || 0} ready / ${lastDryRun.blocked || 0} blocked`
-    : '未执行';
-}
+  function zdrText() {
+    if (el.zdrOnly.checked) return '仅关闭';
+    if (el.enableZdrOnly.checked) return '仅开启';
+    return '保持现状';
+  }
 
-function canAttemptExecution() {
-  return Boolean(selectedCsvText.trim()) && selectedScopeLabels().length > 0;
-}
+  function isZdrOnlyMode() {
+    return el.zdrOnly.checked || el.enableZdrOnly.checked;
+  }
 
-function syncExecutionAvailability() {
-  const canAttempt = canAttemptExecution();
-  els.confirmLive.disabled = !canAttempt;
-  if (!canAttempt) els.confirmLive.checked = false;
-  els.liveRun.disabled = !canAttempt || !els.confirmLive.checked;
-}
+  function isDataTrainingOnlyMode() {
+    return el.dataTrainingOnly.checked || el.disableDataTrainingOnly.checked;
+  }
 
-function syncScopeControls() {
-  const purchaseEnabled = els.scopePurchase.checked;
-  els.noPurchaseMode.disabled = !purchaseEnabled;
-  if (!purchaseEnabled) els.noPurchaseMode.checked = false;
-  els.removeExisting.disabled = !els.scopePaymentMethod.checked;
-  syncExecutionCopy();
-}
+  function isRefundOnlyMode() {
+    return el.refundOnly.checked;
+  }
 
-function currentSignature() {
-  return JSON.stringify({
-    fileName: selectedFile?.name || '',
-    csvText: selectedCsvText,
-    options: optionsPayload(),
-  });
-}
+  function isConfigurationOnlyMode() {
+    return isZdrOnlyMode() || isDataTrainingOnlyMode() || isRefundOnlyMode();
+  }
 
-function invalidateDryRun(reason = '选项已变化，启动执行时会重新预检。') {
-  lastDryRun = null;
-  dryRunSignature = '';
-  liveConfirmationToken = '';
-  syncExecutionCopy();
-  els.confirmationState.textContent = reason;
-  syncExecutionAvailability();
-  updateRunStats();
-}
+  function runtimeConfig() {
+    return Object.fromEntries(CONFIG_FIELDS.map((key) => [key, String(el[key]?.value || '').trim()]));
+  }
 
-function statusBadge(status) {
-  return `<span class="status ${escapeHtml(status)}">${escapeHtml(status || '-')}</span>`;
-}
+  function opomStatusForRequest() {
+    const status = String(el.opomStatus.value || '').trim();
+    return status === 'card_switch&overdue' ? 'needs_recharge' : (status || 'needs_recharge');
+  }
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  }[ch]));
-}
+  function loadRuntimeConfig() {
+    let saved = {};
+    let exists = false;
+    try {
+      const raw = localStorage.getItem(RUNTIME_CONFIG_KEY);
+      exists = Boolean(raw);
+      saved = JSON.parse(raw || '{}');
+    } catch {
+      saved = {};
+    }
+    const defaults = {
+      adspowerApiBase: 'http://127.0.0.1:50325',
+      opomBaseUrl: 'http://20.2.209.2',
+    };
+    for (const key of CONFIG_FIELDS) {
+      if (el[key]) el[key].value = saved[key] ?? defaults[key] ?? '';
+    }
+    el.settingsState.textContent = exists ? '已读取当前浏览器保存的配置。' : '尚未保存本地配置。';
+    renderConnectionSummary();
+  }
 
-function csvEscape(value) {
-  const text = String(value ?? '');
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
+  function saveRuntimeConfig() {
+    localStorage.setItem(RUNTIME_CONFIG_KEY, JSON.stringify(runtimeConfig()));
+    el.settingsState.textContent = '已保存到当前浏览器。';
+    renderConnectionSummary();
+    invalidatePreparation();
+  }
 
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let cell = '';
-  let quoted = false;
+  function clearRuntimeConfig() {
+    if (!window.confirm('清空当前浏览器保存的连接配置？')) return;
+    localStorage.removeItem(RUNTIME_CONFIG_KEY);
+    loadRuntimeConfig();
+    el.settingsState.textContent = '配置已清空。';
+    invalidatePreparation();
+  }
 
-  for (let index = 0; index < String(text || '').length; index += 1) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (quoted) {
-      if (char === '"' && next === '"') {
-        cell += '"';
-        index += 1;
+  function opomConfigured() {
+    const config = runtimeConfig();
+    return Boolean(
+      (config.opomBaseUrl && config.opomRechargeToken)
+      || state.sessionConfig.opomWritebackConfigured,
+    );
+  }
+
+  function adsPowerConfigured() {
+    const config = runtimeConfig();
+    return Boolean(config.adspowerApiBase && config.adspowerApiKey);
+  }
+
+  function renderConnectionSummary() {
+    if (!el.connectionSummary) return;
+    const config = runtimeConfig();
+    const adsState = config.adspowerApiKey ? 'AdsPower 已配置' : 'AdsPower 缺少 API Key';
+    const opomState = opomConfigured() ? 'OPOM 已配置' : 'OPOM 未配置';
+    el.connectionSummary.textContent = `${adsState} · ${opomState} · 配置仅保存在当前浏览器`;
+  }
+
+  function readUiPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem(UI_PREFS_KEY) || '{}');
+    } catch {
+      return {};
+    }
+  }
+
+  function setHighContrast(enabled) {
+    document.body.classList.toggle('high-contrast', enabled);
+    el.contrastButton.setAttribute('aria-pressed', String(enabled));
+    localStorage.setItem(UI_PREFS_KEY, JSON.stringify({...readUiPrefs(), highContrast: enabled}));
+  }
+
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+    const source = String(text || '').replace(/^\uFEFF/, '');
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      if (quoted) {
+        if (char === '"' && source[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+        } else if (char === '"') {
+          quoted = false;
+        } else {
+          cell += char;
+        }
       } else if (char === '"') {
-        quoted = false;
+        quoted = true;
+      } else if (char === ',') {
+        row.push(cell);
+        cell = '';
+      } else if (char === '\n') {
+        row.push(cell.replace(/\r$/, ''));
+        if (row.some((value) => String(value).trim())) rows.push(row);
+        row = [];
+        cell = '';
       } else {
         cell += char;
       }
-      continue;
     }
-    if (char === '"') {
-      quoted = true;
-    } else if (char === ',') {
-      row.push(cell);
-      cell = '';
-    } else if (char === '\n') {
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = '';
-    } else if (char !== '\r') {
-      cell += char;
+    row.push(cell.replace(/\r$/, ''));
+    if (row.some((value) => String(value).trim())) rows.push(row);
+    return rows;
+  }
+
+  function csvEscape(value) {
+    const text = String(value ?? '');
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  }
+
+  function looseKey(value) {
+    return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function valueFrom(source, aliases) {
+    const direct = aliases.map((key) => String(source[key] ?? '').trim()).find(Boolean);
+    if (direct) return direct;
+    const wanted = new Set(aliases.map(looseKey));
+    for (const [key, value] of Object.entries(source)) {
+      if (!wanted.has(looseKey(key))) continue;
+      const normalized = String(value ?? '').trim();
+      if (normalized) return normalized;
     }
+    return '';
   }
-  row.push(cell);
-  rows.push(row);
-  return rows.filter((line) => line.some((value) => String(value || '').trim() !== ''));
-}
 
-function rowObject(header, line) {
-  return Object.fromEntries(header.map((key, index) => [String(key || '').trim(), line[index] ?? '']));
-}
-
-function valueFrom(row, keys) {
-  for (const key of keys) {
-    const value = String(row[key] ?? '').trim();
-    if (value) return value;
+  function objectFromRow(header, row) {
+    return Object.fromEntries(header.map((key, index) => [String(key || '').trim(), row[index] ?? '']));
   }
-  return '';
-}
 
-function normalizedHeaderKeys(line) {
-  return new Set(line.map((value) => String(value || '').trim().toLowerCase()));
-}
-
-function looksLikeAccountSelectorHeader(line) {
-  const keys = normalizedHeaderKeys(line);
-  return [
-    'login_email',
-    'loginemail',
-    'email',
-    'username',
-    'ads_power_serial_number',
-    'adspowerserialnumber',
-    'serial_number',
-    'serialnumber',
-    'id',
-    'ads_id',
-    'adsid',
-    'profile_no',
-    'profileno',
-    'ads_power_user_id',
-    'adspoweruserid',
-    'user_id',
-    'userid',
-    'opom_account_id',
-    'opomaccountid',
-  ].some((key) => keys.has(key));
-}
-
-function canonicalCsvFromRows(rows) {
-  return `${[CANONICAL_HEADER, ...rows.map((row) => CANONICAL_HEADER.map((key) => row[key] || ''))]
-    .map((row) => row.map(csvEscape).join(','))
-    .join('\r\n')}\r\n`;
-}
-
-function sanitizeMessage(value) {
-  return String(value || '')
-    .replace(/\b\d{3,4}\b/g, (digits) => (digits.length <= 4 ? '***' : digits))
-    .replace(/([A-Z0-9._%+-]{2})[A-Z0-9._%+-]*(@[A-Z0-9.-]+\.[A-Z]{2,})/gi, '$1***$2');
-}
-
-function formatChinaTime(value) {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(date).reduce((acc, part) => {
-    acc[part.type] = part.value;
-    return acc;
-  }, {});
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} UTC+8`;
-}
-
-function formatDuration(ms) {
-  const seconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
-}
-
-function maskEmail(value) {
-  return String(value || '');
-}
-
-function cardNoLabel(row = {}) {
-  const cardNo = row.cardNo || row.cardno || row.card_no || row.card_number || '';
-  const last4 = row.cardLast4 || String(cardNo).replace(/\D/g, '').slice(-4);
-  const cardLabel = cardNo ? `card ${cardNo}` : (last4 ? `card ****${last4}` : '');
-  return [row.ejhOrderNo || row.order_no || '', cardLabel].filter(Boolean).join(' / ');
-}
-
-function purchaseRuleLabel(row) {
-  if (row.balance_threshold || row.amount_below_threshold || row.amount_at_or_above_threshold) {
-    const complete = row.balance_threshold && row.amount_below_threshold && row.amount_at_or_above_threshold;
-    return complete
-      ? `balance ${row.balance_threshold}: ${row.amount_below_threshold}/${row.amount_at_or_above_threshold}`
-      : 'balance rule incomplete';
+  function hasSelectorHeader(row) {
+    const keys = new Set(row.map(looseKey));
+    return [
+      'loginemail',
+      'email',
+      'username',
+      'adspowerserialnumber',
+      'serialnumber',
+      'id',
+      'adspoweruserid',
+      'adspowerid',
+      'opomaccountid',
+    ].some((key) => keys.has(key));
   }
-  return row.amount ? `fixed ${row.amount}` : 'missing';
-}
 
-function rowBadgeState(value, okValue = 'ready') {
-  if (value === true || value === okValue) return 'completed';
-  if (!value || value === 'missing' || value === 'not_verified') return 'missing_fields';
-  if (String(value).includes('mismatch') || String(value).includes('failed')) return 'failed';
-  return String(value);
-}
-
-function opomHealthBadge(row) {
-  const status = String(row.opom_health_status || 'ok').trim() || 'ok';
-  const reason = String(row.opom_health_reason || '').trim();
-  const badgeState = status === 'ok' ? 'completed' : status;
-  return `${statusBadge(badgeState)}${reason ? ` <span class="muted">${escapeHtml(reason)}</span>` : ''}`;
-}
-
-function isAddressReady(row) {
-  return ADDRESS_FIELDS.every((field) => String(row[field] || '').trim());
-}
-
-function renderOpomPreview(stage = '') {
-  if (!opomRows.length) {
-    els.opomPreviewMeta.textContent = 'Load OPOM group 或上传 CSV 后显示。';
-    els.opomPreviewBody.innerHTML = '';
-    updateRunStats();
-    return;
-  }
-  const matched = opomRows.filter((row) => row.ads_match_status === 'matched').length;
-  const cards = opomRows.filter((row) => row.card_no || row.order_no).length;
-  els.opomPreviewMeta.textContent = `${stage || 'snapshot'} rows=${opomRows.length} matched=${matched} cards=${cards}`;
-  els.opomPreviewBody.innerHTML = opomRows.map((row) => {
-    const adspower = row.ads_power_serial_number || row.ads_power_user_id || '';
-    const matchStatus = row.ads_match_status || (adspower ? 'not_verified' : 'missing');
-    const addressReady = isAddressReady(row);
-    const cardReady = row.order_no && row.card_no && row.exp_month && row.exp_year && row.cvv;
-    return `
-      <tr>
-        <td>${escapeHtml(row.opom_account_id || '-')}</td>
-        <td>${escapeHtml(maskEmail(row.login_email || ''))}</td>
-        <td>${opomHealthBadge(row)}</td>
-        <td>${escapeHtml(adspower || '-')}</td>
-        <td>${statusBadge(rowBadgeState(matchStatus, 'matched'))}${matchStatus !== 'matched' ? ` <span class="muted">${escapeHtml(matchStatus)}</span>` : ''}</td>
-        <td>${escapeHtml(purchaseRuleLabel(row))}</td>
-        <td>${escapeHtml(row.auto_topup_threshold || '-')}/${escapeHtml(row.auto_topup_amount || '-')}</td>
-        <td>${statusBadge(addressReady ? 'completed' : 'missing_fields')}</td>
-        <td>${statusBadge(cardReady ? 'completed' : 'missing_fields')} ${escapeHtml(cardNoLabel(row))}</td>
-      </tr>
-    `;
-  }).join('');
-  updateRunStats();
-}
-
-function opomDefaultsPayload() {
-  return {
-    amount: els.defaultAmount.value.trim(),
-    balanceThreshold: els.defaultBalanceThreshold.value.trim(),
-    amountBelowThreshold: els.defaultAmountBelow.value.trim(),
-    amountAtOrAboveThreshold: els.defaultAmountAtOrAbove.value.trim(),
-    autoTopupThreshold: els.defaultAutoTopupThreshold.value.trim(),
-    autoTopupAmount: els.defaultAutoTopupAmount.value.trim(),
-  };
-}
-
-async function addressCsvTextRequired() {
-  const file = els.addressMappingCsv.files?.[0] || null;
-  if (!file) throw new Error('请先上传 Billing address CSV');
-  return file.text();
-}
-
-async function optionalAddressCsvText() {
-  const file = els.addressMappingCsv.files?.[0] || null;
-  return file ? file.text() : '';
-}
-
-const ADDRESS_FIELDS = ['postal_code', 'holder_name', 'country', 'address_line1', 'city', 'state'];
-
-function addressMappingsFromCsv(text = '') {
-  const parsed = parseCsv(text);
-  if (parsed.length < 2) return [];
-  const header = parsed[0].map((key) => String(key || '').trim());
-  return parsed.slice(1).map((line) => {
-    const source = rowObject(header, line);
+  function noHeaderObject(row) {
+    const values = row.map((value) => String(value || '').trim()).filter(Boolean);
+    const email = values.find((value) => value.includes('@')) || '';
+    const serial = values.find((value) => /^\d+$/.test(value)) || '';
+    const userId = values.find((value) => !value.includes('@') && !/^\d+$/.test(value)) || '';
     return {
-      opom_account_id: valueFrom(source, ['opom_account_id', 'opomAccountId', 'account_id']),
-      login_email: valueFrom(source, ['login_email', 'loginEmail', 'username', 'email']),
-      postal_code: valueFrom(source, ['postal_code', 'postalCode', 'Zip', 'zip']),
-      holder_name: valueFrom(source, ['holder_name', 'holderName', 'name', 'FirstName', 'firstName', 'first_name']),
-      country: valueFrom(source, ['country']) || 'US',
-      address_line1: valueFrom(source, ['address_line1', 'addressLine1', 'address', 'Street', 'street']),
-      city: valueFrom(source, ['city', 'City']),
-      state: valueFrom(source, ['state', 'State']),
+      login_email: email,
+      ads_power_serial_number: serial,
+      ads_power_user_id: userId,
     };
-  }).filter((mapping) => mapping.opom_account_id || mapping.login_email || ADDRESS_FIELDS.some((field) => mapping[field]));
-}
-
-function applyAddressMappings(rows, mappings = []) {
-  if (!mappings.length) return rows;
-  const byAccountId = new Map();
-  const byEmail = new Map();
-  const sequentialMappings = [];
-  for (const mapping of mappings) {
-    if (mapping.opom_account_id) byAccountId.set(String(mapping.opom_account_id), mapping);
-    if (mapping.login_email) byEmail.set(String(mapping.login_email).toLowerCase(), mapping);
-    if (!mapping.opom_account_id && !mapping.login_email) sequentialMappings.push(mapping);
   }
-  let sequentialIndex = 0;
-  return rows.map((row) => {
-    const mapping = byAccountId.get(String(row.opom_account_id || ''))
-      || byEmail.get(String(row.login_email || '').toLowerCase())
-      || sequentialMappings[sequentialIndex++];
-    if (!mapping) return row;
-    const next = {...row};
-    for (const field of ADDRESS_FIELDS) {
-      if (mapping[field]) next[field] = mapping[field];
-    }
-    return next;
-  });
-}
 
-function selectorRowFromObject(source, index) {
-  const loginEmail = valueFrom(source, ['login_email', 'loginEmail', 'email', 'username']);
-  const serialNumber = valueFrom(source, [
-    'ads_power_serial_number',
-    'adsPowerSerialNumber',
-    'serial_number',
-    'serialNumber',
-    'ID',
-    'id',
-    'ads_id',
-    'adsId',
-    'profile_no',
-    'profileNo',
-  ]);
-  const userId = valueFrom(source, ['ads_power_user_id', 'adsPowerUserId', 'user_id', 'userId']);
-  const opomAccountId = valueFrom(source, ['opom_account_id', 'opomAccountId', 'account_id']);
-  if (!loginEmail && !serialNumber && !userId && !opomAccountId) return null;
-  const defaults = opomDefaultsPayload();
-  const identifier = opomAccountId || loginEmail || serialNumber || userId || `row-${index + 1}`;
-  return {
-    source: 'local_selector',
-    status: '',
-    opom_account_id: opomAccountId,
-    login_email: loginEmail,
-    ads_power_user_id: userId,
-    ads_power_serial_number: serialNumber,
-    ads_power_group_name: '',
-    opom_health_status: opomAccountId ? 'ok' : 'local_selector',
-    opom_health_reason: opomAccountId ? '' : 'selected from local CSV',
-    ads_match_status: 'not_verified',
-    order_no: '',
-    card_no: '',
-    exp_month: '',
-    exp_year: '',
-    cvv: '',
-    amount: defaults.amount,
-    postal_code: '',
-    holder_name: '',
-    country: '',
-    address_line1: '',
-    city: '',
-    state: '',
-    balance_threshold: defaults.balanceThreshold,
-    amount_below_threshold: defaults.amountBelowThreshold,
-    amount_at_or_above_threshold: defaults.amountAtOrAboveThreshold,
-    auto_topup_threshold: defaults.autoTopupThreshold,
-    auto_topup_amount: defaults.autoTopupAmount,
-    idempotency_key: `local_selector:${String(identifier).trim().toLowerCase()}:${index + 1}`,
-  };
-}
+  function normalizeSourceRow(source, index, sourceName) {
+    const rawId = valueFrom(source, ['ID', 'id', 'ads_id', 'adsId']);
+    const explicitSerial = valueFrom(source, [
+      'ads_power_serial_number',
+      'adsPowerSerialNumber',
+      'serial_number',
+      'serialNumber',
+      'profile_no',
+      'profileNo',
+    ]);
+    const explicitUserId = valueFrom(source, [
+      'ads_power_user_id',
+      'adsPowerUserId',
+      'adsPowerId',
+      'ads_power_id',
+      'adspower_id',
+      'user_id',
+      'userId',
+    ]);
+    const serialNumber = explicitSerial || (/^\d+$/.test(rawId) ? rawId : '');
+    const userId = explicitUserId || (rawId && !/^\d+$/.test(rawId) ? rawId : '');
+    const loginEmail = valueFrom(source, ['login_email', 'loginEmail', 'email', 'username']);
+    const opomId = valueFrom(source, ['opom_account_id', 'opomAccountId', 'account_id']);
+    if (!loginEmail && !serialNumber && !userId && !opomId) return null;
 
-function selectorRowsFromCsv(text, addressCsvText) {
-  const parsed = parseCsv(text);
-  if (!parsed.length) return [];
-  const hasHeader = looksLikeAccountSelectorHeader(parsed[0]);
-  const rows = hasHeader
-    ? parsed.slice(1).map((line, index) => selectorRowFromObject(rowObject(parsed[0], line), index))
-    : parsed.map((line, index) => {
-      const identifier = String(line.find((value) => String(value || '').trim()) || '').trim();
-      if (!identifier) return null;
-      const source = identifier.includes('@')
-        ? {login_email: identifier}
-        : (/^\d+$/.test(identifier) ? {ads_power_serial_number: identifier} : {ads_power_user_id: identifier});
-      return selectorRowFromObject(source, index);
+    const normalized = Object.fromEntries(CANONICAL_HEADER.map((key) => [key, '']));
+    Object.assign(normalized, {
+      status: valueFrom(source, ['status']),
+      opom_account_id: opomId,
+      login_email: loginEmail,
+      ads_power_user_id: userId,
+      ads_power_serial_number: serialNumber,
+      ads_power_group_name: valueFrom(source, ['ads_power_group_name', 'group_name']),
+      opom_account_status: valueFrom(source, ['opom_account_status', 'account_status']),
+      opom_health_status: valueFrom(source, ['opom_health_status']) || (opomId ? 'ok' : 'local_selector'),
+      opom_health_reason: valueFrom(source, ['opom_health_reason']),
+      opom_card_status: valueFrom(source, ['opom_card_status', 'card_status', 'bank_card_status']),
+      ads_match_status: valueFrom(source, ['ads_match_status']) || 'not_verified',
+      order_no: valueFrom(source, ['order_no', 'ejh_order_no']),
+      card_no: valueFrom(source, ['card_no', 'card_number', 'cardno']),
+      card_provider: valueFrom(source, ['card_provider']),
+      card_type: valueFrom(source, ['card_type']),
+      expires_at: valueFrom(source, ['expires_at', 'validityDate', 'expiry']),
+      exp_month: valueFrom(source, ['exp_month']),
+      exp_year: valueFrom(source, ['exp_year']),
+      cvv: valueFrom(source, ['cvv', 'cvc']),
+      postal_code: valueFrom(source, ['postal_code', 'postalCode', 'zip']),
+      holder_name: valueFrom(source, ['holder_name', 'holderName']),
+      country: valueFrom(source, ['country']),
+      address_line1: valueFrom(source, ['address_line1', 'addressLine1', 'address']),
+      city: valueFrom(source, ['city']),
+      state: valueFrom(source, ['state']),
+      auto_topup_threshold: valueFrom(source, ['auto_topup_threshold']),
+      auto_topup_amount: valueFrom(source, ['auto_topup_amount']),
+      idempotency_key: valueFrom(source, ['idempotency_key'])
+        || `${sourceName}:${String(opomId || loginEmail || userId || serialNumber).toLowerCase()}:${index + 1}`,
+      execute: source.execute !== false,
+      source: sourceName,
     });
-  const unique = [];
-  const seen = new Set();
-  for (const row of rows.filter(Boolean)) {
-    const key = String(row.opom_account_id || row.login_email || row.ads_power_serial_number || row.ads_power_user_id || '').toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    unique.push(row);
+    return normalized;
   }
-  return applyAddressMappings(unique, addressMappingsFromCsv(addressCsvText));
-}
 
-async function applyUploadedAddressCsvToRows() {
-  if (!opomRows.length) return;
-  const addressCsvText = await addressCsvTextRequired();
-  opomRows = applyAddressMappings(opomRows, addressMappingsFromCsv(addressCsvText));
-  selectedCsvText = canonicalCsvFromRows(opomRows);
-  renderOpomPreview('address_applied');
-}
+  function rowsFromCsv(text) {
+    const parsed = parseCsv(text);
+    if (!parsed.length) return [];
+    const headerPresent = hasSelectorHeader(parsed[0]);
+    const sourceRows = headerPresent
+      ? parsed.slice(1).map((row) => objectFromRow(parsed[0], row))
+      : parsed.map(noHeaderObject);
+    const unique = [];
+    const seen = new Set();
+    sourceRows.forEach((source, index) => {
+      const row = normalizeSourceRow(source, index, 'local_selector');
+      if (!row) return;
+      const identity = row.opom_account_id || row.login_email || row.ads_power_user_id || row.ads_power_serial_number;
+      const key = String(identity || '').trim().toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      unique.push(row);
+    });
+    return unique;
+  }
 
-function hasValue(value) {
-  return String(value ?? '').trim() !== '';
-}
+  function assertValidSelectorEmails(rows) {
+    const invalidRows = rows
+      .map((row, index) => ({index: index + 1, email: String(row.login_email || '').trim()}))
+      .filter((row) => row.email && !/^[^\s@]+@[^\s@]+$/.test(row.email));
+    if (!invalidRows.length) return;
+    const preview = invalidRows.slice(0, 10).map((row) => row.index).join('、');
+    const suffix = invalidRows.length > 10 ? ' 等' : '';
+    throw new Error(`账号 CSV 邮箱格式不正确：第 ${preview}${suffix} 行`);
+  }
 
-function applyCurrentDefaultsToRows(rows) {
-  const defaults = opomDefaultsPayload();
-  return rows.map((row) => {
-    const next = {...row};
-    const overwriteDefaults = next.source === 'local_selector' || next.opom_health_status === 'local_selector';
-    const fill = (key, value) => {
-      if ((overwriteDefaults || !hasValue(next[key])) && hasValue(value)) next[key] = value;
+  function normalizeApiRows(rows, sourceName) {
+    return (Array.isArray(rows) ? rows : [])
+      .map((row, index) => normalizeSourceRow(row, index, sourceName))
+      .filter(Boolean);
+  }
+
+  const OREGON_ADDRESSES = [
+    ['Avery Stone', '451 NW Everett St', 'Portland', '97209'],
+    ['Mila Carter', '1275 Oak St', 'Eugene', '97401'],
+    ['Ethan Brooks', '820 Liberty St SE', 'Salem', '97301'],
+    ['Nora Bennett', '1415 NE 3rd St', 'Bend', '97701'],
+    ['Leo Foster', '310 SW 4th Ave', 'Corvallis', '97333'],
+    ['Clara Hayes', '625 Marine Dr', 'Astoria', '97103'],
+    ['Owen Reed', '940 SE Cass Ave', 'Roseburg', '97470'],
+    ['Ivy Collins', '215 E Main St', 'Ashland', '97520'],
+    ['Miles Turner', '730 Biddle Rd', 'Medford', '97504'],
+    ['Ruby Walker', '1180 Pacific Ave', 'Forest Grove', '97116'],
+  ];
+
+  function applyAddresses(rows) {
+    return rows.map((row, index) => {
+      const [holder, line1, city, zip] = OREGON_ADDRESSES[index % OREGON_ADDRESSES.length];
+      const cycle = Math.floor(index / OREGON_ADDRESSES.length);
+      const addressLine = cycle ? `${line1} Apt ${cycle + 1}` : line1;
+      return {
+        ...row,
+        holder_name: holder,
+        address_line1: addressLine,
+        city,
+        state: 'OR',
+        postal_code: zip,
+        country: 'US',
+      };
+    });
+  }
+
+  function applyCurrentRules(rows = state.rows) {
+    const rule = ruleValues();
+    const onlyEnable = el.autoTopupEnableOnly.checked;
+    const topupThreshold = String(numericValue(el.autoTopupThreshold, 30));
+    const topupAmount = String(numericValue(el.autoTopupAmount, 70));
+    return rows.map((row) => ({
+      ...row,
+      amount: '',
+      balance_threshold: String(rule.threshold),
+      amount_below_threshold: String(rule.below),
+      amount_at_or_above_threshold: String(rule.atOrAbove),
+      ...(!onlyEnable ? {
+        auto_topup_threshold: topupThreshold,
+        auto_topup_amount: topupAmount,
+      } : {}),
+    }));
+  }
+
+  function selectedRows() {
+    return state.rows.filter((row) => row.execute !== false);
+  }
+
+  function canonicalCsv(rows = selectedRows()) {
+    const normalized = applyCurrentRules(rows);
+    const lines = [
+      CANONICAL_HEADER,
+      ...normalized.map((row) => CANONICAL_HEADER.map((key) => row[key] ?? '')),
+    ];
+    return `${lines.map((line) => line.map(csvEscape).join(',')).join('\r\n')}\r\n`;
+  }
+
+  function rowKeys(row) {
+    return [
+      row.idempotency_key,
+      row.opom_account_id,
+      row.login_email,
+      row.ads_power_user_id,
+      row.ads_power_serial_number,
+    ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  }
+
+  function mergeRows(current, updates) {
+    const byKey = new Map();
+    for (const update of updates || []) {
+      for (const key of rowKeys(update)) byKey.set(key, update);
+    }
+    return current.map((row) => {
+      const match = rowKeys(row).map((key) => byKey.get(key)).find(Boolean);
+      return match ? {...row, ...match, execute: row.execute !== false} : row;
+    });
+  }
+
+  function cardLast4(row) {
+    return String(row.card_no || '').replace(/\D/g, '').slice(-4);
+  }
+
+  function addressReady(row) {
+    return ['holder_name', 'country', 'postal_code', 'address_line1', 'city', 'state']
+      .every((key) => String(row[key] || '').trim());
+  }
+
+  function healthOk(row) {
+    return HEALTHY_OPOM.has(String(row.opom_health_status || '').trim().toLowerCase());
+  }
+
+  function matchOk(row) {
+    if (el.skipMatch.checked) return Boolean(row.ads_power_user_id || row.ads_power_serial_number);
+    return row.ads_match_status === 'matched';
+  }
+
+  function adsMatchPill(row) {
+    if (el.skipMatch.checked) return pill('warning', '人工确认');
+    if (row.ads_match_status === 'matched') return pill('ok', '成功');
+    // CSV 刚导入时尚未调用 AdsPower，不能把未执行的状态渲染成匹配失败。
+    if (!row.ads_match_status || row.ads_match_status === 'not_verified') return pill('neutral', '-');
+    return pill('error', '失败');
+  }
+
+  function hasMatchFailure(row) {
+    // 只有实际请求过 OPOM/AdsPower 后明确失败才标红；刚导入的“未验证”不是失败。
+    return row.ads_match_status === 'failed'
+      || row.opom_health_status === 'opom_resolve_failed';
+  }
+
+  function syncSelectAllRows(rows = state.rows) {
+    const selectedCount = selectedRows().length;
+    el.selectAllRows.checked = rows.length > 0 && selectedCount === rows.length;
+    el.selectAllRows.indeterminate = selectedCount > 0 && selectedCount < rows.length;
+    el.selectAllRows.disabled = !rows.length;
+  }
+
+  function rowReady(row) {
+    return Boolean(
+      row.login_email
+      && (row.ads_power_user_id || row.ads_power_serial_number)
+      && healthOk(row)
+      && matchOk(row),
+    );
+  }
+
+  function rowBlockReason(row) {
+    const reasons = [];
+    if (!row.login_email) reasons.push('缺少账号');
+    if (!row.ads_power_user_id && !row.ads_power_serial_number) reasons.push('缺少 AdsPower');
+    if (!healthOk(row)) reasons.push(row.opom_health_reason || row.opom_health_status || 'OPOM 异常');
+    if (!el.skipMatch.checked && row.ads_match_status !== 'matched') reasons.push('Ads 匹配未完成');
+    if (!isConfigurationOnlyMode() && !el.cardFile.files?.length && row.opom_card_status && !/^(active|激活|1)$/i.test(row.opom_card_status)) {
+      reasons.push(`卡状态 ${row.opom_card_status}，执行时跳过`);
+    }
+    return reasons.join(' · ');
+  }
+
+  function pill(kind, text) {
+    return `<span class="pill ${kind}">${escapeHtml(text)}</span>`;
+  }
+
+  function renderRows() {
+    const rows = state.rows;
+    if (!rows.length) {
+      el.selectAllRows.checked = false;
+      el.selectAllRows.indeterminate = false;
+      el.selectAllRows.disabled = true;
+      el.selectAllRows.onchange = null;
+      el.matchBody.innerHTML = '<tr><td class="empty-row" colspan="11">选择账号来源后开始准备</td></tr>';
+      el.detailTitle.textContent = state.source === 'opom' && !state.opomConfirmed
+        ? '等待确认 OPOM 参数'
+        : '等待导入账号';
+      renderCounts();
+      return;
+    }
+
+    el.detailTitle.textContent = `${rows.length} 个账号 · ${state.source === 'opom' ? 'OPOM' : state.fileName || 'CSV'}`;
+    el.matchBody.innerHTML = rows.map((row, index) => {
+      const health = healthOk(row)
+        ? pill('ok', row.opom_health_status || 'ok')
+        : pill('error', row.opom_health_status || 'error');
+      const match = adsMatchPill(row);
+      const billing = isConfigurationOnlyMode()
+        ? pill('neutral', '跳过')
+        : addressReady(row) ? pill('ok', 'OR · 就绪') : pill('error', '缺失');
+      const last4 = cardLast4(row);
+      const card = isConfigurationOnlyMode()
+        ? pill('neutral', '跳过')
+        : el.cardFile.files?.length
+          ? (last4 ? pill('ok', `已分配 ••••${last4}`) : pill('warning', '待分配'))
+          : pill('neutral', '不替换');
+      return `
+        <tr class="${hasMatchFailure(row) ? 'match-row-failed' : ''}">
+          <td>
+            <label class="row-check-target">
+              <input class="row-check" type="checkbox" data-index="${index}" aria-label="选择 ${escapeHtml(row.login_email || `第 ${index + 1} 行`)}" ${row.execute !== false ? 'checked' : ''}>
+            </label>
+          </td>
+          <td title="${escapeHtml(row.login_email)}"><strong>${escapeHtml(row.login_email || '—')}</strong></td>
+          <td>${health}</td>
+          <td>${escapeHtml(row.ads_power_serial_number || '—')}</td>
+          <td>${escapeHtml(row.ads_power_user_id || '—')}</td>
+          <td>${match}</td>
+          <td>${escapeHtml(ruleText())}</td>
+          <td>${escapeHtml(autoTopupText())}</td>
+          <td>${billing}</td>
+          <td>${card}</td>
+          <td title="${escapeHtml(rowBlockReason(row))}">${escapeHtml(rowBlockReason(row) || '—')}</td>
+        </tr>
+      `;
+    }).join('');
+
+    syncSelectAllRows(rows);
+    el.selectAllRows.onchange = () => {
+      state.rows.forEach((row) => { row.execute = el.selectAllRows.checked; });
+      invalidatePreparation();
+      renderRows();
     };
-    fill('amount', defaults.amount);
-    fill('balance_threshold', defaults.balanceThreshold);
-    fill('amount_below_threshold', defaults.amountBelowThreshold);
-    fill('amount_at_or_above_threshold', defaults.amountAtOrAboveThreshold);
-    fill('auto_topup_threshold', defaults.autoTopupThreshold);
-    fill('auto_topup_amount', defaults.autoTopupAmount);
-    return next;
-  });
-}
 
-function syncRowsWithCurrentDefaults() {
-  if (!opomRows.length) return;
-  opomRows = applyCurrentDefaultsToRows(opomRows);
-  selectedCsvText = canonicalCsvFromRows(opomRows);
-  renderOpomPreview('defaults_applied');
-}
-
-async function loadOpomReady() {
-  return loadOpomPage({append: false});
-}
-
-async function loadMoreOpomRows() {
-  if (!opomNextCursor) throw new Error('没有更多 OPOM 队列页');
-  return loadOpomPage({append: true});
-}
-
-function mergeOpomRows(existing, incoming) {
-  const seen = new Set();
-  const output = [];
-  for (const row of [...existing, ...incoming]) {
-    const key = row.opom_account_id || row.login_email || `${row.ads_power_user_id}:${row.ads_power_serial_number}`;
-    const normalized = String(key || '').trim().toLowerCase();
-    if (normalized && seen.has(normalized)) continue;
-    if (normalized) seen.add(normalized);
-    output.push(row);
-  }
-  return output;
-}
-
-function syncOpomPagination() {
-  els.opomLoadMore.disabled = !opomNextCursor;
-}
-
-async function loadOpomPage({append = false} = {}) {
-  const group = els.opomGroup.value.trim() || 'VIP';
-  const status = els.opomStatus.value || 'needs_recharge';
-  const rawLimit = Number(els.opomLimit.value || 100);
-  const limit = Math.min(200, Math.max(1, Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 100));
-  els.opomLimit.value = String(limit);
-  const addressCsvText = await optionalAddressCsvText();
-  const data = await api('/api/opom/ready', {
-    method: 'POST',
-    body: JSON.stringify({
-      group,
-      status,
-      limit,
-      cursor: append ? opomNextCursor : '',
-      defaults: opomDefaultsPayload(),
-      addressCsvText,
-    }),
-  });
-  selectedFile = {name: `opom-${group}.csv`};
-  const incomingRows = data.rows || [];
-  opomRows = append ? mergeOpomRows(opomRows, incomingRows) : incomingRows;
-  opomNextCursor = data.nextCursor || '';
-  selectedCsvText = canonicalCsvFromRows(opomRows);
-  renderOpomPreview(append ? 'opom_page_appended' : 'opom_ready');
-  invalidateDryRun(append
-    ? `已追加 OPOM ${incomingRows.length} 行，累计 ${opomRows.length} 行，请重新 AdsPower 匹配。`
-    : `已从 OPOM 拉取 ${data.count || 0} 行，请先执行 AdsPower 匹配。`);
-  els.file.value = '';
-  els.opomSummary.textContent = `group=${group} status=${status} rows=${opomRows.length} pageRows=${incomingRows.length} addressMaps=${data.addressMappingCount || 0}${opomNextCursor ? ' hasMore=true' : ''}`;
-  els.dryRunSummary.textContent = `已生成 ${selectedFile.name}，请先 Match AdsPower；启动执行时会自动预检。`;
-  syncOpomPagination();
-}
-
-async function matchAdsPower() {
-  if (!opomRows.length) throw new Error('请先从 OPOM 拉取待充值账号，或上传账号选择 CSV');
-  syncRowsWithCurrentDefaults();
-  const needsOpomResolve = opomRows.some((row) => !row.opom_account_id && (
-    row.login_email || row.ads_power_user_id || row.ads_power_serial_number
-  ));
-  let opomResolved = null;
-  let opomResolveWarning = '';
-  if (needsOpomResolve && sessionConfig.opomWritebackConfigured) {
-    try {
-      opomResolved = await api('/api/opom/resolve', {
-        method: 'POST',
-        body: JSON.stringify({
-          rows: opomRows,
-          group: els.opomGroup.value.trim() || 'VIP',
-          status: els.opomStatus.value || 'needs_recharge',
-        }),
+    for (const checkbox of el.matchBody.querySelectorAll('.row-check')) {
+      checkbox.addEventListener('change', () => {
+        const row = state.rows[Number(checkbox.dataset.index)];
+        if (row) row.execute = checkbox.checked;
+        invalidatePreparation();
+        syncSelectAllRows();
+        renderCounts();
       });
-      opomRows = opomResolved.rows || opomRows;
-      selectedCsvText = opomResolved.csvText || canonicalCsvFromRows(opomRows);
-      renderOpomPreview('opom_resolve');
-    } catch (error) {
-      const reason = sanitizeMessage(error.message || 'OPOM resolve failed');
-      opomResolveWarning = ` OPOM resolve failed: ${reason}`;
-      opomRows = opomRows.map((row) => {
-        if (row.opom_account_id) return row;
-        return {
+    }
+    renderCounts();
+  }
+
+  function renderCounts() {
+    const ready = state.rows.filter(rowReady).length;
+    const selected = selectedRows().length;
+    const blocked = state.rows.length - ready;
+    el.readyCount.textContent = String(ready);
+    el.selectedCount.textContent = String(selected);
+    el.blockedCount.textContent = String(blocked);
+    el.startButton.disabled = !canStart();
+    el.matchButton.disabled = !state.rows.length || el.skipMatch.checked;
+    el.matchButton.textContent = el.skipMatch.checked ? '已跳过匹配' : '匹配 AdsPower';
+  }
+
+  function canStart() {
+    if (!selectedRows().length) return false;
+    if (el.skipMatch.checked) {
+      return selectedRows().some((row) => row.ads_power_user_id || row.ads_power_serial_number);
+    }
+    return selectedRows().some((row) => row.ads_match_status === 'matched');
+  }
+
+  function renderControls() {
+    const opom = state.source === 'opom';
+    const configurationOnly = isConfigurationOnlyMode();
+    const cardFile = el.cardFile.files?.[0];
+    el.csvSource.hidden = opom;
+    el.opomSource.hidden = !opom;
+    el.ruleSummary.textContent = ruleText();
+    el.autoTopupSummary.textContent = autoTopupText();
+    el.balanceThreshold.disabled = configurationOnly;
+    el.amountBelow.disabled = configurationOnly;
+    el.amountAtOrAbove.disabled = configurationOnly;
+    el.autoTopupEnableOnly.disabled = configurationOnly;
+    el.autoTopupThreshold.disabled = configurationOnly || el.autoTopupEnableOnly.checked;
+    el.autoTopupAmount.disabled = configurationOnly || el.autoTopupEnableOnly.checked;
+    el.cardFileButton.disabled = configurationOnly;
+    el.cardFile.disabled = configurationOnly;
+    el.preserveExistingCard.disabled = configurationOnly || !cardFile;
+    el.cardFileLabel.textContent = cardFile
+      ? `${el.preserveExistingCard.checked ? '有卡保留 · 无卡新增' : '替换'} · ${cardFile.name}`
+      : '未选择';
+    el.billingState.disabled = configurationOnly;
+    document.querySelector('.three-inputs')?.classList.toggle('scope-control-disabled', configurationOnly);
+    document.querySelector('.auto-rule-section')?.classList.toggle('scope-control-disabled', configurationOnly);
+    for (const button of document.querySelectorAll('[data-source]')) {
+      const selected = button.dataset.source === state.source;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-checked', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
+    renderRows();
+  }
+
+  function invalidatePreparation() {
+    state.lastDryRun = null;
+    state.dryRunSignature = '';
+    state.liveConfirmationToken = '';
+  }
+
+  function setSource(source) {
+    if (source === state.source) return;
+    state.source = source;
+    state.rows = [];
+    state.fileName = '';
+    state.opomConfirmed = false;
+    state.cardAllocationSignature = '';
+    if (source === 'opom') {
+      el.autoTopupEnableOnly.checked = true;
+      el.skipMatch.checked = true;
+      el.opomLoadState.textContent = '尚未获取';
+    } else {
+      el.autoTopupEnableOnly.checked = false;
+      el.skipMatch.checked = false;
+    }
+    invalidatePreparation();
+    renderControls();
+  }
+
+  function markOpomDirty() {
+    if (state.source !== 'opom') return;
+    state.opomConfirmed = false;
+    state.rows = [];
+    state.fileName = '';
+    state.cardAllocationSignature = '';
+    el.opomLoadState.textContent = '参数已变更';
+    invalidatePreparation();
+    renderRows();
+  }
+
+  function opomDefaults() {
+    const rule = ruleValues();
+    const enableOnly = el.autoTopupEnableOnly.checked;
+    return {
+      amount: '',
+      balanceThreshold: String(rule.threshold),
+      amountBelowThreshold: String(rule.below),
+      amountAtOrAboveThreshold: String(rule.atOrAbove),
+      autoTopupThreshold: enableOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
+      autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
+    };
+  }
+
+  async function loadOpom() {
+    const group = el.opomGroup.value.trim();
+    if (!group) throw new Error('请输入 OPOM Group');
+    const limit = clampInteger(el.opomLimit, 1, 200, 50);
+    const data = await requestJson('/api/opom/ready', {
+      method: 'POST',
+      body: {
+        group,
+        status: opomStatusForRequest(),
+        limit,
+        cursor: '',
+        ...runtimeConfig(),
+        defaults: opomDefaults(),
+        addressCsvText: '',
+        // 本次上传支付卡表示要换卡，只读取 OPOM 账号信息，不采用当前绑卡状态和卡号。
+        ignoreCardBinding: Boolean(el.cardFile.files?.length),
+      },
+    });
+    state.rows = applyCurrentRules(applyAddresses(normalizeApiRows(data.rows, 'opom')));
+    state.fileName = `opom-${group}.csv`;
+    state.opomConfirmed = true;
+    state.cardAllocationSignature = '';
+    el.opomLoadState.textContent = `已获取 ${state.rows.length} 条`;
+    invalidatePreparation();
+    renderRows();
+    if (el.cardFile.files?.length) await ensureCardsAllocated();
+  }
+
+  async function loadAccountCsv(file) {
+    const rows = rowsFromCsv(await file.text());
+    if (!rows.length) {
+      throw new Error('账号 CSV 需要包含邮箱、AdsPowerId、AdsPower 编号或 OPOM 账号 ID');
+    }
+    assertValidSelectorEmails(rows);
+    state.rows = applyCurrentRules(applyAddresses(rows));
+    state.fileName = file.name;
+    state.cardAllocationSignature = '';
+    el.accountFileLabel.textContent = `${rows.length} 行 · ${file.name}`;
+    invalidatePreparation();
+    renderRows();
+  }
+
+  function optionsPayload() {
+    const configurationOnly = isConfigurationOnlyMode();
+    const enableZdr = el.enableZdrOnly.checked;
+    const hasCardCsv = Boolean(el.cardFile.files?.length);
+    const preserveExistingPaymentMethod = !configurationOnly && hasCardCsv && el.preserveExistingCard.checked;
+    return {
+      scopeBillingAddress: configurationOnly ? false : hasCardCsv,
+      scopePaymentMethod: configurationOnly ? false : hasCardCsv,
+      scopePurchase: !configurationOnly,
+      scopeAutoTopup: !configurationOnly,
+      disableZdr: el.zdrOnly.checked,
+      enableZdr,
+      enableDataTraining: el.dataTrainingOnly.checked,
+      disableDataTraining: el.disableDataTrainingOnly.checked,
+      refundOnly: el.refundOnly.checked,
+      removeExisting: !configurationOnly && hasCardCsv && !preserveExistingPaymentMethod,
+      preserveExistingPaymentMethod,
+      stopProfiles: true,
+      skipAdsPowerMatch: el.skipMatch.checked,
+      concurrency: String(clampInteger(el.concurrency, 1, 10, 1)),
+      confirmPurchase: !configurationOnly,
+      preparePurchaseOnly: false,
+      autoTopupThreshold: configurationOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
+      autoTopupAmount: configurationOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
+      autoTopupEnableOnly: configurationOnly ? false : el.autoTopupEnableOnly.checked,
+      cardProvider: 'EJH',
+      ...runtimeConfig(),
+      opomWriteback: !configurationOnly,
+      adspowerStatusMode: 'disabled',
+      adspowerSuccessGroupId: '',
+      adspowerFailureGroupId: '',
+      adspowerBlockerGroupId: '',
+      adspowerSuccessGroupName: '',
+      adspowerFailureGroupName: '',
+      adspowerBlockerGroupName: '',
+    };
+  }
+
+  async function matchAdsPower() {
+    if (!state.rows.length) throw new Error('请先导入账号');
+    state.rows = applyCurrentRules(state.rows);
+    const needsResolve = state.rows.some((row) => !row.opom_account_id && (
+      row.login_email || row.ads_power_user_id || row.ads_power_serial_number
+    ));
+    if (needsResolve && opomConfigured()) {
+      try {
+        const resolved = await requestJson('/api/opom/resolve', {
+          method: 'POST',
+          body: {
+            rows: state.rows,
+            group: el.opomGroup.value.trim() || 'VIP',
+            status: state.source === 'opom' ? opomStatusForRequest() : 'needs_recharge',
+            ignoreCardBinding: Boolean(el.cardFile.files?.length),
+            ...runtimeConfig(),
+          },
+        });
+        state.rows = mergeRows(state.rows, resolved.rows || []);
+      } catch (error) {
+        const reason = sanitizeMessage(error.message);
+        state.rows = state.rows.map((row) => row.opom_account_id ? row : {
           ...row,
           opom_health_status: 'opom_resolve_failed',
           opom_health_reason: reason,
-        };
-      });
-      selectedCsvText = canonicalCsvFromRows(opomRows);
-      renderOpomPreview('opom_resolve_failed');
+        });
+      }
     }
-  }
-  const data = await api('/api/adspower/match', {
-    method: 'POST',
-    body: JSON.stringify({
-      rows: opomRows.map((row) => ({
-        loginEmail: row.login_email,
-        ads_power_user_id: row.ads_power_user_id,
-        ads_power_serial_number: row.ads_power_serial_number,
-      })),
-      options: optionsPayload(),
-    }),
-  });
-  for (const item of data.results || []) {
-    if (!opomRows[item.index]) continue;
-    opomRows[item.index].ads_match_status = item.status || 'failed';
-    if (item.status !== 'matched') continue;
-    opomRows[item.index].ads_power_user_id = item.profile?.userId || opomRows[item.index].ads_power_user_id || '';
-    opomRows[item.index].ads_power_serial_number = item.profile?.serialNumber || opomRows[item.index].ads_power_serial_number || '';
-    opomRows[item.index].ads_power_group_name = item.profile?.groupName || opomRows[item.index].ads_power_group_name || '';
-  }
-  selectedCsvText = canonicalCsvFromRows(opomRows);
-  renderOpomPreview('adspower_match');
-  invalidateDryRun(`AdsPower 匹配完成：matched=${data.matched || 0}, failed=${data.failed || 0}。启动执行时会自动预检。`);
-  const opomResolveText = opomResolved
-    ? ` OPOM resolved=${opomResolved.matched || 0}/${opomResolved.total || 0}${opomResolved.resolveSource ? ` source=${opomResolved.resolveSource}` : ''}`
-    : opomResolveWarning;
-  els.opomSummary.textContent = `AdsPower matched=${data.matched || 0} failed=${data.failed || 0}${opomResolveText}`;
-}
 
-async function discoverAdsPowerStatusTargets() {
-  const data = await api('/api/adspower/status-targets', {
-    method: 'POST',
-    body: JSON.stringify({options: optionsPayload()}),
-  });
-  lastAdsPowerTargets = data;
-  renderAdsPowerTargets(data);
-}
-
-function renderAdsPowerTargets(data) {
-  const targetLine = (role) => {
-    const item = data.targets?.[role] || {};
-    return `${role}: ${item.status || 'missing'}${item.groupId ? ` ${item.groupId}` : ''}${item.groupName ? ` ${item.groupName}` : ''}`;
-  };
-  const candidateLine = (role) => {
-    const candidates = data.candidates?.[role] || [];
-    return `${role} candidates: ${candidates.length ? candidates.map((item) => `${item.groupId} ${item.groupName}`).join('; ') : 'none'}`;
-  };
-  const lines = [
-    `${data.ok ? 'OK' : 'WARN'} ${data.status || 'unknown'} base=${data.base || ''}`,
-    targetLine('success'),
-    targetLine('failure'),
-    targetLine('blocker'),
-    candidateLine('success'),
-    candidateLine('failure'),
-    candidateLine('blocker'),
-  ];
-  if (data.suggestedEnv?.length) lines.push(`suggested: ${data.suggestedEnv.join(' | ')}`);
-  if (!els.adspowerTargetsSummary || !els.adspowerUseDiscoveredTargets || !els.adspowerStatusMode) return;
-  els.adspowerTargetsSummary.innerHTML = lines.map((line) => escapeHtml(line)).join('<br>');
-  els.adspowerTargetsSummary.classList.toggle('danger', !data.ok);
-  els.adspowerUseDiscoveredTargets.disabled = els.adspowerStatusMode.value !== 'group_move'
-    || !data.ok
-    || !['success', 'failure', 'blocker'].some((role) => discoveredTargetValue(data, role));
-}
-
-function discoveredTargetValue(data, role) {
-  return data.targets?.[role]?.groupId || data.candidates?.[role]?.[0]?.groupId || '';
-}
-
-async function useDiscoveredAdsPowerTargets() {
-  if (!els.adspowerStatusMode || !els.adspowerSuccessGroupId || !els.adspowerFailureGroupId || !els.adspowerBlockerGroupId) {
-    throw new Error('AdsPower 状态写入界面已隐藏');
-  }
-  if (els.adspowerStatusMode.value !== 'group_move') {
-    throw new Error('Use discovered targets 仅适用于 group_move 模式');
-  }
-  if (!lastAdsPowerTargets?.ok) throw new Error('请先 Discover groups');
-  const fields = {
-    success: els.adspowerSuccessGroupId,
-    failure: els.adspowerFailureGroupId,
-    blocker: els.adspowerBlockerGroupId,
-  };
-  let filled = 0;
-  for (const [role, input] of Object.entries(fields)) {
-    const value = discoveredTargetValue(lastAdsPowerTargets, role);
-    if (!value) continue;
-    input.value = `id:${value}`;
-    filled += 1;
-  }
-  if (!filled) throw new Error('没有可采用的 AdsPower 分组目标');
-  invalidateDryRun(`已填入 ${filled} 个 AdsPower group_move 目标，启动执行时会自动预检。`);
-  renderAdsPowerTargets(lastAdsPowerTargets);
-}
-
-async function allocateCards({createCards = false} = {}) {
-  if (!opomRows.length) throw new Error('请先从 OPOM 拉取待充值账号，或上传账号选择 CSV');
-  await applyUploadedAddressCsvToRows();
-  syncRowsWithCurrentDefaults();
-  const uploadedCardCsv = els.ejhSafeCsv.files?.[0] ? await els.ejhSafeCsv.files[0].text() : '';
-  const body = {
-    rows: opomRows,
-    cardCsvText: uploadedCardCsv,
-    defaults: opomDefaultsPayload(),
-    createCards,
-    confirmCreateCards: false,
-    amount: els.ejhAmount.value.trim(),
-    activeDate: els.ejhActiveDate.value,
-    cardholder: els.ejhCardholder.value.trim(),
-  };
-  if (createCards) {
-    const count = opomRows.filter((row) => row.ads_match_status === 'matched').length;
-    if (!count) throw new Error('没有 AdsPower matched 行，不能真实 EJH 开卡');
-    if (!body.amount || !body.activeDate || !body.cardholder) {
-      throw new Error('真实 EJH 开卡需要填写 amount、active date、cardholder');
+    const data = await requestJson('/api/adspower/match', {
+      method: 'POST',
+      body: {
+        rows: state.rows.map((row) => ({
+          loginEmail: row.login_email,
+          ads_power_user_id: row.ads_power_user_id,
+          ads_power_serial_number: row.ads_power_serial_number,
+        })),
+        options: optionsPayload(),
+      },
+    });
+    for (const result of data.results || []) {
+      const row = state.rows[result.index];
+      if (!row) continue;
+      row.ads_match_status = result.status === 'matched' ? 'matched' : 'failed';
+      if (result.status === 'matched') {
+        row.ads_power_user_id = result.profile?.userId || row.ads_power_user_id;
+        row.ads_power_serial_number = result.profile?.serialNumber || row.ads_power_serial_number;
+        row.ads_power_group_name = result.profile?.groupName || row.ads_power_group_name;
+      }
     }
-    if (!window.confirm(`即将真实调用 EJH 开卡 ${count} 张，并输出安全开卡 CSV。未匹配行不会开卡。确认继续？`)) return;
-    body.count = count;
-    body.confirmCreateCards = true;
-  } else if (!body.cardCsvText.trim()) {
-    throw new Error('请先上传 EJH cards CSV，或使用 Create EJH cards');
+    state.cardAllocationSignature = '';
+    invalidatePreparation();
+    renderRows();
+    if (el.cardFile.files?.length) await ensureCardsAllocated();
   }
-  const data = await api('/api/cards/allocate', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-  opomRows = data.rows || [];
-  selectedCsvText = data.csvText || canonicalCsvFromRows(opomRows);
-  renderOpomPreview('card_allocated');
-  if (!selectedFile) selectedFile = {name: 'opom-recharge.csv'};
-  invalidateDryRun(`已分配卡 ${data.summary?.allocated || 0} 张，启动执行时会自动预检。`);
-  const cardPath = data.cardCsvPath ? ` cardCsv=${data.cardCsvPath}` : '';
-  els.opomSummary.textContent = `cards allocated=${data.summary?.allocated || 0} skipped=${data.summary?.skippedNotMatched || 0} rejected=${data.summary?.rejected || 0}${cardPath}`;
-}
 
-async function readSelectedFile() {
-  const file = els.file.files?.[0] || null;
-  selectedCsvText = '';
-  opomNextCursor = '';
-  opomRows = [];
-  if (file) {
-    const accountCsvText = await file.text();
-    const addressFile = els.addressMappingCsv.files?.[0] || null;
-    const addressCsvText = addressFile ? await addressFile.text() : '';
-    const addressMappingCount = addressCsvText ? addressMappingsFromCsv(addressCsvText).length : 0;
-    opomRows = selectorRowsFromCsv(accountCsvText, addressCsvText);
-    if (!opomRows.length) {
-      throw new Error('账号选择 CSV 至少需要 login_email/email/username、ads_power_serial_number/ID 或 ads_power_user_id');
-    }
-    selectedFile = {name: file.name};
-    selectedCsvText = canonicalCsvFromRows(opomRows);
-    els.opomSummary.textContent = `local selector rows=${opomRows.length} source=${selectedFile.name} addressMaps=${addressMappingCount}`;
-  } else {
-    selectedFile = null;
-    els.opomSummary.textContent = '未从 OPOM 拉取。';
-  }
-  renderOpomPreview(file ? 'local_selector' : '');
-  syncOpomPagination();
-  invalidateDryRun(selectedFile ? `已从账号选择 CSV 载入 ${opomRows.length} 行，请先 Match AdsPower。` : '先选择账号选择 CSV，或从 OPOM 拉取。');
-  els.dryRunSummary.textContent = selectedFile ? `已生成 ${selectedFile.name} 的内部执行 CSV，请先 Match AdsPower；启动执行时会自动预检。` : '先选择账号选择 CSV，或从 OPOM 拉取。';
-  updateRunStats();
-}
-
-async function withButtonBusy(button, label, task) {
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = label;
-  try {
-    return await task();
-  } finally {
-    button.textContent = originalText;
-    button.disabled = false;
-    syncOpomPagination();
-    if (button === els.liveRun) {
-      syncExecutionAvailability();
-    }
-  }
-}
-
-async function runDryRun() {
-  if (!selectedFile) await readSelectedFile();
-  await applyUploadedAddressCsvToRows();
-  syncRowsWithCurrentDefaults();
-  if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
-  if (selectedScopeLabels().length === 0) throw new Error('请至少选择一个执行范围');
-  syncExecutionCopy();
-  lastDryRun = await api('/api/jobs/dry-run', {
-    method: 'POST',
-    body: JSON.stringify({
-      fileName: selectedFile.name,
-      csvText: selectedCsvText,
-      options: optionsPayload(),
-    }),
-  });
-  clearError();
-  dryRunSignature = currentSignature();
-  liveConfirmationToken = lastDryRun.liveConfirmationToken || '';
-  els.dryRunSummary.innerHTML = [
-    `scope: ${selectedScopeLabels().join(' / ')}`,
-    `planned: ${lastDryRun.planned}`,
-    `ready: ${lastDryRun.ready}`,
-    `blocked: ${lastDryRun.blocked}`,
-    `skipped: ${lastDryRun.skipped}`,
-  ].map(escapeHtml).join(' | ');
-  if (lastDryRun.ready < 1 || !liveConfirmationToken) {
-    els.confirmLive.checked = false;
-  }
-  els.confirmationState.textContent = liveConfirmationToken
-    ? `预检通过，确认 token 有效至 ${lastDryRun.liveConfirmationExpiresAt}`
-    : '没有可执行行';
-  syncExecutionAvailability();
-  updateRunStats();
-}
-
-async function createLiveJob() {
-  if (!selectedCsvText.trim()) throw new Error('请选择账号选择 CSV，或从 OPOM 拉取');
-  const mode = executionMode();
-  if (!els.confirmLive.checked) throw new Error(mode.requireText);
-  if (!lastDryRun || dryRunSignature !== currentSignature()) {
-    els.confirmationState.textContent = '正在自动预检...';
-    await runDryRun();
-  }
-  if (dryRunSignature !== currentSignature()) throw new Error('CSV 或选项已变化，请重新预检');
-  if (!lastDryRun || lastDryRun.ready < 1 || !liveConfirmationToken) {
-    throw new Error(`预检未通过：ready=${lastDryRun?.ready || 0} blocked=${lastDryRun?.blocked || 0}`);
-  }
-  if (!els.confirmLive.checked) throw new Error(mode.requireText);
-  const scopeText = selectedScopeLabels().join(' / ');
-  const actionText = `${mode.action}，执行范围：${scopeText}。确认继续？`;
-  if (!window.confirm(actionText)) return;
-  const data = await api('/api/jobs', {
-    method: 'POST',
-    body: JSON.stringify({
-      fileName: selectedFile.name,
-      csvText: selectedCsvText,
-      options: optionsPayload(),
-      liveConfirmationToken,
-    }),
-  });
-  selectedJobId = data.job.id;
-  jobsPage = 1;
-  clearError();
-  await refreshAll();
-}
-
-async function refreshAll() {
-  const data = await api('/api/jobs');
-  clearError();
-  const current = data.worker?.current;
-  const currentRows = data.worker?.currentRows || [];
-  els.worker.textContent = data.worker?.running
-    ? `Worker: running ${currentRows.length || 1} row${(currentRows.length || 1) > 1 ? 's' : ''} row=${current?.rowNumber || '-'} profile=${current?.profileId || '-'} stage=${current?.stage || '-'} elapsed=${formatDuration(current?.elapsedMs)}`
-    : 'Worker: idle';
-  renderJobs(data.jobs || []);
-  if (selectedJobId) await loadJob(selectedJobId);
-}
-
-function renderJobs(jobs) {
-  lastJobs = Array.isArray(jobs) ? jobs : [];
-  const totalPages = Math.max(1, Math.ceil(lastJobs.length / JOBS_PAGE_SIZE));
-  jobsPage = Math.min(Math.max(1, jobsPage), totalPages);
-  const start = (jobsPage - 1) * JOBS_PAGE_SIZE;
-  const pageJobs = lastJobs.slice(start, start + JOBS_PAGE_SIZE);
-  els.jobsBody.innerHTML = pageJobs.map((job) => `
-    <tr data-job-id="${escapeHtml(job.id)}" class="${job.id === selectedJobId ? 'selected' : ''}" tabindex="0" role="button" aria-selected="${job.id === selectedJobId ? 'true' : 'false'}">
-      <td>${escapeHtml(job.fileName)}<br><span class="muted">${escapeHtml(job.id)}</span></td>
-      <td>${statusBadge(job.status)}</td>
-      <td>${job.totalRows}</td>
-      <td>${job.completedRows}</td>
-      <td>${job.failedRows}</td>
-      <td>${job.blockedRows}</td>
-      <td>${escapeHtml(formatChinaTime(job.createdAt))}</td>
-    </tr>
-  `).join('');
-  if (els.jobsPageInfo) {
-    const rangeStart = lastJobs.length ? start + 1 : 0;
-    const rangeEnd = Math.min(start + JOBS_PAGE_SIZE, lastJobs.length);
-    els.jobsPageInfo.textContent = `第 ${jobsPage} / ${totalPages} 页 · ${rangeStart}-${rangeEnd} / ${lastJobs.length}`;
-  }
-  if (els.jobsPrevPage) els.jobsPrevPage.disabled = jobsPage <= 1;
-  if (els.jobsNextPage) els.jobsNextPage.disabled = jobsPage >= totalPages;
-  for (const row of els.jobsBody.querySelectorAll('tr[data-job-id]')) {
-    const select = () => {
-      selectedJobId = row.dataset.jobId;
-      loadJob(selectedJobId).catch(showError);
-      refreshAll().catch(showError);
-    };
-    row.addEventListener('click', select);
-    row.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      select();
+  function allocationSignature() {
+    const file = el.cardFile.files?.[0];
+    if (!file) return '';
+    return JSON.stringify({
+      file: [file.name, file.size, file.lastModified],
+      rows: state.rows.map((row, index) => rowKeys(row)[0] || `row:${index}`),
+      preserveExistingPaymentMethod: el.preserveExistingCard.checked,
     });
   }
-}
 
-function setJobsPage(page) {
-  jobsPage = page;
-  renderJobs(lastJobs);
-}
-
-async function loadJob(jobId) {
-  const seq = ++loadSequence;
-  const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
-  if (seq !== loadSequence) return;
-  renderJobDetail(data.job, data.rows || [], data.events || []);
-}
-
-function renderJobDetail(job, rows, events = []) {
-  if (!job) return;
-  const running = rows.find((row) => row.status === 'running');
-  const canResumeRows = !['queued', 'running'].includes(job.status);
-  els.jobMeta.innerHTML = `
-    ${statusBadge(job.status)}
-    <span>总数 ${job.totalRows}</span>
-    <span>完成 ${job.completedRows}</span>
-    <span>失败 ${job.failedRows}</span>
-    <span>阻塞 ${job.blockedRows}</span>
-    ${running ? `<span>当前行 ${escapeHtml(running.rowNumber)} / ${escapeHtml(running.stage)}</span>` : ''}
-    <span class="muted">${escapeHtml(job.id)}</span>
-  `;
-  els.cancel.disabled = !['queued', 'running'].includes(job.status);
-  els.download.disabled = !job.resultCsvReady;
-  els.download.classList.toggle('disabled', !job.resultCsvReady);
-  els.download.setAttribute('aria-disabled', job.resultCsvReady ? 'false' : 'true');
-  els.cancel.textContent = job.status === 'running' ? '请求停止后续行' : '取消排队任务';
-  els.rowsBody.innerHTML = rows.map((row) => `
-    <tr>
-      <td>${row.rowNumber}</td>
-      <td>${escapeHtml(row.profileId)}</td>
-      <td>${escapeHtml(row.loginEmail || row.username)}</td>
-      <td>${statusBadge(row.status)}</td>
-      <td>${escapeHtml(row.stage)}</td>
-      <td>${escapeHtml(row.purchaseAmount || row.amount || '')}</td>
-      <td>${escapeHtml(row.balanceBefore)} → ${escapeHtml(row.balanceAfter)}</td>
-      <td>${escapeHtml(row.autoTopupStatus)} ${escapeHtml(row.autoTopupThreshold)}/${escapeHtml(row.autoTopupAmount)}</td>
-      <td>${escapeHtml(cardNoLabel(row))}</td>
-      <td>${escapeHtml(formatChinaTime(row.updatedAt))}</td>
-      <td class="message">${escapeHtml(sanitizeMessage(row.message || (row.missing || []).join(',')))}</td>
-      <td>
-        <button type="button" class="resume-row-btn" data-row-number="${escapeHtml(row.rowNumber)}" ${canResumeRows ? '' : 'disabled'}>从本行继续</button>
-        ${canRepairOpomWriteback(row, canResumeRows) ? `<button type="button" class="repair-opom-btn" data-row-number="${escapeHtml(row.rowNumber)}">补写 OPOM</button>` : ''}
-      </td>
-    </tr>
-  `).join('');
-  els.rowsBody.querySelectorAll('.resume-row-btn').forEach((button) => {
-    button.addEventListener('click', () => resumeFromRow(Number(button.dataset.rowNumber)).catch(showError));
-  });
-  els.rowsBody.querySelectorAll('.repair-opom-btn').forEach((button) => {
-    button.addEventListener('click', () => repairOpomWriteback(Number(button.dataset.rowNumber)).catch(showError));
-  });
-  renderEvents(events);
-}
-
-function canRepairOpomWriteback(row, canResumeRows) {
-  return canResumeRows
-    && row.status === 'failed'
-    && row.stage === 'opom.writeback'
-    && row.purchaseStatus === 'verified';
-}
-
-function resumePreviewSummary(preview, includeRiskyRows = false) {
-  const lines = [
-    `从第 ${preview.startRowNumber} 行继续。`,
-    `候选行 ${preview.totalCandidateRows} 行。`,
-    `将重排队 ${preview.queuedRows?.length || 0} 行，已在队列 ${preview.alreadyQueuedRows?.length || 0} 行。`,
-    `已完成/已跳过 ${preview.skippedCompletedRows?.length || 0} 行不会重跑。`,
-    `高风险行 ${preview.skippedRiskyRows?.length || 0} 行${includeRiskyRows ? '将包含重跑。' : '默认跳过。'}`,
-  ];
-  if (preview.unsupportedRows?.length) lines.push(`不可续跑 ${preview.unsupportedRows.length} 行。`);
-  if (preview.csvAvailability?.source === 'recovered_from_result_csv') lines.push('原始执行 CSV 缺失，已从 result CSV 恢复。');
-  if (preview.csvAvailability && !preview.csvAvailability.ok) lines.push(`CSV 不可用：${preview.csvAvailability.reason || '未知原因'}`);
-  return lines.join('\n');
-}
-
-async function resumeFromRow(startRowNumber) {
-  if (!selectedJobId) return;
-  const preview = await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume-preview`, {
-    method: 'POST',
-    body: JSON.stringify({startRowNumber}),
-  });
-  if (!preview.csvAvailability?.ok) {
-    window.alert(resumePreviewSummary(preview));
-    return;
-  }
-  if (!preview.queuedRows?.length && !preview.alreadyQueuedRows?.length && !preview.skippedRiskyRows?.length) {
-    window.alert(`${resumePreviewSummary(preview)}\n\n没有可续跑的行。`);
-    return;
-  }
-
-  let includeRiskyRows = false;
-  if (preview.skippedRiskyRows?.length) {
-    includeRiskyRows = window.confirm(`${resumePreviewSummary(preview)}\n\n检测到 running / purchase_unverified / manual_security_blocker 等高风险行。只有确认线下核对后才建议包含这些行。是否包含高风险行继续？`);
-  }
-  const finalPreview = includeRiskyRows
-    ? await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume-preview`, {
+  async function ensureCardsAllocated() {
+    if (isConfigurationOnlyMode()) {
+      state.cardAllocationSignature = '';
+      return;
+    }
+    const file = el.cardFile.files?.[0];
+    if (!file) {
+      state.cardAllocationSignature = '';
+      return;
+    }
+    if (!state.rows.length) throw new Error('请先导入账号');
+    const signature = allocationSignature();
+    if (signature === state.cardAllocationSignature) return;
+    if (!el.skipMatch.checked && !state.rows.some((row) => row.ads_match_status === 'matched')) {
+      throw new Error('请先完成 AdsPower 匹配');
+    }
+    const data = await requestJson('/api/cards/allocate', {
       method: 'POST',
-      body: JSON.stringify({startRowNumber, includeRiskyRows: true}),
-    })
-    : preview;
-  if (!finalPreview.queuedRows?.length && !finalPreview.alreadyQueuedRows?.length) {
-    window.alert(`${resumePreviewSummary(finalPreview, includeRiskyRows)}\n\n没有可续跑的行。`);
-    return;
+      body: {
+        // 分卡使用完整账号源顺序；用户勾选只控制任务执行范围，不能参与账号与卡号的配对。
+        rows: applyCurrentRules(state.rows),
+        skipAdsPowerMatch: el.skipMatch.checked,
+        cardCsvText: await file.text(),
+        defaults: opomDefaults(),
+        ...runtimeConfig(),
+        createCards: false,
+        confirmCreateCards: false,
+        amount: '',
+        activeDate: '',
+        cardholder: '',
+      },
+    });
+    const allocatedRows = data.rows || [];
+    if (allocatedRows.length !== state.rows.length) {
+      throw new Error(`支付卡分配结果行数不一致：账号 ${state.rows.length} 行，返回 ${allocatedRows.length} 行`);
+    }
+    // 分卡接口保证按位置返回，按同一位置合并可避免邮箱或 AdsPower 字段变化造成串卡。
+    state.rows = state.rows.map((row, index) => ({
+      ...row,
+      ...allocatedRows[index],
+      execute: row.execute !== false,
+    }));
+    state.cardAllocationSignature = signature;
+    invalidatePreparation();
+    renderRows();
   }
-  if (!window.confirm(`${resumePreviewSummary(finalPreview, includeRiskyRows)}\n\n确认在原任务内从本行继续？`)) return;
-  await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/resume`, {
-    method: 'POST',
-    body: JSON.stringify({startRowNumber, includeRiskyRows}),
-  });
-  await refreshAll();
-  await loadJob(selectedJobId);
-}
 
-async function repairOpomWriteback(rowNumber) {
-  if (!selectedJobId) return;
-  if (!window.confirm(`只补写第 ${rowNumber} 行的 OPOM 记录，不会打开 AdsPower，也不会重新购买。确认继续？`)) return;
-  await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/rows/${encodeURIComponent(rowNumber)}/opom-writeback-repair`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-  await refreshAll();
-  await loadJob(selectedJobId);
-}
-
-function renderEvents(events) {
-  const recent = [...events].slice(-80).reverse();
-  els.eventsBody.innerHTML = recent.length
-    ? recent.map((event) => `
-      <div class="event-line">
-        <span>${escapeHtml(formatChinaTime(event.createdAt))}</span>
-        <strong>${escapeHtml(event.type || '')}</strong>
-        <span>${escapeHtml(sanitizeMessage(event.message || ''))}</span>
-      </div>
-    `).join('')
-    : '暂无事件。';
-}
-
-async function cancelSelectedJob() {
-  if (!selectedJobId) return;
-  if (!window.confirm('取消不会中断当前正在执行的浏览器步骤，只会停止后续排队行。确认？')) return;
-  await api(`/api/jobs/${encodeURIComponent(selectedJobId)}/cancel`, {method: 'POST', body: '{}'});
-  await refreshAll();
-}
-
-function showError(error) {
-  els.alert.hidden = false;
-  els.alert.textContent = sanitizeMessage(error.message);
-  els.dryRunSummary.textContent = sanitizeMessage(error.message);
-}
-
-function clearError() {
-  els.alert.hidden = true;
-  els.alert.textContent = '';
-}
-
-async function refreshPreflight() {
-  const data = await api('/api/preflight');
-  els.preflight.innerHTML = data.checks.map((check) => {
-    const mark = check.ok ? 'OK' : 'WARN';
-    return `${escapeHtml(mark)} ${escapeHtml(check.label)}: ${escapeHtml(check.status)}`;
-  }).join('<br>');
-  if (!data.ok) els.preflight.classList.add('danger');
-}
-
-async function downloadSelectedResult(event) {
-  event.preventDefault();
-  if (!selectedJobId || els.download.disabled || els.download.classList.contains('disabled')) return;
-  const url = `/api/jobs/${encodeURIComponent(selectedJobId)}/result.csv`;
-  const res = await fetch(url, {headers: {'X-Runner-Session': sessionToken}});
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `HTTP ${res.status}`);
+  function currentSignature() {
+    return JSON.stringify({
+      source: state.source,
+      fileName: state.fileName,
+      csvText: canonicalCsv(),
+      options: optionsPayload(),
+      card: allocationSignature(),
+    });
   }
-  const blob = await res.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = objectUrl;
-  link.download = `${selectedJobId}.result.csv`;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(objectUrl);
-}
 
-els.file.addEventListener('change', () => readSelectedFile().catch(showError));
-els.opomReady.addEventListener('click', () => withButtonBusy(els.opomReady, 'Loading...', loadOpomReady).catch(showError));
-els.opomLoadMore.addEventListener('click', () => withButtonBusy(els.opomLoadMore, 'Loading...', loadMoreOpomRows).catch(showError));
-els.adsPowerMatch.addEventListener('click', () => withButtonBusy(els.adsPowerMatch, 'Matching...', matchAdsPower).catch(showError));
-els.adspowerDiscoverTargets?.addEventListener('click', () => withButtonBusy(els.adspowerDiscoverTargets, 'Discovering...', discoverAdsPowerStatusTargets).catch(showError));
-els.adspowerUseDiscoveredTargets?.addEventListener('click', () => useDiscoveredAdsPowerTargets().catch(showError));
-els.opomWriteback.addEventListener('change', () => invalidateDryRun());
-els.addressMappingCsv.addEventListener('change', () => {
-  applyUploadedAddressCsvToRows()
-    .then(() => invalidateDryRun('Billing address CSV 已变化，启动执行时会重新预检。'))
-    .catch(showError);
-});
-els.allocateCards.addEventListener('click', () => withButtonBusy(els.allocateCards, 'Allocating...', () => allocateCards()).catch(showError));
-els.createCards.addEventListener('click', () => withButtonBusy(els.createCards, 'Creating...', () => allocateCards({createCards: true})).catch(showError));
-els.removeExisting.addEventListener('change', () => invalidateDryRun());
-els.stopProfiles.addEventListener('change', () => invalidateDryRun());
-els.concurrency.addEventListener('input', () => invalidateDryRun('并发数量已变化，启动执行时会重新预检。'));
-els.adspowerStatusMode?.addEventListener('change', () => {
-  els.adspowerUseDiscoveredTargets.disabled = true;
-  invalidateDryRun();
-});
-for (const input of [els.adspowerSuccessGroupId, els.adspowerFailureGroupId, els.adspowerBlockerGroupId]) {
-  input?.addEventListener('input', () => invalidateDryRun());
-}
-for (const input of [
-  els.defaultAmount,
-  els.defaultBalanceThreshold,
-  els.defaultAmountBelow,
-  els.defaultAmountAtOrAbove,
-  els.defaultAutoTopupThreshold,
-  els.defaultAutoTopupAmount,
-]) {
-  input.addEventListener('input', () => {
-    syncRowsWithCurrentDefaults();
-    invalidateDryRun('规则已变化，请重新 Match AdsPower；启动执行时会重新预检。');
-  });
-}
-els.noPurchaseMode.addEventListener('change', () => {
-  syncScopeControls();
-  invalidateDryRun();
-});
-for (const checkbox of [els.scopeBillingAddress, els.scopePaymentMethod, els.scopePurchase, els.scopeAutoTopup]) {
-  checkbox.addEventListener('change', () => {
-    syncScopeControls();
-    invalidateDryRun();
-  });
-}
-els.confirmLive.addEventListener('change', () => {
-  syncExecutionAvailability();
-});
-els.liveRun.addEventListener('click', () => withButtonBusy(els.liveRun, 'Starting...', createLiveJob).catch(showError));
-els.refresh.addEventListener('click', () => withButtonBusy(els.refresh, 'Refreshing...', refreshAll).catch(showError));
-els.jobsPrevPage?.addEventListener('click', () => setJobsPage(jobsPage - 1));
-els.jobsNextPage?.addEventListener('click', () => setJobsPage(jobsPage + 1));
-els.cancel.addEventListener('click', () => cancelSelectedJob().catch(showError));
-els.download.addEventListener('click', (event) => downloadSelectedResult(event).catch(showError));
+  function validateExecutionInput() {
+    if (!selectedRows().length) throw new Error('请至少选择一个账号');
+    if (!canStart()) throw new Error('请先完成 AdsPower 匹配，或确认跳过匹配');
+    if (isConfigurationOnlyMode()) return;
+    const rule = ruleValues();
+    if (!Number.isFinite(rule.threshold) || rule.threshold <= 0) {
+      throw new Error('余额阈值必须大于 0');
+    }
+    if (![rule.below, rule.atOrAbove].every((value) => Number.isFinite(value) && value >= 0)) {
+      throw new Error('分支充值金额必须大于等于 0');
+    }
+    if (!el.autoTopupEnableOnly.checked) {
+      if (numericValue(el.autoTopupThreshold, 0) <= 0) throw new Error('Auto Top-Up 阈值必须大于 0');
+      if (numericValue(el.autoTopupAmount, 0) <= 0) throw new Error('Auto Top-Up 充值金额必须大于 0');
+    }
+  }
 
-initSession()
-  .then(async () => {
-    syncScopeControls();
-    await refreshPreflight();
-    await refreshAll();
-    setInterval(() => refreshAll().catch(showError), 3000);
-  })
-  .catch(showError);
+  async function runAutomaticSafetyCheck() {
+    const csvText = canonicalCsv();
+    const signature = currentSignature();
+    state.lastDryRun = await requestJson('/api/jobs/dry-run', {
+      method: 'POST',
+      body: {
+        fileName: state.fileName || `${state.source}-recharge.csv`,
+        csvText,
+        options: optionsPayload(),
+      },
+    });
+    state.dryRunSignature = signature;
+    state.liveConfirmationToken = state.lastDryRun.liveConfirmationToken || '';
+    if (!state.liveConfirmationToken || Number(state.lastDryRun.ready || 0) < 1) {
+      throw new Error(`没有可执行账号：可执行 ${state.lastDryRun.ready || 0}，阻塞 ${state.lastDryRun.blocked || 0}`);
+    }
+    return state.lastDryRun;
+  }
+
+  function openPendingWindow() {
+    state.pendingWindowBlocked = false;
+    state.pendingWindow = window.open('about:blank', '_blank');
+    if (!state.pendingWindow) {
+      state.pendingWindowBlocked = true;
+      return;
+    }
+    try {
+      state.pendingWindow.document.title = '正在创建任务';
+      state.pendingWindow.document.body.style.cssText = 'font:16px -apple-system,sans-serif;padding:32px;color:CanvasText;background:Canvas;';
+      state.pendingWindow.document.body.textContent = '正在创建任务，完成后将自动打开执行页…';
+    } catch {
+      // The placeholder is best effort; the job remains recoverable from task history.
+    }
+  }
+
+  function closePendingWindow() {
+    if (state.pendingWindow && !state.pendingWindow.closed) state.pendingWindow.close();
+    state.pendingWindow = null;
+  }
+
+  async function beginExecution() {
+    clearError();
+    validateExecutionInput();
+    try {
+      el.startButton.disabled = true;
+      el.startButton.textContent = '检查中…';
+      await ensureCardsAllocated();
+      const dryRun = await runAutomaticSafetyCheck();
+      el.confirmSource.textContent = state.source === 'opom' ? 'OPOM' : 'CSV';
+      el.confirmRows.textContent = String(selectedRows().length);
+      el.confirmRule.textContent = ruleText();
+      el.confirmZdr.textContent = zdrText();
+      el.confirmDataTraining.textContent = el.dataTrainingOnly.checked
+        ? '仅开启'
+        : (el.disableDataTrainingOnly.checked ? '仅关闭' : '保持现状');
+      el.confirmReadiness.textContent = `${dryRun.ready} 可执行 / ${dryRun.blocked} 阻塞`;
+      el.confirmDialog.showModal();
+    } finally {
+      el.startButton.textContent = '开始执行';
+      renderCounts();
+    }
+  }
+
+  async function createJob() {
+    if (state.creatingJob) return;
+    openPendingWindow();
+    state.creatingJob = true;
+    el.createJobButton.disabled = true;
+    el.createJobButton.textContent = '创建中…';
+    try {
+      if (state.dryRunSignature !== currentSignature()) {
+        throw new Error('准备内容已变化，请关闭确认窗口后重新开始');
+      }
+      const data = await requestJson('/api/jobs', {
+        method: 'POST',
+        body: {
+          fileName: state.fileName || `${state.source}-recharge.csv`,
+          csvText: canonicalCsv(),
+          options: optionsPayload(),
+          liveConfirmationToken: state.liveConfirmationToken,
+        },
+      });
+      const jobId = data.job?.id;
+      if (!jobId) throw new Error('任务创建成功但未返回任务 ID');
+      state.confirmDialogResult = 'created';
+      el.confirmDialog.close('created');
+      const url = `/execution.html?job=${encodeURIComponent(jobId)}`;
+      if (state.pendingWindow && !state.pendingWindow.closed) {
+        state.pendingWindow.location.replace(url);
+        state.pendingWindow.focus();
+      } else {
+        el.executionFallbackLink.href = url;
+        el.executionFallback.hidden = false;
+      }
+      state.pendingWindow = null;
+      await refreshJobs();
+    } catch (error) {
+      closePendingWindow();
+      throw error;
+    } finally {
+      state.creatingJob = false;
+      el.createJobButton.disabled = false;
+      el.createJobButton.textContent = '确认并创建任务';
+    }
+  }
+
+  function formatTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date);
+  }
+
+  function openExecution(jobId) {
+    if (!jobId) return;
+    const url = `/execution.html?job=${encodeURIComponent(jobId)}`;
+    const opened = window.open(url, '_blank', 'noopener');
+    if (!opened) {
+      el.executionFallbackLink.href = url;
+      el.executionFallback.hidden = false;
+    }
+  }
+
+  function renderWorkerAndJobs() {
+    const currentRows = Array.isArray(state.worker.currentRows) ? state.worker.currentRows : [];
+    if (state.worker.running) {
+      el.workerButton.classList.add('is-running');
+      el.workerLabel.textContent = `Worker 执行中 · ${currentRows.length || 1} 个子任务`;
+    } else {
+      el.workerButton.classList.remove('is-running');
+      el.workerLabel.textContent = 'Worker 空闲';
+    }
+
+    if (!state.jobs.length) {
+      el.recordList.innerHTML = '<p class="confirmation-warning">暂无任务记录。</p>';
+      return;
+    }
+    el.recordList.innerHTML = state.jobs.map((job) => `
+      <button class="record-button" type="button" data-job-id="${escapeHtml(job.id)}">
+        <strong>${escapeHtml(job.fileName || job.id)}</strong>
+        ${pill(job.status === 'completed' ? 'ok' : ['queued', 'running'].includes(job.status) ? 'warning' : 'error', job.status)}
+        <span>${job.completedRows || 0}/${job.totalRows || 0} 完成 · ${job.failedRows || 0} 失败 · ${job.blockedRows || 0} 阻塞</span>
+        <small>${escapeHtml(formatTime(job.createdAt))} · ${escapeHtml(job.id)}</small>
+      </button>
+    `).join('');
+    for (const button of el.recordList.querySelectorAll('[data-job-id]')) {
+      button.addEventListener('click', () => openExecution(button.dataset.jobId));
+    }
+  }
+
+  function schedulerPayload(enabled) {
+    const options = optionsPayload();
+    return {
+      enabled,
+      confirmAutomaticPurchase: enabled,
+      group: el.opomGroup.value.trim() || 'VIP',
+      status: 'needs_recharge',
+      limit: String(clampInteger(el.opomLimit, 1, 200, 50)),
+      options: {
+        ...options,
+        opomWriteback: options.scopePurchase,
+        confirmPurchase: options.scopePurchase,
+        preparePurchaseOnly: false,
+      },
+      defaults: opomDefaults(),
+    };
+  }
+
+  function renderSchedulerState(scheduler = {}) {
+    if (!el.autoRechargeEnabled || !el.autoRechargeSummary || !scheduler.ok) return;
+    state.scheduler = scheduler;
+    el.autoRechargeEnabled.checked = Boolean(scheduler.enabled);
+    el.autoRechargeEnabled.disabled = !scheduler.enabled && (!opomConfigured() || !adsPowerConfigured());
+    el.autoRechargeEnabled.title = el.autoRechargeEnabled.disabled
+      ? '请先在设置中配置 OPOM 和 AdsPower'
+      : '';
+    const summary = [
+      scheduler.enabled ? '自动充值已启用。' : '自动充值未启用。',
+      scheduler.schedule || '每小时 15 和 45 分',
+      scheduler.nextRunAt ? `下次 ${formatTime(scheduler.nextRunAt)}` : '',
+      scheduler.lastRunAt ? `上次 ${formatTime(scheduler.lastRunAt)}` : '',
+      scheduler.message || '',
+    ].filter(Boolean).join(' ');
+    el.autoRechargeSummary.textContent = summary;
+    el.autoRechargeSummary.classList.toggle('success', Boolean(scheduler.enabled) && !/failed/i.test(scheduler.status || ''));
+    el.autoRechargeSummary.classList.toggle('warning', /failed|skipped|idle_no_ready/i.test(scheduler.status || ''));
+  }
+
+  async function toggleAutoRecharge() {
+    const enabled = el.autoRechargeEnabled.checked;
+    if (enabled && el.refundOnly.checked) {
+      el.autoRechargeEnabled.checked = false;
+      throw new Error('仅退款属于人工专项操作，不支持自动定时执行');
+    }
+    const confirmation = el.zdrOnly.checked
+      ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
+      : el.enableZdrOnly.checked
+        ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
+        : el.dataTrainingOnly.checked
+          ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 Data Training 的任务，不执行充值或 Auto Top-Up。确认启用？'
+          : el.disableDataTrainingOnly.checked
+            ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 Data Training 的任务，不执行充值或 Auto Top-Up。确认启用？'
+            : '启用后，服务端将在每小时 15 和 45 分按当前页面参数自动创建真实充值任务。确认启用？';
+    if (enabled && !window.confirm(confirmation)) {
+      el.autoRechargeEnabled.checked = false;
+      return;
+    }
+    const scheduler = await requestJson('/api/scheduler', {
+      method: 'POST',
+      body: schedulerPayload(enabled),
+    });
+    renderSchedulerState(scheduler);
+  }
+
+  async function refreshJobs() {
+    const data = await requestJson('/api/jobs');
+    state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    state.worker = data.worker || {};
+    renderSchedulerState(data.scheduler || {});
+    renderWorkerAndJobs();
+    clearError();
+    if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
+    state.refreshTimer = window.setTimeout(
+      () => refreshJobs().catch(showError),
+      state.worker.running ? 3000 : 30000,
+    );
+  }
+
+  async function withBusy(button, busyText, action) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText;
+    try {
+      return await action();
+    } finally {
+      button.textContent = original;
+      renderCounts();
+    }
+  }
+
+  function resetPreparation() {
+    state.source = 'csv';
+    state.rows = [];
+    state.fileName = '';
+    state.opomConfirmed = false;
+    state.cardAllocationSignature = '';
+    el.accountFile.value = '';
+    el.cardFile.value = '';
+    el.accountFileLabel.textContent = '未选择';
+    el.cardFileLabel.textContent = '未选择';
+    el.preserveExistingCard.checked = false;
+    el.preserveExistingCard.disabled = true;
+    el.opomGroup.value = 'VIP';
+    el.opomStatus.value = 'card_switch&overdue';
+    el.opomLimit.value = '50';
+    el.opomLoadState.textContent = '尚未获取';
+    el.balanceThreshold.value = '145';
+    el.amountBelow.value = '150';
+    el.amountAtOrAbove.value = '20';
+    el.autoTopupThreshold.value = '30';
+    el.autoTopupAmount.value = '70';
+    el.autoTopupEnableOnly.checked = false;
+    el.zdrOnly.checked = false;
+    el.enableZdrOnly.checked = false;
+    el.dataTrainingOnly.checked = false;
+    el.disableDataTrainingOnly.checked = false;
+    el.refundOnly.checked = false;
+    el.skipMatch.checked = false;
+    el.concurrency.value = '1';
+    invalidatePreparation();
+    renderControls();
+  }
+
+  function bindSourceControl() {
+    const buttons = [...document.querySelectorAll('[data-source]')];
+    buttons.forEach((button, index) => {
+      button.addEventListener('click', () => setSource(button.dataset.source));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const nextIndex = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? buttons.length - 1
+            : (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[nextIndex].focus();
+        setSource(buttons[nextIndex].dataset.source);
+      });
+    });
+  }
+
+  function bindEvents() {
+    bindSourceControl();
+    el.accountFileButton.addEventListener('click', () => {
+      // 浏览器对同一路径文件不会再次触发 change；清空原选择后允许重复导入同一份账号 CSV。
+      el.accountFile.value = '';
+      el.accountFile.click();
+    });
+    el.accountFile.addEventListener('change', () => {
+      const file = el.accountFile.files?.[0];
+      if (!file) return;
+      withBusy(el.accountFileButton, '读取中…', () => loadAccountCsv(file)).catch(showError);
+    });
+    el.cardFileButton.addEventListener('click', () => el.cardFile.click());
+    el.cardFile.addEventListener('change', () => {
+      const file = el.cardFile.files?.[0];
+      if (!file) el.preserveExistingCard.checked = false;
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderControls();
+      if (file && state.rows.length && canStart()) {
+        withBusy(el.cardFileButton, '分配中…', ensureCardsAllocated).catch(showError);
+      }
+    });
+    el.preserveExistingCard.addEventListener('change', () => {
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderControls();
+    });
+
+    ['opomGroup', 'opomStatus', 'opomLimit'].forEach((key) => {
+      el[key].addEventListener('input', markOpomDirty);
+      el[key].addEventListener('change', markOpomDirty);
+    });
+
+    ['balanceThreshold', 'amountBelow', 'amountAtOrAbove', 'autoTopupThreshold', 'autoTopupAmount']
+      .forEach((key) => {
+        el[key].addEventListener('input', () => {
+          state.cardAllocationSignature = '';
+          invalidatePreparation();
+          renderControls();
+        });
+      });
+
+    el.autoTopupEnableOnly.addEventListener('change', () => {
+      if (el.autoTopupEnableOnly.checked) el.skipMatch.checked = true;
+      invalidatePreparation();
+      renderControls();
+    });
+    function setConfigurationOnlyMode(activeId) {
+      // 所有专项任务互斥，避免一次任务同时执行退款和账号配置修改。
+      for (const id of ['zdrOnly', 'enableZdrOnly', 'dataTrainingOnly', 'disableDataTrainingOnly', 'refundOnly']) {
+        if (id !== activeId) el[id].checked = false;
+      }
+      // 专项操作不依赖充值前匹配，开启时同步采用用户已人工确认的匹配结果。
+      if (activeId) el.skipMatch.checked = true;
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderControls();
+    }
+    el.zdrOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.zdrOnly.checked ? 'zdrOnly' : '');
+    });
+    el.enableZdrOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.enableZdrOnly.checked ? 'enableZdrOnly' : '');
+    });
+    el.dataTrainingOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.dataTrainingOnly.checked ? 'dataTrainingOnly' : '');
+    });
+    el.disableDataTrainingOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.disableDataTrainingOnly.checked ? 'disableDataTrainingOnly' : '');
+    });
+    el.refundOnly.addEventListener('change', () => {
+      setConfigurationOnlyMode(el.refundOnly.checked ? 'refundOnly' : '');
+    });
+    el.skipMatch.addEventListener('change', () => {
+      state.cardAllocationSignature = '';
+      invalidatePreparation();
+      renderRows();
+    });
+    el.concurrency.addEventListener('input', invalidatePreparation);
+    el.billingState.addEventListener('change', invalidatePreparation);
+
+    for (const key of CONFIG_FIELDS) {
+      el[key].addEventListener('input', () => {
+        el.settingsState.textContent = '配置有未保存的修改。';
+        renderConnectionSummary();
+        renderSchedulerState(state.scheduler);
+        invalidatePreparation();
+      });
+    }
+
+    el.loadOpomButton.addEventListener('click', () => {
+      withBusy(el.loadOpomButton, '获取中…', loadOpom).catch(showError);
+    });
+    el.matchButton.addEventListener('click', () => {
+      withBusy(el.matchButton, '匹配中…', matchAdsPower).catch(showError);
+    });
+    el.startButton.addEventListener('click', () => beginExecution().catch(showError));
+    el.createJobButton.addEventListener('click', () => createJob().catch(showError));
+    el.confirmDialog.addEventListener('close', () => {
+      if (el.confirmDialog.returnValue !== 'created') closePendingWindow();
+    });
+
+    el.resetButton.addEventListener('click', resetPreparation);
+    el.dismissError.addEventListener('click', clearError);
+
+    el.settingsButton.addEventListener('click', () => el.settingsDialog.showModal());
+    el.recordsButton.addEventListener('click', () => {
+      renderWorkerAndJobs();
+      el.recordsDialog.showModal();
+    });
+    el.saveSettingsButton.addEventListener('click', saveRuntimeConfig);
+    el.clearSettingsButton.addEventListener('click', clearRuntimeConfig);
+    el.autoRechargeEnabled.addEventListener('change', () => {
+      toggleAutoRecharge().catch((error) => {
+        el.autoRechargeEnabled.checked = Boolean(state.scheduler.enabled);
+        showError(error);
+      });
+    });
+    el.contrastButton.addEventListener('click', () => {
+      setHighContrast(!document.body.classList.contains('high-contrast'));
+    });
+  }
+
+  async function init() {
+    loadRuntimeConfig();
+    setHighContrast(Boolean(readUiPrefs().highContrast));
+    bindEvents();
+    renderControls();
+    try {
+      await initSession();
+      await refreshJobs();
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  init();
+})();

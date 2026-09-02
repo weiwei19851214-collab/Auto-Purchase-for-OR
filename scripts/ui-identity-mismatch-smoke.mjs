@@ -6,75 +6,57 @@ import {pathToFileURL} from 'node:url';
 import {redact} from '../src/server/redact.mjs';
 
 const DEFAULT_PLAYWRIGHT_PATH = '/Users/weiwei/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js';
-const ADDRESS_CSV = `LastName,FirstName,Street,City,State,Zip,PhoneNumber
-Ignored,Mismatch,1 Main St,Portland,OR,97001,5551112222
+const CSV = `login_email,ads_power_user_id,ads_power_serial_number
+expected@example.com,ads-mismatch-1,1416
 `;
-
 const args = parseArgs(process.argv.slice(2));
 const baseUrl = normalizeBase(args.base || process.env.SMOKE_BASE_URL || 'http://127.0.0.1:4100');
 const checks = [];
+let browser;
+let tempDir = '';
+const popups = [];
 
 function add(label, ok, status = '') {
   checks.push({label, ok: Boolean(ok), status: String(status || (ok ? 'ok' : 'failed'))});
 }
 
-let browser;
-let tempDir = '';
-
 try {
   const playwright = await loadPlaywright();
   const chromium = playwright.chromium || playwright.default?.chromium;
   if (!chromium) throw new Error('Loaded Playwright package does not expose chromium');
-
   tempDir = mkdtempSync(join(tmpdir(), 'recharge-identity-smoke-'));
-  const addressCsvPath = join(tempDir, 'addresses.csv');
-  writeFileSync(addressCsvPath, ADDRESS_CSV, 'utf8');
+  const csvPath = join(tempDir, 'accounts.csv');
+  writeFileSync(csvPath, CSV, 'utf8');
 
-  browser = await chromium.launch({headless: true});
+  browser = await launchChromium(chromium, {headless: true});
   const page = await browser.newPage({viewport: {width: 1440, height: 1200}});
   const consoleErrors = [];
   const pageErrors = [];
+  page.on('popup', async (popup) => {
+    popups.push(popup);
+    await popup.close().catch(() => {});
+  });
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  await page.route('**/api/opom/ready', async (route) => {
+  await page.route('**/api/opom/resolve', async (route) => {
+    const payload = route.request().postDataJSON?.() || {};
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
         ok: true,
-        count: 1,
-        nextCursor: '',
-        addressMappingCount: 0,
-        csvText: '',
-        rows: [{
-          status: '',
+        total: rows.length,
+        matched: rows.length,
+        failed: 0,
+        rows: rows.map((row) => ({
+          ...row,
           opom_account_id: 'acct-mismatch-1',
-          login_email: 'expected@example.com',
-          ads_power_user_id: 'ads-mismatch-1',
-          ads_power_serial_number: '1416',
-          ads_power_group_name: 'recharge',
           opom_health_status: 'ok',
-          opom_health_reason: '',
-          ads_match_status: '',
-          order_no: 'order-mismatch-1',
-          card_no: '5257970000000001',
-          exp_month: '06',
-          exp_year: '2028',
-          cvv: '456',
-          amount: '10',
-          postal_code: '97001',
-          holder_name: 'Mismatch User',
-          country: 'US',
-          address_line1: '1 Main St',
-          city: 'Portland',
-          state: 'OR',
-          auto_topup_threshold: '2',
-          auto_topup_amount: '25',
-          idempotency_key: 'recharge_plan:acct-mismatch-1:v1',
-        }],
+        })),
       }),
     });
   });
@@ -94,7 +76,7 @@ try {
           profile: {
             userId: 'ads-mismatch-1',
             serialNumber: '1416',
-            groupName: 'recharge',
+            groupName: 'VIP',
           },
         }],
       }),
@@ -102,27 +84,17 @@ try {
   });
 
   await page.goto(baseUrl, {waitUntil: 'networkidle'});
-  await page.setInputFiles('#addressMappingCsv', addressCsvPath);
-  await page.click('#opomReadyBtn');
-  await page.waitForFunction(() => /rows=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  add('Load OPOM group renders mismatch candidate', await page.locator('#opomPreviewBody tr').count() === 1, 'rows=1');
+  await page.setInputFiles('#accountFile', csvPath);
+  await page.waitForFunction(() => /1 个账号/.test(document.querySelector('#detailTitle')?.textContent || ''));
+  add('CSV renders mismatch candidate', await page.locator('#matchBody tr').count() === 1, 'rows=1');
 
-  await page.click('#adsPowerMatchBtn');
-  await page.waitForFunction(() => /failed=1/.test(document.querySelector('#opomSummary')?.textContent || ''));
-  const previewText = await page.locator('#opomPreviewBody').textContent();
-  add('AdsPower mismatch is visible in preview', /identity_mismatch/.test(previewText || ''), redact(previewText || 'missing'));
+  await page.click('#matchButton');
+  await page.waitForFunction(() => /报错/.test(document.querySelector('#matchBody')?.textContent || ''));
+  const previewText = await page.locator('#matchBody').textContent();
+  add('AdsPower mismatch is visible as error', /报错/.test(previewText || ''), redact(previewText || 'missing'));
 
-  await page.check('#confirmLive');
-  await page.click('#liveRunBtn');
-  await page.waitForFunction(() => {
-    const summary = document.querySelector('#dryRunSummary')?.textContent || '';
-    return /ready\s*[:=]\s*0/.test(summary) && /blocked\s*[:=]\s*1/.test(summary);
-  });
-  const dryRunSummary = await page.locator('#dryRunSummary').textContent();
-  add('identity_mismatch row is blocked by auto preflight', /ready\s*[:=]\s*0/.test(dryRunSummary || '') && /blocked\s*[:=]\s*1/.test(dryRunSummary || ''), redact(dryRunSummary || 'missing'));
-  add('preview explains AdsPower mismatch', /identity_mismatch/.test(previewText || ''), redact(previewText || 'missing'));
-  add('live confirmation reset for mismatch', !(await page.locator('#confirmLive').isChecked()), 'unchecked');
-  add('live run button disabled for mismatch', await page.locator('#liveRunBtn').isDisabled(), 'disabled');
+  add('identity_mismatch row blocks start', await page.locator('#startButton').isDisabled(), 'disabled');
+  add('confirmation dialog remains closed for mismatch', !(await page.locator('#confirmDialog').evaluate((node) => node.open)), 'closed');
 
   const bodyText = await page.locator('body').textContent();
   add('identity mismatch UI redaction', !containsSensitive(bodyText), 'no_sensitive_values');
@@ -131,29 +103,22 @@ try {
 } catch (error) {
   add('ui identity mismatch smoke exception', false, redact(error.message || 'unknown error'));
 } finally {
+  for (const popup of popups) await popup.close().catch(() => {});
   if (browser) await browser.close();
   if (tempDir) rmSync(tempDir, {recursive: true, force: true});
 }
 
 const failed = checks.filter((check) => !check.ok);
 const result = {ok: failed.length === 0, failed: failed.length, baseUrl, checks};
-if (args.json) {
-  console.log(JSON.stringify(result, null, 2));
-} else {
-  for (const check of checks) {
-    console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
-  }
-  console.log(result.ok ? 'ui identity mismatch smoke passed' : `ui identity mismatch smoke failed: ${failed.length} check(s)`);
+if (args.json) console.log(JSON.stringify(result, null, 2));
+else {
+  for (const check of checks) console.log(`${check.ok ? 'OK' : 'FAIL'} ${check.label}: ${check.status}`);
+  console.log(result.ok ? 'ui identity mismatch smoke passed' : `ui identity mismatch failed: ${failed.length} check(s)`);
 }
 process.exitCode = result.ok ? 0 : 1;
 
 async function loadPlaywright() {
-  const candidates = [
-    process.env.PLAYWRIGHT_IMPORT_PATH || '',
-    DEFAULT_PLAYWRIGHT_PATH,
-    'playwright',
-  ].filter(Boolean);
-
+  const candidates = [process.env.PLAYWRIGHT_IMPORT_PATH || '', DEFAULT_PLAYWRIGHT_PATH, 'playwright'].filter(Boolean);
   const errors = [];
   for (const candidate of candidates) {
     try {
@@ -170,18 +135,26 @@ async function loadPlaywright() {
   throw new Error(`Unable to load Playwright. Set PLAYWRIGHT_IMPORT_PATH. ${errors.join(' | ')}`);
 }
 
+async function launchChromium(chromium, options) {
+  const executablePath = String(process.env.PLAYWRIGHT_EXECUTABLE_PATH || '').trim();
+  if (executablePath) return chromium.launch({...options, executablePath});
+  try {
+    return await chromium.launch(options);
+  } catch (error) {
+    if (!/Executable doesn't exist|browser executable/i.test(error.message || '')) throw error;
+    return chromium.launch({...options, channel: 'chrome'});
+  }
+}
+
 function parseArgs(argv) {
   const parsed = {base: '', json: false};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--json') {
-      parsed.json = true;
-    } else if (arg === '--base') {
+    if (arg === '--json') parsed.json = true;
+    else if (arg === '--base') {
       parsed.base = argv[index + 1] || '';
       index += 1;
-    } else if (arg.startsWith('--base=')) {
-      parsed.base = arg.split('=').slice(1).join('=');
-    }
+    } else if (arg.startsWith('--base=')) parsed.base = arg.split('=').slice(1).join('=');
   }
   return parsed;
 }
@@ -193,5 +166,5 @@ function normalizeBase(value) {
 }
 
 function containsSensitive(value) {
-  return /,456,|cvv/i.test(String(value || ''));
+  return /525797\d{10}|(?:^|[^0-9])456(?:[^0-9]|$)/i.test(String(value || ''));
 }

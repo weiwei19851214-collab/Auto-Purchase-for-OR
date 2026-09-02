@@ -37,8 +37,12 @@ const PURCHASE_ONLY_CSV = `status,ID,username,amount
 ,1415,user@example.com,10
 `;
 
-const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_below_threshold,amount_at_or_above_threshold
-,1415,user@example.com,200,200,10
+const BALANCE_RULE_PURCHASE_CSV = `status,ID,username,balance_threshold,amount_below_threshold
+,1415,user@example.com,145,150
+`;
+
+const BALANCE_RULE_WITH_AT_OR_ABOVE_CSV = `status,ID,username,balance_threshold,amount_below_threshold,amount_at_or_above_threshold
+,1415,user@example.com,145,150,20
 `;
 
 const CARD_ONLY_CSV = `status,ID,username,card_number,exp_month,exp_year,cvv,postal_code
@@ -74,8 +78,34 @@ test('runnerArgs supports no-purchase test mode', () => {
 test('runnerArgs clamps concurrency to a safe local range', () => {
   assert.equal(runnerArgs({concurrency: 2}).concurrency, 2);
   assert.equal(runnerArgs({concurrency: 0}).concurrency, 1);
-  assert.equal(runnerArgs({concurrency: 99}).concurrency, 5);
+  assert.equal(runnerArgs({concurrency: 99}).concurrency, 10);
   assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
+});
+
+test('runnerArgs caps a row timeout below the three-minute total budget', () => {
+  assert.equal(runnerArgs({rowTimeoutMs: 999999}).rowTimeoutMs, 175000);
+  assert.equal(runnerArgs({rowTimeoutMs: 30000}).rowTimeoutMs, 30000);
+});
+
+test('runnerArgs carries OPOM card provider selection', () => {
+  assert.equal(runnerArgs({}).cardProvider, 'EJH');
+  assert.equal(runnerArgs({cardProvider: 'PINGPONG'}).cardProvider, 'PINGPONG');
+  assert.equal(runnerArgs({cardProvider: 'bad'}).cardProvider, 'EJH');
+});
+
+test('runnerArgs carries the explicit AdsPower match waiver', () => {
+  assert.equal(runnerArgs({skipAdsPowerMatch: true}).skipAdsPowerMatch, true);
+  assert.equal(runnerArgs({}).skipAdsPowerMatch, false);
+});
+
+test('runnerArgs keeps replacement as default and makes preserve-existing mutually exclusive', () => {
+  const defaults = runnerArgs({});
+  assert.equal(defaults.removeExisting, true);
+  assert.equal(defaults.preserveExistingPaymentMethod, false);
+
+  const preserve = runnerArgs({removeExisting: true, preserveExistingPaymentMethod: true});
+  assert.equal(preserve.removeExisting, false);
+  assert.equal(preserve.preserveExistingPaymentMethod, true);
 });
 
 test('runnerArgs disables purchase confirmation when purchase scope is off', () => {
@@ -111,8 +141,17 @@ test('parsePlan validates execution scopes independently', async () => {
     scopeAutoTopup: false,
   });
   assert.equal(balanceRulePurchase.rows[0].status, 'ready');
-  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_rule');
+  assert.equal(balanceRulePurchase.rows[0].purchasePlan, 'balance_threshold_amounts');
   assert.equal(balanceRulePurchase.rows[0].executionScope, 'purchase');
+
+  const balanceRuleWithAtOrAbove = await parsePlan(BALANCE_RULE_WITH_AT_OR_ABOVE_CSV, {
+    scopeBillingAddress: false,
+    scopePaymentMethod: false,
+    scopePurchase: true,
+    scopeAutoTopup: false,
+  });
+  assert.equal(balanceRuleWithAtOrAbove.rows[0].status, 'ready');
+  assert.equal(balanceRuleWithAtOrAbove.rows[0].purchasePlan, 'balance_threshold_amounts');
 
   const card = await parsePlan(CARD_ONLY_CSV, {
     scopeBillingAddress: false,
@@ -131,6 +170,82 @@ test('parsePlan validates execution scopes independently', async () => {
   });
   assert.equal(billing.rows[0].status, 'ready');
   assert.equal(billing.rows[0].executionScope, 'billing_address');
+});
+
+test('purchasePlan supports fixed recharge amounts by balance threshold', () => {
+  const plan = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '20',
+  });
+  assert.equal(plan.mode, 'balance_threshold_amounts');
+  assert.equal(plan.purchase.rule.threshold, '145');
+  assert.equal(plan.purchase.rule.belowAmount, '150');
+  assert.equal(plan.purchase.rule.atOrAboveAmount, '20');
+});
+
+test('purchasePlan accepts zero on either balance-rule branch as skip purchase', () => {
+  const zeroBelow = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '20',
+  });
+  const bothZero = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '0',
+  });
+  assert.equal(zeroBelow.mode, 'balance_threshold_amounts');
+  assert.equal(zeroBelow.purchase.rule.belowAmountConfigured, true);
+  assert.equal(zeroBelow.purchase.rule.belowAmount, '');
+  assert.equal(zeroBelow.purchase.rule.atOrAboveAmount, '20');
+  assert.equal(bothZero.purchase.rule.belowAmountConfigured, true);
+  assert.equal(bothZero.purchase.rule.belowAmount, '');
+  assert.equal(bothZero.purchase.rule.atOrAboveAmount, '');
+});
+
+test('buildClosedLoopTask preserves explicit zero below-threshold branch for child runner', () => {
+  const task = rechargePlan.buildClosedLoopTask({
+    ID: '1415',
+    username: 'user@example.com',
+    balance_threshold: '145',
+    amount_below_threshold: '0',
+    amount_at_or_above_threshold: '20',
+  }, {
+    scopeBillingAddress: false,
+    scopePaymentMethod: false,
+    scopePurchase: true,
+    scopeAutoTopup: false,
+  });
+  assert.equal(task.purchase.rule.belowAmountConfigured, true);
+  assert.equal(task.purchase.rule.belowAmount, '');
+  assert.equal(task.purchase.rule.atOrAboveAmount, '20');
+});
+
+test('purchasePlan still rejects missing below-threshold amount when balance rule is incomplete', () => {
+  const plan = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '',
+    amount_at_or_above_threshold: '20',
+  });
+  assert.equal(plan.mode, 'incomplete_balance_rule');
+  assert.deepEqual(plan.missing, ['amount_below_threshold']);
+});
+
+test('purchasePlan skips the high-balance branch when its amount is blank or zero', () => {
+  const blankAmount = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '',
+  });
+  const zeroAmount = rechargePlan.purchasePlan({
+    balance_threshold: '145',
+    amount_below_threshold: '150',
+    amount_at_or_above_threshold: '0',
+  });
+  assert.equal(blankAmount.mode, 'balance_threshold_amounts');
+  assert.equal(blankAmount.purchase.rule.atOrAboveAmount, '');
+  assert.equal(zeroAmount.purchase.rule.atOrAboveAmount, '');
 });
 
 test('parsePlan rejects empty execution scope', async () => {
@@ -164,6 +279,42 @@ test('buildClosedLoopTask maps scoped purchase without card to purchaseOnly mode
   assert.equal(task.card.number || '', '');
 });
 
+test('buildClosedLoopTask passes preserve-existing card policy to the browser task', () => {
+  const task = rechargePlan.buildClosedLoopTask({
+    ID: '1415',
+    username: 'user@example.com',
+    amount: '10',
+    card_number: '5257970000000001',
+    exp_month: '06',
+    exp_year: '28',
+    cvv: '456',
+    postal_code: '97001',
+  }, runnerArgs({
+    scopePaymentMethod: true,
+    preserveExistingPaymentMethod: true,
+    scopeAutoTopup: false,
+  }));
+  assert.equal(task.preserveExistingPaymentMethod, true);
+  assert.equal(task.removeExistingPaymentMethod, false);
+  assert.equal(task.card.number, '5257970000000001');
+});
+
+test('preserve-existing browser policy inspects any saved card before the removal and add-card path', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const preserveStart = script.indexOf('if (input.preserveExistingPaymentMethod)');
+  const removalStart = script.indexOf('const removal = input.removeExistingPaymentMethod', preserveStart);
+  assert.ok(preserveStart > 0);
+  assert.ok(removalStart > preserveStart);
+  assert.match(script.slice(preserveStart, removalStart), /inspectSavedPaymentMethod/);
+  assert.match(script.slice(preserveStart, removalStart), /paymentMethodAction = 'existing_preserved'/);
+  assert.match(script, /paymentMethodAction:\s*recoveryPaymentMethodAction/);
+  assert.match(script, /card:\s*recoveryCard/);
+  const uiInspectionStart = script.indexOf('async function verifySavedPaymentMethodFromCreditsUi');
+  const nextFunction = script.indexOf('async function openPurchaseCreditsModal', uiInspectionStart);
+  assert.doesNotMatch(script.slice(uiInspectionStart, nextFunction), /Add a Payment Method|Add Payment Method/);
+  assert.match(script, /const customerNotFound = \/Customer not found\/i/);
+});
+
 test('billing-address-only browser path refuses Add Credits fallback', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
   assert.match(script, /requireAddPaymentMethod:\s*input\.billingAddressOnly/);
@@ -171,11 +322,328 @@ test('billing-address-only browser path refuses Add Credits fallback', () => {
   assert.match(script, /async function clickAddPaymentMethod/);
 });
 
-test('browser path falls back when OpenRouter server action id changes', () => {
+test('browser path removes a saved card through one semantic trash-button click', () => {
   const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
-  assert.match(script, /Server action not found/i);
-  assert.match(script, /openrouter_update_current_user_action_not_found/);
   assert.match(script, /removeSavedPaymentMethodsFromPicker/);
+  assert.match(script, /runLoggedStep\('remove-saved-payment-method'/);
+  assert.match(script, /hasTrashIcon/);
+  assert.doesNotMatch(script, /UPDATE_CURRENT_USER_ACTION/);
+  assert.doesNotMatch(script, /elementFromPoint/);
+  const removalStart = script.indexOf('async function removeSavedPaymentMethodsFromPicker');
+  const removalEnd = script.indexOf('async function openAddCreditsPaymentPath', removalStart);
+  const removalBody = script.slice(removalStart, removalEnd);
+  assert.doesNotMatch(removalBody, /for \(let i = 0; i < 8/);
+  assert.match(removalBody, /normalizedText\.includes\(normalizedRemovedCard\)/);
+});
+
+test('browser path keeps Stripe inspection fallback independent from saved-card removal', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /stripeTargets=/);
+  assert.match(script, /verifySavedPaymentMethodFromCreditsUi/);
+  assert.match(script, /stripe_data_404_ui_fallback/);
+  assert.match(script, /Credits UI fallback found no saved payment method/);
+  assert.doesNotMatch(script, /Next-Action/);
+});
+
+test('purchase-only browser path opens Add Credits amount modal before verifying the saved card', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const purchaseOnlyStart = script.indexOf('if (input.purchaseOnly)');
+  const purchaseOnlyEnd = script.indexOf('const removal = input.removeExistingPaymentMethod', purchaseOnlyStart);
+  const purchaseOnlyBody = script.slice(purchaseOnlyStart, purchaseOnlyEnd);
+  assert.match(script, /async function openPurchaseCreditsModal/);
+  assert.match(purchaseOnlyBody, /open-add-credits-purchase-only/);
+  assert.ok(purchaseOnlyBody.indexOf('openPurchaseCreditsModal(page)') < purchaseOnlyBody.indexOf('verifySavedPaymentMethodForAutoTopup(page'));
+  assert.match(script, /Add Credits was clicked but Purchase Credits amount modal did not open/);
+  const purchaseModalStateBody = script.slice(script.indexOf('async function getPurchaseModalState'), script.indexOf('async function getCurrentCreditBalance'));
+  assert.match(purchaseModalStateBody, /\^Purchase Credits\$/);
+  assert.match(purchaseModalStateBody, /purchase:\s*!!purchaseHeading/);
+  assert.doesNotMatch(purchaseModalStateBody, /purchase:\s*\/Purchase Credits\/i\.test\(text\)/);
+});
+
+test('auto-topup-only browser path opens Add Credits to verify a saved card, then closes it before configuration', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.lastIndexOf('if (input.autoTopupOnly)');
+  const end = script.indexOf('if (input.purchaseOnly)', start);
+  const body = script.slice(start, end);
+  assert.ok(body.indexOf('openPurchaseCreditsModal(page)') < body.indexOf('verifySavedPaymentMethodForAutoTopup(page'));
+  assert.ok(body.indexOf('verifySavedPaymentMethodForAutoTopup(page') < body.indexOf('closePurchaseModal(page)'));
+  assert.ok(body.indexOf('closePurchaseModal(page)') < body.indexOf('configureAutoTopup(page'));
+});
+
+test('purchase-only browser path defers OPOM result writeback instead of requiring card binding fields', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.indexOf('async function writeOpomCardBindingAfterPurchase');
+  const end = script.indexOf('async function waitForAccountState', start);
+  const body = script.slice(start, end);
+  assert.match(body, /if \(input\.purchaseOnly\)/);
+  assert.match(body, /reason: 'card_binding_out_of_scope'/);
+  assert.ok(body.indexOf('if (input.purchaseOnly)') < body.indexOf('writeCardBinding({'));
+});
+
+test('browser path can click icon-only add payment method button in Purchase Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /icon:add-payment-method/);
+  assert.match(script, /hasIconAddPaymentMethod/);
+  assert.match(script, /isPlusIconButton/);
+  assert.ok(script.includes('M12\\\\s*4\\\\.5v15m7\\\\.5-7\\\\.5h-15'));
+  assert.match(script, /Purchase Credits/);
+  assert.match(script, /Total due/);
+});
+
+test('card save waits for the Saving state to finish before opening Purchase Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const saveWaitBody = script.slice(script.indexOf('async function waitUntilSaveModalCloses'), script.indexOf('async function verifyByPurchaseModal'));
+  assert.match(script, /const SAVE_PAYMENT_METHOD_WAIT_MS = 20000/);
+  assert.match(saveWaitBody, /Save payment method\|\\\\bSaving\\\\b/);
+  assert.match(saveWaitBody, /Save modal did not close after/);
+  assert.ok(saveWaitBody.indexOf('if (!state.stillSaving && state.hasAddCredits) return state;') < saveWaitBody.indexOf('const stripeFrameIssue'));
+});
+
+test('retry card binding prefers an already-open card form over stale saved-card text', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const entryBody = script.slice(script.indexOf('async function openPaymentMethodEntryPath'), script.indexOf('function isRetryablePageLoadError'));
+  assert.ok(entryBody.indexOf('initial.hasSavePaymentMethod || initial.hasCardFormText') < entryBody.indexOf('initial.purchase && initial.targetCardVisible'));
+});
+
+test('stalled card-save recovery refreshes and verifies the existing card without another Save click', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const cardSaveBody = script.slice(script.indexOf("runLoggedStep('wait-save-modal-closes'"), script.indexOf("const purchaseResult = input.purchase.confirmed", script.indexOf("runLoggedStep('wait-save-modal-closes'")));
+  assert.match(script, /const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 20000/);
+  assert.match(cardSaveBody, /refresh-after-stalled-card-save/);
+  assert.match(cardSaveBody, /verify-saved-card-after-stalled-save/);
+  assert.match(cardSaveBody, /refreshOnTimeout:\s*false/);
+  assert.doesNotMatch(cardSaveBody, /click-save-payment-method-retry/);
+});
+
+test('browser path no longer disables Auto top-up before opening Add Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.doesNotMatch(script, /disableExistingAutoTopupBeforeAddCredits/);
+  assert.doesNotMatch(script, /disable-existing-auto-topup-before-add-credits/);
+  assert.match(script, /auto_topup_pre_disable_removed/);
+});
+
+test('AdsPower browser startup HTTP timeout allows 30 seconds under concurrency', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000/);
+  assert.match(script, /api\/v1\/browser\/start[\s\S]{0,500}DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS/);
+});
+
+test('browser path recognizes updated Auto top-up buttons and scoped inputs', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.ok(script.includes('button#auto-buy[role="switch"],button#auto-buy'));
+  assert.ok(script.includes("node?.getAttribute('aria-checked') === 'true'"));
+  assert.ok(script.includes("node?.getAttribute('data-state') === 'checked'"));
+  assert.doesNotMatch(script, /direct\.checked === true/);
+  assert.match(script, /labelOf\(node\)/);
+  assert.match(script, /document\.querySelectorAll\('input'\)/);
+  assert.doesNotMatch(script, /waitForAutoTopupEditorShell/);
+  assert.doesNotMatch(script, /auto_topup_editor_fields/);
+  assert.doesNotMatch(script, /values_already_set/);
+  assert.match(script, /writeOpomCardBindingAfterPurchase/);
+  assert.ok(script.indexOf('writeOpomCardBindingAfterPurchase(input, purchaseResult') < script.indexOf("runLoggedStep('configure-auto-topup-final'"));
+});
+
+test('Auto top-up refresh and input fill do not use macOS Command shortcuts', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const refreshBody = script.slice(script.indexOf('async function commandRefreshCreditsPage'), script.indexOf('async function detectNewAccountOverlay'));
+  const clearInputBody = script.slice(script.indexOf('async function clearFocusedFieldWithBackspaces'), script.indexOf('async function typeFocusedFieldWithKeyEvents'));
+  const typeInputBody = script.slice(script.indexOf('async function typeFocusedFieldWithKeyEvents'), script.indexOf('async function blurFocusedFieldWithTab'));
+  const blurInputBody = script.slice(script.indexOf('async function blurFocusedFieldWithTab'), script.indexOf('async function focusStripeFieldWithCdp'));
+  const fillInputBody = script.slice(script.indexOf('async function replaceAutoTopupInputById'), script.indexOf('async function fillAutoTopupForm'));
+  assert.match(refreshBody, /Page\.reload/);
+  assert.match(refreshBody, /method: 'page_reload'/);
+  assert.doesNotMatch(refreshBody, /MetaLeft|KeyR|command_r/);
+  assert.match(fillInputBody, /input\.focus\(\{preventScroll:true\}\)/);
+  assert.match(clearInputBody, /key: 'End'/);
+  assert.match(typeInputBody, /type: 'char'/);
+  assert.match(clearInputBody, /Backspace/);
+  assert.match(fillInputBody, /clearFocusedFieldWithBackspaces/);
+  assert.match(blurInputBody, /key: 'Tab'/);
+  assert.match(fillInputBody, /typeFocusedFieldWithKeyEvents/);
+  assert.match(fillInputBody, /blurFocusedFieldWithTab/);
+  assert.match(fillInputBody, /const blurred = document\.activeElement !== input/);
+  assert.match(fillInputBody, /auto_topup_input_not_focused/);
+  assert.doesNotMatch(fillInputBody, /MetaLeft|KeyA/);
+  assert.doesNotMatch(fillInputBody, /dispatchEvent|setNativeValue|input\.setSelectionRange|input\.select\(\)|\\.value\\s*=/);
+});
+
+test('Auto top-up popup cleanup does not bring the AdsPower browser to the foreground', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const popupCleanup = script.slice(script.indexOf('async function dismissBrowserChromeBubbles'), script.indexOf('async function waitUntilSaveModalCloses'));
+  assert.match(popupCleanup, /Input\.dispatchKeyEvent/);
+  assert.match(popupCleanup, /Input\.dispatchMouseEvent/);
+  assert.doesNotMatch(popupCleanup, /Page\.bringToFront/);
+});
+
+test('Auto top-up retries one save when overview text does not match requested values', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopupAttempt'), script.indexOf('async function configureAutoTopup(page'));
+  assert.match(script, /retryAutoTopupSaveAfterOverviewMismatch/);
+  assert.match(script, /overview_text_mismatch_after_first_save/);
+  assert.ok(script.includes('input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold'));
+  assert.ok(script.includes('input#auto-topup-amount[name="amount"], input#auto-topup-amount'));
+  assert.ok(script.includes("document.querySelectorAll('form button[type=\"submit\"], button[type=\"submit\"]')"));
+  assert.match(script, /auto_topup_cdp_key_events_with_blur/);
+  assert.ok(script.includes('fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true})'));
+  assert.match(script, /attempt < 30/);
+  assert.match(script, /await sleep\(100\)/);
+  assert.match(script, /attempt < 3/);
+  assert.match(script, /readAutoTopupFormValues/);
+  assert.match(script, /waitForAutoTopupConfigured\(page, threshold, amount, timeoutMs = 6000\)/);
+  assert.match(script, /Auto top-up form inputs not ready/);
+  assert.doesNotMatch(script, /dirtyValueFor/);
+  assert.match(script, /readAutoTopupConfiguredNow/);
+  assert.match(script, /overview_already_matched_before_retry/);
+  assert.match(script, /openAutoTopupEditor\(page, \{\.\.\.stateBeforeRetry, enabled: true, hasManage: true\}, 'Manage'\)/);
+  assert.ok(configureBody.indexOf('const saved = await saveAutoTopup(page)') < configureBody.indexOf('retryAutoTopupSaveAfterOverviewMismatch(page, requested, error)'));
+  assert.ok(configureBody.indexOf('retryAutoTopupSaveAfterOverviewMismatch(page, requested, error)') < configureBody.lastIndexOf('state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);'));
+});
+
+test('Auto top-up reloads Credits and retries once when Save stays disabled', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(script, /function isAutoTopupSaveButtonUnavailable/);
+  assert.match(configureBody, /const maxAttempts = 2/);
+  assert.match(configureBody, /isAutoTopupSaveButtonUnavailable\(error\)/);
+  assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
+  assert.match(configureBody, /auto_topup_save_button_unavailable/);
+  assert.match(configureBody, /configureAutoTopupAttempt\(page, autoTopup, debugPort\)/);
+});
+
+test('Auto top-up waits and reloads Credits once when Enable or Manage is not rendered', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(script, /function isAutoTopupActionUnavailable/);
+  assert.match(script, /Auto top-up \(\?:Enable\|Manage\) button not found/);
+  assert.match(configureBody, /const maxAttempts = 2/);
+  assert.match(configureBody, /isAutoTopupActionUnavailable\(error\)/);
+  assert.match(configureBody, /waitForAutoTopupOverview\(page, 15000\)/);
+  assert.match(configureBody, /auto_topup_action_loaded_after_wait/);
+  assert.match(configureBody, /auto_topup_action_unavailable/);
+  assert.match(configureBody, /commandRefreshCreditsPage\(page\)/);
+  assert.doesNotMatch(configureBody, /executeConfirmedPurchase|clickPurchaseButton|writeOpomCardBindingAfterPurchase/);
+});
+
+test('Auto top-up accepts matching overview after a save recovery error', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const configureBody = script.slice(script.indexOf('async function configureAutoTopup(page'), script.indexOf('function purchaseVerifiedForOpomCardBinding'));
+  assert.match(configureBody, /waitForAutoTopupConfigured\(\s*page,\s*autoTopup\.threshold,\s*autoTopup\.amount,\s*4000,\s*\)/);
+  assert.match(configureBody, /recoveredState\?\.configured/);
+  assert.match(configureBody, /overview_matched_after_recovery_error/);
+  assert.ok(configureBody.indexOf('recoveredState?.configured') < configureBody.indexOf('if ((!actionUnavailable && !saveButtonUnavailable)'));
+});
+
+test('Auto top-up refresh waits for a visible security challenge to clear', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const refreshBody = script.slice(script.indexOf('async function commandRefreshCreditsPage'), script.indexOf('async function detectNewAccountOverlay'));
+  assert.match(script, /async function waitForVisibleSecurityChallengeToClear/);
+  assert.match(script, /waiting for manual completion before continuing/);
+  assert.match(refreshBody, /await waitForVisibleSecurityChallengeToClear\(page\)/);
+  assert.match(script, /await waitForVisibleSecurityChallengeToClear\(client\)/);
+});
+
+test('balance threshold purchase always uses fixed branch amounts', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const atOrAboveAmount = normalizeOptionalMoneyValue\(purchase\.rule\.atOrAboveAmount\)/);
+  assert.match(script, /belowAmountConfigured: hasMoneyInput\(purchaseAmountBelowThreshold\) \|\| !!purchaseRule\.belowAmountConfigured/);
+  assert.match(script, /const belowAmount = normalizeOptionalMoneyValue\(purchase\.rule\.belowAmount\)/);
+  assert.match(script, /const amount = branch === 'below_threshold' \? belowAmount : atOrAboveAmount/);
+  assert.match(script, /skippedByRule: !amount/);
+  assert.doesNotMatch(script, /targetBalance|top_up_to_target|Math\.ceil\(targetBalance/);
+});
+
+test('credit balance parser preserves negative balances', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.ok(script.includes('Remaining credits:\\\\s*\\\\$?\\\\s*([-+]?\\\\s*[0-9]'));
+  assert.ok(script.includes('fromCreditsBlock = beforeBuy.match(/\\\\$\\\\s*([-+]?\\\\s*[0-9]'));
+  assert.ok(script.includes("Number(raw.replace(/[\\\\s,]/g, ''))"));
+});
+
+test('payment method surfaces use bounded waits within the three-minute row budget', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000/);
+  assert.match(script, /const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000/);
+  assert.match(script, /const PAYMENT_TARGET_WAIT_MS = 30000/);
+  assert.match(script, /Purchase modal is not ready after \$\{timeoutMs\}ms/);
+});
+
+test('browser diagnostics include non-fatal network failures', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /installNetworkDiagnostics/);
+  assert.match(script, /Network\.responseReceived/);
+  assert.match(script, /recentNetworkFailures/);
+  assert.match(script, /safeDiagnosticUrl/);
+});
+
+test('browser diagnostics ignore OpenRouter internal Stripe helper failures', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /isIgnoredOpenRouterNetworkFailure/);
+  assert.match(script, /https:\/\/openrouter\.ai\/api\/internal\/v1\/stripe/);
+  assert.match(script, /ignoredServerError/);
+  assert.match(script, /ignoredNetworkFailures/);
+  assert.match(script, /ignored_openrouter_server_error_dismissed/);
+});
+
+test('browser path records and dismisses non-fatal OpenRouter server errors after successful steps', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /dismissServerErrorAfterStepIfPresent/);
+  assert.match(script, /non_fatal_server_error_dismissed/);
+  assert.match(script, /dismissedPostStepServerError/);
+  assert.match(script, /clickedCount/);
+});
+
+test('browser path auto-accepts JavaScript dialogs before navigating Credits', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /installJavaScriptDialogAutoAccept/);
+  assert.match(script, /Page\.addScriptToEvaluateOnNewDocument/);
+  assert.match(script, /Page\.javascriptDialogOpening/);
+  assert.match(script, /Page\.handleJavaScriptDialog/);
+  assert.match(script, /window\.alert = \(message\) => remember\('alert', message\)/);
+  assert.match(script, /window\.setInterval\(\(\) =>/);
+  assert.match(script, /button\.cl-modalCloseButton\[aria-label="Close modal"\]/);
+  assert.match(script, /stillVisiblePortal\.remove\(\)/);
+  assert.match(script, /removed floating-ui portal/);
+  assert.match(script, /window\.clearInterval\(window\.__orCloseClerkModalInterval\)/);
+  assert.ok(script.indexOf('installJavaScriptDialogAutoAccept(page)') < script.indexOf("runLoggedStep('navigate-credits-page'"));
+});
+
+test('browser path verifies Stripe card fields before saving payment method', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  assert.match(script, /ensureStripeCardReadyForSubmit/);
+  assert.match(script, /Stripe payment fields are not ready before Save payment method/);
+  assert.match(script, /typeFocusedFieldWithKeyEvents/);
+  assert.match(script, /focusAndTypeStripeField/);
+  assert.match(script, /Input\.dispatchKeyEvent/);
+  assert.match(script, /focusStripeFieldWithCdp/);
+  assert.match(script, /client\.send\('DOM\.focus', \{objectId\}\)/);
+  assert.match(script, /only the target whose real card input accepts DOM\.focus/);
+  assert.match(script, /focusState\.active && !focusState\.disabled && !focusState\.readOnly/);
+  assert.match(script, /lastCandidateStates/);
+  assert.match(script, /phase: 'focus_before_key_events'/);
+  assert.match(script, /document\.activeElement === el/);
+  assert.match(script, /invalidByText/);
+  assert.match(script, /ariaInvalid/);
+  assert.match(script, /expiration.*date\|month\|year/);
+  assert.match(script, /waitUntilSaveModalCloses\(page, payment\)/);
+  assert.match(script, /detectPaymentIssue\(page\)/);
+  assert.match(script, /detectPaymentIssue\(payment\)/);
+  assert.doesNotMatch(script, /native_value_setter/);
+  assert.match(script, /verify-stripe-card-before-save/);
+  assert.match(script, /verify-stripe-card-before-save-retry/);
+  assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save'") < script.indexOf("runLoggedStep('click-save-payment-method'"));
+  assert.ok(script.indexOf("runLoggedStep('verify-stripe-card-before-save-retry'") < script.indexOf("runLoggedStep('click-save-payment-method-retry'"));
+});
+
+test('Purchase Credits amount uses real per-key input events', () => {
+  const script = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
+  const start = script.indexOf('async function setPurchaseAmountInput');
+  const end = script.indexOf('async function ensureOneTimePaymentMethodsOff', start);
+  const body = script.slice(start, end);
+  assert.match(body, /data-or-purchase-amount-target/);
+  assert.match(body, /clearFocusedFieldWithBackspaces\(page/);
+  assert.match(body, /typeFocusedFieldWithKeyEvents\(page, value\)/);
+  assert.match(body, /blurFocusedFieldWithTab\(page\)/);
+  assert.doesNotMatch(body, /nativeValue|InputEvent|\.value\s*=/);
 });
 
 test('dryRunPayload reports row-level missing fields', async () => {
@@ -210,6 +678,30 @@ test('createJob stores queued row summaries in sqlite', async () => {
     assert.notEqual(result.job.fileName, 'account.csv');
     assert.doesNotMatch(JSON.stringify(result), /card_number|"cvv"|cvv=/i);
     assert.equal(jobDetails(db, result.job.id).job.readyRows, 1);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('createJob exposes card provider, type, and expiry in row details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-card-meta-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const csvText = `status,ID,username,amount,card_number,exp_month,exp_year,expires_at,card_type,cvv,postal_code,auto_topup_threshold,auto_topup_amount
+,1415,user@example.com,10,5257970000000001,06,28,2028-06,PINGPONG_VISA,456,97001,2,25
+`;
+    const options = {cardProvider: 'PINGPONG'};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText, options});
+    const result = await createJob(db, {
+      fileName: 'account.csv',
+      csvText,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+
+    assert.equal(result.rows[0].cardProvider, 'PINGPONG');
+    assert.equal(result.rows[0].cardType, 'PINGPONG_VISA');
+    assert.equal(result.rows[0].cardExpiresAt, '2028-06');
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -293,6 +785,29 @@ test('createJob rejects stale dry-run confirmation when options change', async (
   }
 });
 
+test('createJob rejects stale dry-run confirmation when preserve-existing policy changes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-stale-preserve-token-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({
+      fileName: 'account.csv',
+      csvText: VALID_CSV,
+      options: {removeExisting: true, preserveExistingPaymentMethod: false},
+    });
+    await assert.rejects(
+      () => createJob(db, {
+        fileName: 'account.csv',
+        csvText: VALID_CSV,
+        options: {removeExisting: false, preserveExistingPaymentMethod: true},
+        liveConfirmationToken: dryRun.liveConfirmationToken,
+      }),
+      /CSV or options changed after dry-run/i,
+    );
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('createJob rejects dry-run confirmation when purchase submission mode changes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-purchase-mode-token-'));
   try {
@@ -315,6 +830,63 @@ test('createJob rejects dry-run confirmation when purchase submission mode chang
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
+});
+
+test('payment input rejection stops the AdsPower profile immediately', async () => {
+  const stoppedProfiles = [];
+  const result = await executeRowWithAdapters(VALID_CSV, 0, {}, {
+    runClosedLoopChildAsync: async () => ({
+      ok: false,
+      error: 'Stripe payment field was not accepted: #payment-numberInput',
+    }),
+    adspower: {
+      stopProfile: async (_args, profileIdentifier) => {
+        stoppedProfiles.push(profileIdentifier);
+        return {attempted: true, ok: true};
+      },
+    },
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stage, 'payment_method.input');
+  assert.equal(result.stopProfile, true);
+  assert.equal(result.profileStop.ok, true);
+  assert.equal(stoppedProfiles.length, 1);
+  assert.equal(stoppedProfiles[0].value, '1415');
+});
+
+test('concurrent payment tasks keep each row card and AdsPower profile paired', async () => {
+  const tasks = [];
+  const options = {
+    scopeBillingAddress: false,
+    scopePaymentMethod: true,
+    scopePurchase: false,
+    scopeAutoTopup: false,
+  };
+  const adapters = {
+    runClosedLoopChildAsync: async (_script, task) => {
+      tasks.push(task);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return {ok: true, result: {card: {last4: task.card.number.slice(-4)}}};
+    },
+  };
+
+  await Promise.all([
+    executeRowWithAdapters(THREE_ROW_CSV, 0, options, adapters),
+    executeRowWithAdapters(THREE_ROW_CSV, 1, options, adapters),
+  ]);
+
+  const paired = tasks.map((task) => ({
+    profileNo: task.profileNo,
+    expectedAccount: task.expectedAccount,
+    cardNumber: task.card.number,
+    expiry: task.card.expiry,
+    cvc: task.card.cvc,
+  })).sort((left, right) => Number(left.profileNo) - Number(right.profileNo));
+  assert.deepEqual(paired, [
+    {profileNo: '1415', expectedAccount: 'first@example.com', cardNumber: '5257970000000001', expiry: '0628', cvc: '456'},
+    {profileNo: '1416', expectedAccount: 'second@example.com', cardNumber: '5257970000000002', expiry: '0628', cvc: '456'},
+  ]);
 });
 
 test('executeRow marks verified purchase as failed when OPOM completed writeback fails', async () => {
@@ -433,8 +1005,10 @@ test('writeResultCsv appends result columns', async () => {
       'opom_account_id',
       'ads_power_user_id',
       'ads_power_serial_number',
+      'opom_account_status',
       'opom_health_status',
       'opom_health_reason',
+      'opom_card_status',
       'username',
       'login_email',
       'ejh_order_no',
@@ -498,8 +1072,8 @@ test('writeResultCsv preserves source metadata when outcome details omit it', as
     assert.equal(firstRow.card_last4, '0001');
     assert.equal(firstRow.cardno, '5257970000000001');
     assert.equal(firstRow.completion_evidence_status, 'incomplete');
-    assert.match(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
     assert.match(firstRow.completion_evidence_missing, /opom_result_writeback_status/);
+    assert.doesNotMatch(firstRow.completion_evidence_missing, /opom_card_writeback_status/);
     assert.equal(firstRow.adspower_tag_status, 'skipped_user_waived');
     assert.equal(firstRow.adspower_status_target, 'waived_by_user');
     assert.doesNotMatch(firstRow.completion_evidence_missing, /adspower_tag_status/);
@@ -728,10 +1302,12 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-mid-'));
   try {
     const db = openDatabase(join(dir, 'test.sqlite'));
-    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const options = {concurrency: 5};
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV, options});
     const created = await createJob(db, {
       fileName: 'account.csv',
       csvText: THREE_ROW_CSV,
+      options,
       liveConfirmationToken: dryRun.liveConfirmationToken,
     });
     const rows = jobDetails(db, created.job.id).rows;
@@ -758,6 +1334,7 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
 
     const resumed = await resumeJob(db, created.job.id, {startRowNumber: 2});
     assert.equal(resumed.job.status, 'queued');
+    assert.equal(resumed.job.options.concurrency, 5);
     assert.equal(resumed.job.cancelRequested, false);
     assert.equal(resumed.job.error, '');
     const details = jobDetails(db, created.job.id);
@@ -767,6 +1344,37 @@ test('resumeJob queues failed rows from selected row and skips completed rows', 
     assert.equal(details.rows[1].purchaseStatus, '');
     assert.equal(details.rows[1].balanceBefore, '');
     assert.equal(details.rows[2].status, 'queued');
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('resumeJob can retry only the selected failed row after a job finishes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-resume-one-row-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: THREE_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: THREE_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const rows = jobDetails(db, created.job.id).rows;
+    db.prepare("UPDATE job_rows SET status = 'completed', stage = 'closed_loop.complete', message = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[0].id);
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'first failure', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[1].id);
+    db.prepare("UPDATE job_rows SET status = 'failed', stage = 'automation', message = 'second failure', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(rows[2].id);
+    db.prepare("UPDATE jobs SET status = 'completed', finished_at = CURRENT_TIMESTAMP WHERE id = ?").run(created.job.id);
+
+    const preview = await resumePreview(db, created.job.id, {startRowNumber: 3, onlyRow: true});
+    assert.equal(preview.onlyRow, true);
+    assert.deepEqual(preview.queuedRows.map((row) => row.rowNumber), [3]);
+
+    await resumeJob(db, created.job.id, {startRowNumber: 3, onlyRow: true});
+    const details = jobDetails(db, created.job.id);
+    assert.equal(details.job.status, 'queued');
+    assert.equal(details.rows[0].status, 'completed');
+    assert.equal(details.rows[1].status, 'queued');
+    assert.equal(details.rows[2].status, 'failed');
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -910,14 +1518,78 @@ test('repairOpomWriteback completes verified opom writeback failures without rer
     assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
     assert.equal(calls.length, 2);
     assert.match(calls[0].url, /\/card-binding$/);
-    assert.match(calls[1].url, /\/results$/);
     assert.equal(calls[0].body.card.orderNo, 'ejh_order_1');
     assert.equal(calls[0].body.card.cardNo, '5257970000000001');
     assert.equal(calls[0].body.card.cvv, undefined);
+    assert.match(calls[1].url, /\/results$/);
+    assert.equal(calls[1].body.status, 'completed');
     assert.doesNotMatch(JSON.stringify(calls), /"cvv"\s*:/i);
     const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
     assert.match(resultCsv, /completed/);
     assert.match(resultCsv, /OPOM writeback repaired without rerunning purchase/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('repairOpomWriteback preserves the existing-card decision and never binds the unused CSV card', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-opom-repair-preserved-card-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    globalThis.fetch = async (url, options) => {
+      calls.push({url: String(url), body: JSON.parse(options.body)});
+      return Response.json({data: {ok: true}});
+    };
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const options = {
+      opomWriteback: true,
+      opomBaseUrl: 'http://opom.local',
+      opomRechargeToken: 'test-token',
+      preserveExistingPaymentMethod: true,
+    };
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: OPOM_CANONICAL_CSV, options});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: OPOM_CANONICAL_CSV,
+      options,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const row = jobDetails(db, created.job.id).rows[0];
+    db.prepare(`
+      UPDATE job_rows
+      SET status = 'failed',
+        stage = 'opom.writeback',
+        message = 'OPOM result request failed',
+        purchase_status = 'verified',
+        purchase_amount = '10',
+        balance_before = '20',
+        balance_after = '30',
+        card_last4 = '4321',
+        payment_method_action = 'existing_preserved',
+        opom_card_writeback_status = 'skipped_existing_preserved',
+        opom_result_writeback_status = 'failed'
+      WHERE id = ?
+    `).run(row.id);
+    db.prepare("UPDATE jobs SET status = 'blocked' WHERE id = ?").run(created.job.id);
+
+    const repaired = await repairOpomWriteback(db, created.job.id, {rowNumber: 2});
+
+    assert.equal(repaired.rows[0].status, 'completed');
+    assert.equal(repaired.rows[0].paymentMethodAction, 'existing_preserved');
+    assert.equal(repaired.rows[0].cardNo, '');
+    assert.equal(repaired.rows[0].ejhOrderNo, '');
+    assert.equal(repaired.rows[0].opomCardWritebackStatus, 'skipped_existing_preserved');
+    assert.equal(repaired.rows[0].opomResultWritebackStatus, 'written');
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/results$/);
+    assert.equal(calls[0].body.card, undefined);
+    assert.doesNotMatch(JSON.stringify(calls), /5257970000000001|ejh_order_1/);
+    const resultCsv = readFileSync(getJob(db, created.job.id).result_csv_path, 'utf8');
+    assert.match(resultCsv, /payment_method_action/);
+    assert.match(resultCsv, /existing_preserved/);
+    assert.doesNotMatch(resultCsv, /5257970000000001|ejh_order_1/);
   } finally {
     globalThis.fetch = originalFetch;
     rmSync(dir, {recursive: true, force: true});
@@ -993,6 +1665,36 @@ test('production preflight has a read-only local development mode', () => {
     assert.ok(result.checks.some((check) => check.label === 'Production write boundary'));
     assert.ok(result.checks.some((check) => check.label === 'OpenRouter live purchase boundary'));
     assert.ok(result.checks.some((check) => check.label === 'AdsPower native tag API' && /not documented/.test(check.status)));
+});
+
+test('runnerArgs accepts RECHARGE_API_TOKEN and secondary OPOM writeback config', () => {
+  const original = {
+    OPOM_BASE_URL: process.env.OPOM_BASE_URL,
+    OPOM_API_BASE: process.env.OPOM_API_BASE,
+    OPOM_RECHARGE_TOKEN: process.env.OPOM_RECHARGE_TOKEN,
+    RECHARGE_API_TOKEN: process.env.RECHARGE_API_TOKEN,
+    OPOM_SECONDARY_BASE_URL: process.env.OPOM_SECONDARY_BASE_URL,
+    OPOM_SECONDARY_RECHARGE_TOKEN: process.env.OPOM_SECONDARY_RECHARGE_TOKEN,
+  };
+  try {
+    process.env.OPOM_BASE_URL = 'http://opom.primary';
+    process.env.OPOM_API_BASE = '';
+    process.env.OPOM_RECHARGE_TOKEN = 'old-token';
+    process.env.RECHARGE_API_TOKEN = 'new-token';
+    process.env.OPOM_SECONDARY_BASE_URL = 'http://opom.secondary';
+    process.env.OPOM_SECONDARY_RECHARGE_TOKEN = 'secondary-token';
+
+    const args = runnerArgs({opomWriteback: true});
+    assert.equal(args.opomBaseUrl, 'http://opom.primary');
+    assert.equal(args.opomRechargeToken, 'new-token');
+    assert.equal(args.opomSecondaryBaseUrl, 'http://opom.secondary');
+    assert.equal(args.opomSecondaryRechargeToken, 'secondary-token');
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('readiness audit records disabled AdsPower writeback as user-waived', () => {

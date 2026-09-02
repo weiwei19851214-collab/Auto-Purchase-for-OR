@@ -14,6 +14,7 @@ import {createLiveConfirmation, verifyLiveConfirmation} from './safety.mjs';
 import {httpError} from './http-utils.mjs';
 import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {writeCompletedRow} from './opom-client.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
@@ -52,28 +53,35 @@ export async function dryRunPayload(payload) {
     skipped: plan.rows.filter((row) => row.status === 'skipped').length,
     liveConfirmationToken: confirmation?.token || '',
     liveConfirmationExpiresAt: confirmation?.expiresAt || '',
-    rows: plan.rows.map((row) => ({
-      rowNumber: row.rowNumber,
-      profileId: row.id,
-      username: row.username,
-      opomAccountId: row.opomAccountId,
-      loginEmail: row.loginEmail || row.username,
-      loginEmailMasked: row.loginEmail || row.loginEmailMasked,
-      adsPowerUserId: row.adsPowerUserId,
-      adsPowerSerialNumber: row.adsPowerSerialNumber,
-      adsMatchStatus: row.adsMatchStatus,
-      ejhOrderNo: row.ejhOrderNo,
-      cardLast4: row.cardLast4,
-      cardNo: row.cardNo,
-      executionScope: row.executionScope,
-      purchasePlan: row.purchasePlan,
-      amount: row.amount,
-      autoTopup: row.autoTopup,
-      ready: row.ready,
-      status: row.status,
-      message: row.message,
-      missing: row.missing || [],
-    })),
+    rows: plan.rows.map((row) => {
+      const error = row.status === 'missing_fields'
+        ? simplifyError(row.message || (row.missing || []).join(','), {status: row.status, stage: 'input.missing_fields'})
+        : {errorCode: '', message: row.message, detail: ''};
+      return {
+        rowNumber: row.rowNumber,
+        profileId: row.id,
+        username: row.username,
+        opomAccountId: row.opomAccountId,
+        loginEmail: row.loginEmail || row.username,
+        loginEmailMasked: row.loginEmail || row.loginEmailMasked,
+        adsPowerUserId: row.adsPowerUserId,
+        adsPowerSerialNumber: row.adsPowerSerialNumber,
+        adsMatchStatus: row.adsMatchStatus,
+        ejhOrderNo: row.ejhOrderNo,
+        cardLast4: row.cardLast4,
+        cardNo: row.cardNo,
+        executionScope: row.executionScope,
+        purchasePlan: row.purchasePlan,
+        amount: row.amount,
+        autoTopup: row.autoTopup,
+        ready: row.ready,
+        status: row.status,
+        errorCode: error.errorCode,
+        message: error.message,
+        errorDetail: error.detail,
+        missing: row.missing || [],
+      };
+    }),
   };
 }
 
@@ -118,10 +126,12 @@ export async function createJob(db, payload) {
     INSERT INTO job_rows (
       id, job_id, row_number, raw_index, profile_id, opom_account_id,
       username_masked, login_email_masked, ads_power_user_id, ads_power_serial_number,
-      ads_match_status, ejh_order_no, card_no, card_last4, purchase_plan, amount,
-      status, stage, message, missing_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ads_match_status, ejh_order_no, card_no, card_last4, card_provider, card_type,
+      expires_at, purchase_plan, amount,
+      status, stage, error_code, message, error_detail, missing_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const jobArgs = runnerArgs(jobOptions);
   for (const row of plan.rows) {
     const item = rowInsertFromDryRun(jobId, row);
     insertRow.run(
@@ -139,11 +149,16 @@ export async function createJob(db, payload) {
       item.ejhOrderNo,
       item.cardNo,
       item.cardLast4,
+      item.cardProvider || jobArgs.cardProvider,
+      item.cardType,
+      item.cardExpiresAt,
       item.purchasePlan,
       item.amount,
       item.status,
       item.stage,
+      item.errorCode,
       item.message,
+      item.errorDetail,
       item.missingJson,
       item.updatedAt,
     );
@@ -155,27 +170,39 @@ export async function createJob(db, payload) {
     runId: jobOptions.runId || jobId,
     rowsByRawIndex: plan.rows
       .filter((row) => row.status !== 'ready')
-      .map((row) => ({
-        rawIndex: row.rawIndex,
-        status: row.status,
-        message: row.message,
-      details: {
-          cardLast4: row.cardLast4,
-          cardNo: row.cardNo,
-          opomAccountId: row.opomAccountId,
-          username: row.username,
-          loginEmail: row.loginEmail || row.username,
-          loginEmailMasked: row.loginEmail || row.loginEmailMasked,
-          adsPowerUserId: row.adsPowerUserId,
-          adsPowerSerialNumber: row.adsPowerSerialNumber,
-          adsMatchStatus: row.adsMatchStatus,
-          ejhOrderNo: row.ejhOrderNo,
-          adspowerTagStatus: 'skipped_user_waived',
-          adspowerStatusMode: 'disabled',
-          adspowerStatusTarget: 'waived_by_user',
-          adspowerStatusReason: 'user_waived_status_writeback',
-        },
-      })),
+      .map((row) => {
+        const error = simplifyError(row.message || (row.missing || []).join(','), {
+          status: row.status,
+          stage: 'input.missing_fields',
+        });
+        return {
+          rawIndex: row.rawIndex,
+          status: row.status,
+          errorCode: error.errorCode,
+          errorDetail: error.detail,
+          message: error.message,
+          details: {
+            errorCode: error.errorCode,
+            cardLast4: row.cardLast4,
+            cardNo: row.cardNo,
+            cardProvider: row.cardProvider,
+            cardType: row.cardType,
+            cardExpiresAt: row.cardExpiresAt,
+            opomAccountId: row.opomAccountId,
+            username: row.username,
+            loginEmail: row.loginEmail || row.username,
+            loginEmailMasked: row.loginEmail || row.loginEmailMasked,
+            adsPowerUserId: row.adsPowerUserId,
+            adsPowerSerialNumber: row.adsPowerSerialNumber,
+            adsMatchStatus: row.adsMatchStatus,
+            ejhOrderNo: row.ejhOrderNo,
+            adspowerTagStatus: 'skipped_user_waived',
+            adspowerStatusMode: 'disabled',
+            adspowerStatusTarget: 'waived_by_user',
+            adspowerStatusReason: 'user_waived_status_writeback',
+          },
+        };
+      }),
   });
   addEvent(db, jobId, 'job.created', 'job queued from uploaded CSV', {
     fileName: sourceFileName,
@@ -193,6 +220,7 @@ function publicOptions(options) {
   const args = runnerArgs(options);
   return {
     removeExisting: args.removeExisting,
+    preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
     stopProfiles: args.stopProfiles,
     concurrency: args.concurrency,
     confirmPurchase: args.confirmPurchase,
@@ -202,6 +230,11 @@ function publicOptions(options) {
     scopePaymentMethod: args.scopePaymentMethod,
     scopePurchase: args.scopePurchase,
     scopeAutoTopup: args.scopeAutoTopup,
+    disableZdr: args.disableZdr,
+    enableZdr: args.enableZdr,
+    enableDataTraining: args.enableDataTraining,
+    disableDataTraining: args.disableDataTraining,
+    refundOnly: args.refundOnly,
     autoTopupThreshold: args.autoTopupThreshold,
     autoTopupAmount: args.autoTopupAmount,
     rowTimeoutMs: args.rowTimeoutMs,
@@ -209,7 +242,9 @@ function publicOptions(options) {
     hasAdspowerApiKey: !!args.adspowerApiKey,
     opomWriteback: args.opomWriteback,
     opomBaseUrl: args.opomBaseUrl,
+    opomSecondaryBaseUrl: args.opomSecondaryBaseUrl,
     hasOpomRechargeToken: !!args.opomRechargeToken,
+    hasOpomSecondaryRechargeToken: !!args.opomSecondaryRechargeToken,
     runId: args.runId,
     adspowerStatusMode: args.adspowerStatusMode,
     hasAdspowerSuccessGroupTarget: !!(args.adspowerSuccessGroupId || args.adspowerSuccessGroupName),
@@ -220,6 +255,11 @@ function publicOptions(options) {
 
 function runnerScope(args) {
   const labels = [];
+  if (args.disableZdr) labels.push('zdr_disable');
+  if (args.enableZdr) labels.push('zdr_enable');
+  if (args.enableDataTraining) labels.push('data_training_enable');
+  if (args.disableDataTraining) labels.push('data_training_disable');
+  if (args.refundOnly) labels.push('refund');
   if (args.scopeBillingAddress) labels.push('billing_address');
   if (args.scopePaymentMethod) labels.push('payment_method');
   if (args.scopePurchase) labels.push(args.confirmPurchase ? 'purchase' : 'purchase_prepare');
@@ -233,14 +273,41 @@ export function jobDetails(db, jobId) {
   return {
     job: publicJob(job),
     rows: listRows(db, jobId).map(publicRow),
-    events: listEvents(db, jobId).map((event) => ({
+    events: listEvents(db, jobId).map(publicEvent),
+  };
+}
+
+function publicEvent(event) {
+  const data = JSON.parse(event.data_json || '{}');
+  const isErrorEvent = /error|failed|interrupted/i.test(event.type || '');
+  if (!isErrorEvent) {
+    return {
       id: event.id,
       rowId: event.row_id,
       type: event.type,
       message: event.message,
-      data: JSON.parse(event.data_json || '{}'),
+      data,
       createdAt: event.created_at,
-    })),
+    };
+  }
+  const raw = data.errorDetail || String(event.message || '').replace(/^row\s+\d+\s*:\s*/i, '');
+  const error = simplifyError(raw, {
+    status: data.status || '',
+    stage: data.stage || event.type || '',
+  });
+  return {
+    id: event.id,
+    rowId: event.row_id,
+    type: event.type,
+    message: error.message,
+    errorCode: data.errorCode || error.errorCode,
+    errorDetail: data.errorDetail || error.detail,
+    data: {
+      ...data,
+      errorCode: data.errorCode || error.errorCode,
+      errorDetail: data.errorDetail || error.detail,
+    },
+    createdAt: event.created_at,
   };
 }
 
@@ -274,6 +341,10 @@ export async function cancelJob(db, jobId) {
         details: {
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          paymentMethodAction: row.payment_method_action || '',
+          cardProvider: row.card_provider,
+          cardType: row.card_type,
+          cardExpiresAt: row.expires_at,
           opomAccountId: row.opom_account_id,
           username: row.username_masked,
           loginEmail: row.login_email_masked,
@@ -335,11 +406,12 @@ function resumeRowDecision(row, includeRiskyRows = false) {
   return {action: 'skip_unsupported', reason: `unsupported status: ${row.status}`};
 }
 
-function previewRows(rows, startRowNumber, includeRiskyRows = false) {
-  const candidates = rows.filter((row) => row.row_number >= startRowNumber);
+function previewRows(rows, startRowNumber, includeRiskyRows = false, onlyRow = false) {
+  const candidates = rows.filter((row) => onlyRow ? row.row_number === startRowNumber : row.row_number >= startRowNumber);
   const output = {
     startRowNumber,
     includeRiskyRows: !!includeRiskyRows,
+    onlyRow: !!onlyRow,
     totalCandidateRows: candidates.length,
     queuedRows: [],
     alreadyQueuedRows: [],
@@ -355,6 +427,8 @@ function previewRows(rows, startRowNumber, includeRiskyRows = false) {
       profileId: row.profile_id,
       status: row.status,
       message: row.message,
+      errorCode: row.error_code || '',
+      errorDetail: row.error_detail || '',
       risky: !!decision.risky,
       reason: decision.reason || '',
     };
@@ -473,6 +547,7 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
     balanceBefore: row.balance_before,
     balanceAfter: row.balance_after,
     cardLast4: row.card_last4 || plan.cardLast4(plan.cardNumber(originalRow)),
+    paymentMethodAction: row.payment_method_action || '',
     autoTopupStatus: row.auto_topup_status || 'skipped',
     autoTopupThreshold: row.auto_topup_threshold,
     autoTopupAmount: row.auto_topup_amount,
@@ -491,13 +566,26 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
       UPDATE job_rows
       SET status = 'completed',
         stage = 'closed_loop.complete',
+        error_code = '',
         message = 'OPOM writeback repaired without rerunning purchase',
+        error_detail = '',
         opom_card_writeback_status = ?,
         opom_result_writeback_status = ?,
         finished_at = COALESCE(finished_at, ?),
         updated_at = ?
       WHERE id = ?
     `).run(writeback.cardStatus, writeback.resultStatus, now, now, row.id);
+    if (row.payment_method_action === 'existing_preserved') {
+      db.prepare(`
+        UPDATE job_rows
+        SET ejh_order_no = '',
+          card_no = '',
+          card_provider = '',
+          card_type = '',
+          expires_at = ''
+        WHERE id = ?
+      `).run(row.id);
+    }
     addEvent(db, jobId, 'opom.writeback_repaired', `row ${rowNumber}: OPOM writeback repaired without rerunning purchase`, {
       rowNumber,
       opomCardWritebackStatus: writeback.cardStatus,
@@ -506,18 +594,26 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
   } catch (error) {
     const cardStatus = error.opomCardWritebackStatus || row.opom_card_writeback_status || 'failed';
     const resultStatus = error.opomResultWritebackStatus || row.opom_result_writeback_status || 'failed';
+    const simplified = simplifyError(error.message || 'OPOM writeback repair failed', {
+      status: 'failed',
+      stage: 'opom.writeback',
+    });
     db.prepare(`
       UPDATE job_rows
       SET status = 'failed',
         stage = 'opom.writeback',
+        error_code = ?,
         message = ?,
+        error_detail = ?,
         opom_card_writeback_status = ?,
         opom_result_writeback_status = ?,
         updated_at = ?
       WHERE id = ?
-    `).run(error.message || 'OPOM writeback repair failed', cardStatus, resultStatus, nowIso(), row.id);
-    addEvent(db, jobId, 'opom.writeback_repair_failed', `row ${rowNumber}: ${error.message || 'OPOM writeback repair failed'}`, {
+    `).run(simplified.errorCode, simplified.message, simplified.detail, cardStatus, resultStatus, nowIso(), row.id);
+    addEvent(db, jobId, 'opom.writeback_repair_failed', `row ${rowNumber}: ${simplified.message}`, {
       rowNumber,
+      errorCode: simplified.errorCode,
+      errorDetail: simplified.detail,
       opomCardWritebackStatus: cardStatus,
       opomResultWritebackStatus: resultStatus,
     }, row.id);
@@ -550,7 +646,7 @@ export async function resumePreview(db, jobId, payload = {}) {
     ok: true,
     job: publicJob(getJob(db, jobId)),
     csvAvailability,
-    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows),
+    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow),
   };
 }
 
@@ -567,7 +663,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   const csvAvailability = await ensureJobCsvAvailable(job);
   if (!csvAvailability.ok) throw httpError(409, csvAvailability.reason);
   const rows = listRows(db, jobId);
-  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows);
+  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow);
   if (!rows.some((row) => row.row_number === startRowNumber)) {
     throw httpError(400, `row ${startRowNumber} does not exist in this job`);
   }
@@ -582,11 +678,19 @@ export async function resumeJob(db, jobId, payload = {}) {
     SET status = 'queued',
       stage = 'queued',
       message = 'queued for resume',
+      error_code = '',
+      error_detail = '',
       missing_json = '[]',
       purchase_status = '',
       purchase_amount = '',
       balance_before = '',
       balance_after = '',
+      ejh_order_no = ?,
+      card_no = ?,
+      card_provider = ?,
+      card_type = ?,
+      expires_at = ?,
+      payment_method_action = '',
       auto_topup_status = '',
       auto_topup_threshold = '',
       auto_topup_amount = '',
@@ -601,7 +705,19 @@ export async function resumeJob(db, jobId, payload = {}) {
       updated_at = ?
     WHERE id = ?
   `);
-  for (const rowId of queueIds) resetRow.run(now, rowId);
+  for (const rowId of queueIds) {
+    const rowState = rows.find((row) => row.id === rowId);
+    const originalRow = originalRowFromJobCsv(job, rowState.raw_index);
+    resetRow.run(
+      plan.ejhOrderNo(originalRow),
+      plan.cardNumber(originalRow),
+      plan.cardProvider(originalRow),
+      plan.cardType(originalRow),
+      plan.cardExpiresAt(originalRow),
+      now,
+      rowId,
+    );
+  }
   db.prepare(`
     UPDATE jobs
     SET status = 'queued',
@@ -611,9 +727,10 @@ export async function resumeJob(db, jobId, payload = {}) {
       updated_at = ?
     WHERE id = ?
   `).run(now, jobId);
-  addEvent(db, jobId, 'job.resume_requested', `resume from row ${startRowNumber}`, {
+  addEvent(db, jobId, 'job.resume_requested', payload.onlyRow ? `retry row ${startRowNumber}` : `resume from row ${startRowNumber}`, {
     startRowNumber,
     includeRiskyRows: !!payload.includeRiskyRows,
+    onlyRow: !!payload.onlyRow,
     queuedRows: preview.queuedRows.map((row) => row.rowNumber),
     alreadyQueuedRows: preview.alreadyQueuedRows.map((row) => row.rowNumber),
     skippedCompletedRows: preview.skippedCompletedRows.map((row) => row.rowNumber),
@@ -631,7 +748,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   return {
     ok: true,
     csvAvailability,
-    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows}),
+    resume: await resumePreview(db, jobId, {startRowNumber, includeRiskyRows: !!payload.includeRiskyRows, onlyRow: !!payload.onlyRow}),
     ...jobDetails(db, jobId),
   };
 }
@@ -643,14 +760,21 @@ async function rewriteResumeResult(db, jobId) {
     .map((row) => ({
       rawIndex: row.raw_index,
       status: row.status,
+      errorCode: row.error_code || '',
+      errorDetail: row.error_detail || '',
       message: row.message,
       details: {
+        errorCode: row.error_code || '',
         purchaseStatus: row.purchase_status,
         purchaseAmount: row.purchase_amount,
         balanceBefore: row.balance_before,
         balanceAfter: row.balance_after,
         cardLast4: row.card_last4,
         cardNo: row.card_no,
+        paymentMethodAction: row.payment_method_action || '',
+        cardProvider: row.card_provider,
+        cardType: row.card_type,
+        cardExpiresAt: row.expires_at,
         autoTopupStatus: row.auto_topup_status,
         autoTopupThreshold: row.auto_topup_threshold,
         autoTopupAmount: row.auto_topup_amount,

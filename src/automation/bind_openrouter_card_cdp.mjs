@@ -10,22 +10,44 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import {isRechargeBalanceIncreaseVerified} from './lib/balance-verification.mjs';
+import {writeCardBinding} from '../server/opom-client.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
+const OPENROUTER_PRIVACY_URL = 'https://openrouter.ai/settings/privacy';
+const OPENROUTER_GUARDRAILS_URL = 'https://openrouter.ai/workspaces/default/guardrails';
+const OPENROUTER_GUARDRAILS_MODELS_URL = 'https://openrouter.ai/workspaces/default/guardrails/default/models';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
-const UPDATE_CURRENT_USER_ACTION = '60f1ee6dacb6d04fcb64a9d9a1d30bd7f5d04e47c3';
-const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 15000;
-const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 45000;
-const DEFAULT_CREDITS_ENTRY_WAIT_MS = 45000;
-const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 45000;
-const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 45000;
-const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 45000;
-const DEFAULT_NAVIGATION_RETRIES = 3;
+// AdsPower can take longer to create a browser profile when several profiles
+// start together; keep the startup request alive for 30 seconds.
+const DEFAULT_ADSPOWER_HTTP_TIMEOUT_MS = 30000;
+const DEFAULT_ADSPOWER_START_TIMEOUT_MS = 30000;
+const DEFAULT_CREDITS_ENTRY_WAIT_MS = 30000;
+const DEFAULT_PAYMENT_ENTRY_WAIT_MS = 30000;
+const DEFAULT_STRIPE_IFRAME_WAIT_MS = 20000;
+// 新增银行卡页面已出现后，给 Stripe iframe 最多 30 秒完成挂载，兼容并发启动时的延迟。
+const PAYMENT_TARGET_WAIT_MS = 30000;
+// Credits 页新版金额卡片可能晚于操作按钮渲染，余额读取等待该金额进入 DOM。
+const CREDIT_BALANCE_READ_WAIT_MS = 20000;
+// 保存银行卡通常数秒完成；超过该时长仍显示 Saving 时停止本行，避免占满单行 3 分钟时限。
+const SAVE_PAYMENT_METHOD_WAIT_MS = 20000;
+// 保存页卡在 Saving 时，只给刷新后的卡片回读一次短窗口，避免再次耗尽单行时限。
+const SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS = 20000;
+const DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS = 30000;
+const DEFAULT_NAVIGATION_READY_TIMEOUT_MS = 30000;
+const DEFAULT_NAVIGATION_RETRIES = 2;
+const DEFAULT_DOM_WAIT_MS = 30000;
+const DEFAULT_DOM_POLL_MS = 1000;
+const SLOW_DOM_POLL_MS = 1500;
+const STRIPE_POST_FILL_SETTLE_MS = 1500;
 const PAGE_SETTLE_MS = 3000;
 const BALANCE_VERIFY_REFRESH_INTERVAL_MS = 15000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let diagnosticCounter = 0;
+
+function refreshErrorResult(error) {
+  return {refreshed: false, error: error?.message || String(error || '')};
+}
 
 function diagnosticName(label, ext) {
   const count = String(++diagnosticCounter).padStart(3, '0');
@@ -76,13 +98,562 @@ async function captureDiagnosticScreenshot(client, dir, label, data = {}) {
   return {jsonFile, pngFile: screenshot?.data ? pngFile : null};
 }
 
+function writeStepDiagnostic(dir, label, status, data = {}) {
+  return writeDiagnostic(dir, `step-${label}-${status}`, {
+    kind: 'automation_step',
+    label,
+    status,
+    at: new Date().toISOString(),
+    ...data,
+  });
+}
+
+function safeDiagnosticUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return String(value || '').split('?')[0].split('#')[0].slice(0, 220);
+  }
+}
+
+function isIgnoredOpenRouterNetworkFailure(entry) {
+  const url = safeDiagnosticUrl(entry?.url || '');
+  const status = Number(entry?.status);
+  return url === 'https://openrouter.ai/api/internal/v1/stripe'
+    || (Number.isFinite(status) && status >= 500);
+}
+
+async function installNetworkDiagnostics(client) {
+  if (!client || client.__networkDiagnosticsInstalled) return {installed: false, reason: 'already_installed'};
+  client.__networkDiagnosticsInstalled = true;
+  const requests = new Map();
+  const failures = [];
+  const rememberFailure = (entry) => {
+    const url = safeDiagnosticUrl(entry.url);
+    failures.push({
+      at: new Date().toISOString(),
+      ...entry,
+      url,
+      ignored: isIgnoredOpenRouterNetworkFailure({...entry, url}),
+    });
+    while (failures.length > 30) failures.shift();
+  };
+  client.getRecentNetworkFailures = () => failures.slice(-10);
+  client.on?.('Network.requestWillBeSent', ({requestId, request}) => {
+    requests.set(requestId, {
+      method: request?.method || '',
+      url: request?.url || '',
+    });
+    if (requests.size > 250) requests.delete(requests.keys().next().value);
+  });
+  client.on?.('Network.responseReceived', ({requestId, response, type}) => {
+    const status = Number(response?.status);
+    if (!Number.isFinite(status) || status < 400) return;
+    const request = requests.get(requestId) || {};
+    rememberFailure({
+      kind: 'http_response',
+      status,
+      statusText: response?.statusText || '',
+      method: request.method || '',
+      type: type || '',
+      url: response?.url || request.url || '',
+    });
+  });
+  client.on?.('Network.loadingFailed', ({requestId, errorText, type, canceled}) => {
+    if (canceled) return;
+    const request = requests.get(requestId) || {};
+    rememberFailure({
+      kind: 'loading_failed',
+      errorText: errorText || '',
+      method: request.method || '',
+      type: type || '',
+      url: request.url || '',
+    });
+  });
+  await client.send('Network.enable', {}, 5000).catch((error) => {
+    rememberFailure({kind: 'network_enable_failed', errorText: error.message, url: ''});
+  });
+  return {installed: true};
+}
+
+async function installJavaScriptDialogAutoAccept(client) {
+  if (!client || client.__dialogAutoAcceptInstalled) return {installed: false, reason: 'already_installed'};
+  client.__dialogAutoAcceptInstalled = true;
+  const source = `(() => {
+    const remember = (kind, message) => {
+      try {
+        window.__orAutomationDialogs = window.__orAutomationDialogs || [];
+        window.__orAutomationDialogs.push({kind, message: String(message || ''), at: Date.now()});
+        if (window.__orAutomationDialogs.length > 20) window.__orAutomationDialogs.shift();
+      } catch {}
+    };
+    // 浏览器级 window.alert 会阻塞页面 JS；这里提前覆盖，避免新号邮箱校验弹框卡住地址/支付流程。
+    window.alert = (message) => remember('alert', message);
+    window.confirm = (message) => {
+      remember('confirm', message);
+      return true;
+    };
+    window.prompt = (message, value = '') => {
+      remember('prompt', message);
+      return value ?? '';
+    };
+    if (!window.__orCloseClerkModalInterval) {
+      window.__orCloseClerkModalInterval = window.setInterval(() => {
+        const modalPattern = /Account|Profile details|Email addresses|Connected accounts|Web3 wallets|Manage your account info/i;
+        const portals = [...document.querySelectorAll('[data-floating-ui-portal]')]
+          .filter((node) => modalPattern.test(node.innerText || node.textContent || ''));
+        const portal = portals[0];
+        const button = portal?.querySelector('button.cl-modalCloseButton[aria-label="Close modal"], button[aria-label="Close modal"]')
+          || document.querySelector('button.cl-modalCloseButton[aria-label="Close modal"], button[aria-label="Close modal"]');
+        if (!portal && !button) return;
+        try {
+          if (button) {
+            button.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, cancelable: true, view: window}));
+            button.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+            button.click?.();
+            button.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+          }
+          const stillVisiblePortal = [...document.querySelectorAll('[data-floating-ui-portal]')]
+            .find((node) => modalPattern.test(node.innerText || node.textContent || ''));
+          if (stillVisiblePortal) {
+            // Clerk 关闭事件不生效时，直接移除账号弹层 portal，并解除 inert/滚动锁，避免遮挡后续地址/支付流程。
+            stillVisiblePortal.remove();
+            for (const node of [document.documentElement, document.body, ...document.body?.children || []]) {
+              node.removeAttribute?.('aria-hidden');
+              node.removeAttribute?.('data-base-ui-inert');
+              node.inert = false;
+            }
+            document.documentElement.style.overflow = '';
+            document.body.style.overflow = '';
+            remember('clerk_modal_removed', 'removed floating-ui portal');
+          } else if (button) {
+            remember('clerk_modal_close', button.getAttribute('aria-label') || 'Close modal');
+          }
+        } finally {
+          window.clearInterval(window.__orCloseClerkModalInterval);
+          window.__orCloseClerkModalInterval = null;
+        }
+      }, 100);
+    }
+  })();`;
+  await client.send('Page.enable', {}, 5000).catch(() => {});
+  const removeListener = client.on?.('Page.javascriptDialogOpening', (event = {}) => {
+    client.send('Page.handleJavaScriptDialog', {accept: true}, 5000).catch(() => {});
+    client.__lastJavaScriptDialog = {
+      type: event.type || '',
+      message: event.message || '',
+      url: event.url || '',
+      at: new Date().toISOString(),
+    };
+  });
+  await client.send('Page.addScriptToEvaluateOnNewDocument', {source}, 5000).catch(() => null);
+  await evaluate(client, source, 5000).catch(() => null);
+  return {installed: true, listener: !!removeListener, strategy: 'addScriptToEvaluateOnNewDocument_and_javascriptDialogOpening'};
+}
+
+async function pageStepState(page) {
+  if (!page) return null;
+  const state = await evaluate(page, `(() => {
+    const text = document.body?.innerText || '';
+    return {
+      href: location.href,
+      title: document.title || '',
+      hasPaymentIssue: /Error:\\s*Payment\\s+Issue|Your card was declined/i.test(text),
+      hasServerError: /\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i.test(text),
+      hasAutoTopup: /Auto\\s*Top[- ]?Up/i.test(text),
+      hasPurchaseCredits: /Purchase Credits/i.test(text),
+      hasAddCredits: /Add Credits/i.test(text),
+      automationDialogs: window.__orAutomationDialogs || [],
+      tail: text.slice(-1800),
+    };
+  })()`).catch((error) => ({error: error.message}));
+  const networkFailures = page.getRecentNetworkFailures?.() || [];
+  const recentNetworkFailures = networkFailures.filter((entry) => !entry.ignored);
+  const ignoredNetworkFailures = networkFailures.filter((entry) => entry.ignored);
+  const ignoredServerError = Boolean(state.hasServerError && !state.hasPaymentIssue);
+  return {
+    ...state,
+    hasServerErrorRaw: Boolean(state.hasServerError),
+    hasServerError: false,
+    ignoredServerError,
+    recentNetworkFailures,
+    ignoredNetworkFailures: ignoredNetworkFailures.slice(-5),
+    lastJavaScriptDialog: page.__lastJavaScriptDialog || null,
+  };
+}
+
+async function dismissOpenRouterServerErrorToast(page) {
+  if (!page) return {attempted: false};
+  return evaluate(page, `(() => {
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim();
+    const visible = (node) => {
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const clickNode = (target) => {
+      if (!target) return false;
+      target.scrollIntoView?.({block:'center', inline:'center'});
+      const PointerLikeEvent = window.PointerEvent || MouseEvent;
+      target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+      target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+      target.click?.();
+      target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+      return true;
+    };
+    const errorPattern = /\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const exactDialogs = [...document.querySelectorAll('[data-slot="dialog-content"],[role="dialog"],[aria-modal="true"]')]
+      .filter((node) => visible(node) && errorPattern.test(textOf(node)))
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      });
+    for (const dialog of exactDialogs) {
+      const close = [...dialog.querySelectorAll('button[data-slot="dialog-close"],button[aria-label="Close"],button[title="Close"]')]
+        .find((node) => visible(node) && node.getAttribute('aria-disabled') !== 'true');
+      if (close && clickNode(close)) {
+        return {
+          attempted: true,
+          found: true,
+          clicked: true,
+          method: close.getAttribute('data-slot') === 'dialog-close' ? 'dialog-close-slot' : 'dialog-close-label',
+          text: textOf(dialog).slice(0, 240),
+        };
+      }
+    }
+    const errorNodes = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && errorPattern.test(textOf(node)));
+    if (!errorNodes.length) return {attempted: false, found: false};
+    const containers = [];
+    for (const node of errorNodes) {
+      let current = node;
+      for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        if (errorPattern.test(text)) {
+          containers.push(current);
+        }
+      }
+    }
+    const unique = [...new Set(containers)];
+    const closeCandidates = [];
+    for (const container of unique) {
+      closeCandidates.push(...[...container.querySelectorAll('button,[role="button"],[aria-label],svg')]
+        .filter((node) => visible(node))
+        .map((node) => {
+          const label = [
+            node.getAttribute('aria-label') || '',
+            node.getAttribute('title') || '',
+            textOf(node),
+          ].join(' ').trim();
+          const rect = node.getBoundingClientRect();
+          const containerRect = container.getBoundingClientRect();
+          const nearTopRight = rect.left > containerRect.left + containerRect.width * 0.6 && rect.top < containerRect.top + containerRect.height * 0.35;
+          return {
+            node,
+            label,
+            score: /close|dismiss|关闭|×|x/i.test(label) ? 2 : nearTopRight ? 1 : 0,
+          };
+        })
+        .filter((candidate) => candidate.score > 0));
+    }
+    const ordered = [...closeCandidates].sort((a, b) => b.score - a.score);
+    const clicked = [];
+    for (const candidate of ordered.slice(0, 6)) {
+      const target = candidate.node.closest?.('button,[role="button"],[aria-label]') || candidate.node;
+      if (!target || clicked.includes(target)) continue;
+      clickNode(target);
+      clicked.push(target);
+    }
+    if (!clicked.length) return {attempted: true, found: true, clicked: false, reason: 'close_button_not_found'};
+    return {attempted: true, found: true, clicked: true, clickedCount: clicked.length};
+  })()`).catch((error) => ({attempted: true, error: error.message}));
+}
+
+async function waitForVisibleSecurityChallengeToClear(page) {
+  let waited = false;
+  while (true) {
+    const challenge = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const text = document.body?.innerText || '';
+    const textMatch = /hcaptcha|captcha|turnstile|verify you are human|human verification|complete the security|security check|authentication required/i.test(text);
+    const frame = [...document.querySelectorAll('iframe, [data-sitekey], [data-hcaptcha-widget-id], [data-turnstile]')]
+      .find((node) => visible(node) && /hcaptcha|captcha|turnstile|challenge|security/i.test([
+        node.src || '',
+        node.title || '',
+        node.name || '',
+        node.className || '',
+        node.getAttribute('data-sitekey') || '',
+      ].join(' ')));
+    return {
+      found: textMatch || !!frame,
+      source: textMatch ? 'visible_text' : (frame ? 'visible_challenge_frame' : ''),
+      tail: text.slice(-800),
+    };
+    })()`).catch((error) => ({found: false, pageUnavailable: true, error: error.message || String(error)}));
+    if (challenge.pageUnavailable) {
+      throw new Error(`Security challenge window was closed manually or is unavailable: ${challenge.error}`);
+    }
+    if (!challenge.found) return {waited, ...challenge};
+    if (!waited) {
+      console.warn('[security challenge] waiting for manual completion before continuing; browser page will not be refreshed');
+      waited = true;
+    }
+    await sleep(3000);
+  }
+}
+
+async function commandRefreshCreditsPage(page) {
+  if (!page) return {refreshed: false};
+  await waitForVisibleSecurityChallengeToClear(page);
+  await page.send('Page.bringToFront').catch(() => {});
+  // 新号弹框恢复只需要刷新 Credits 页；使用 Page.reload 避免 macOS ⌘R 焦点异常触发系统菜单。
+  await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
+  const ready = await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
+  if (!ready) {
+    await page.send('Page.reload', {ignoreCache: true}, DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS).catch(() => null);
+    await waitForNavigationReady(page, OPENROUTER_CREDITS_URL, DEFAULT_NAVIGATION_READY_TIMEOUT_MS).catch(() => null);
+  }
+  await sleep(PAGE_SETTLE_MS);
+  return {refreshed: true, method: 'page_reload', ready};
+}
+
+async function detectNewAccountOverlay(page) {
+  if (!page) return {found: false};
+  return evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim().replace(/\\s+/g, ' ');
+    const newAccountPattern = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says/i;
+    const flowPattern = /Purchase Credits|Add a Payment Method|Save payment method|Add a Billing Address|Card number|Expiration date|CVC|Payment Issue|3D Secure|hCaptcha|captcha|passkey/i;
+    const dialog = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-floating-ui-portal] [role="dialog"]')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text:textOf(node)}))
+      .find((item) => newAccountPattern.test(item.text) && !flowPattern.test(item.text));
+    return dialog
+      ? {found:true, text:dialog.text.slice(0, 240), method:'refresh_new_account_overlay'}
+      : {found:false};
+  })()`).catch((error) => ({found: false, error: error.message}));
+}
+
+async function recoverNewAccountBlockerIfPresent(page, reason = 'new_account_blocker') {
+  if (!page) return {recovered: false};
+  const nativeDialog = await acceptJavascriptDialogIfAny(page, 150).catch(() => ({handled: false}));
+  if (nativeDialog.handled) {
+    await sleep(250);
+    // 新号首次点击支付入口会弹验证邮箱提示，强刷可清掉一次性弹层并回到 Credits 主流程。
+    const refreshed = await commandRefreshCreditsPage(page).catch(refreshErrorResult);
+    return {
+      recovered: true,
+      reason: `${reason}:native_dialog`,
+      nativeDialog,
+      pageOverlay: {found: false},
+      refreshed,
+    };
+  }
+  const pageOverlay = await detectNewAccountOverlay(page);
+  if (pageOverlay.found) {
+    const refreshed = await commandRefreshCreditsPage(page).catch(refreshErrorResult);
+    return {
+      recovered: true,
+      reason: `${reason}:page_overlay`,
+      nativeDialog,
+      pageOverlay,
+      refreshed,
+    };
+  }
+  return {recovered: false, nativeDialog, pageOverlay};
+}
+
+async function dismissInterferingOverlays(page) {
+  if (!page) return {attempted: false};
+  const nativeDialog = await acceptJavascriptDialogIfAny(page, 700).catch(() => ({handled: false}));
+  const pageOverlay = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    // OpenRouter 维护提醒会影响后续余额回读，只按已确认的 portal id 和关闭按钮 class 处理。
+    const maintenanceBanner = document.querySelector('#maintenance-banner-portal');
+    if (maintenanceBanner && visible(maintenanceBanner)) {
+      const closeControl = maintenanceBanner.getElementsByClassName('ml-2 mt-0.5')[0];
+      const target = closeControl?.closest?.('button,[role="button"]') || closeControl;
+      if (target && visible(target)) {
+        target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+        target.click?.();
+        target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+        return {attempted:true, found:true, clicked:true, kind:'maintenance_banner'};
+      }
+    }
+    const flowBlocker = /Purchase Credits|Add a Payment Method|Add Payment Method|Save payment method|Add a Billing Address|Complete address details|Update Address|Card number|Expiration date|CVC|Postal code|Payment Issue|3D Secure|hCaptcha|captcha|security code|bank verification|passkey/i;
+    const allowedNonFlowOverlay = /Profile details|Connected accounts|Connect account|Connect wallet|Manage your account info|You must add a verified email to access this feature|openrouter\\.ai says|\\b(?:Error|HTTP)\\s*5\\d{2}\\b|Internal Server Error|Something went wrong|Application error|Invalid value for stripe\\.confirmSetup/i;
+    const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],div,section')]
+      .filter(visible)
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const buttons = [...node.querySelectorAll('button,[role="button"],[aria-label],svg')]
+          .filter(visible)
+          .map((button) => {
+            const label = [textOf(button), button.getAttribute?.('aria-label') || '', button.getAttribute?.('title') || ''].join(' ').trim();
+            const buttonRect = button.getBoundingClientRect();
+            const nearTopRight = buttonRect.left > rect.left + rect.width * 0.72 && buttonRect.top < rect.top + rect.height * 0.24;
+            return {node: button, label, rect: buttonRect, nearTopRight};
+          });
+        return {
+          node,
+          text: textOf(node),
+          rect,
+          stylePosition: style.position,
+          zIndex: Number.parseInt(style.zIndex || '0', 10) || 0,
+          role: node.getAttribute('role') || '',
+          modal: node.getAttribute('aria-modal') || '',
+          buttons,
+        };
+      })
+      .filter((item) => item.rect.width >= 220 && item.rect.height >= 100)
+      .filter((item) => {
+        const hasExplicitCloseOrOk = item.buttons.some((button) => /^OK$/i.test(button.label) || /close|dismiss|关闭|×|x/i.test(button.label));
+        const hasTopRightClose = item.buttons.some((button) => button.nearTopRight && /^(|×|x|close|dismiss|关闭)$/i.test(button.label));
+        const hasCloseOrOk = hasExplicitCloseOrOk || hasTopRightClose;
+        if (!hasCloseOrOk) return false;
+        const protectedFlow = flowBlocker.test(item.text) && !/You must add a verified email to access this feature/i.test(item.text);
+        if (protectedFlow) return false;
+        // 侧栏工作空间等布局容器也可能是 fixed，不能仅凭样式把它们当弹窗点击。
+        const isRealOverlay = item.role === 'dialog' || item.modal === 'true';
+        return isRealOverlay && allowedNonFlowOverlay.test(item.text);
+      })
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+    const dialog = dialogs[0];
+    if (!dialog) return {attempted:false, found:false};
+    const buttons = dialog.buttons
+      .map((item) => ({
+        ...item,
+        score: /^OK$/i.test(item.label) ? 4 : /close|dismiss|关闭|×|x/i.test(item.label) ? 3 : item.nearTopRight ? 2 : 0,
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.rect.x - a.rect.x);
+    const target = buttons[0]?.node?.closest?.('button,[role="button"],[aria-label]') || buttons[0]?.node || null;
+    if (!target) return {attempted:true, found:true, clicked:false, reason:'close_target_not_found', text:dialog.text.slice(0, 240)};
+    target.scrollIntoView?.({block:'center', inline:'center'});
+    target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+    target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+    target.click?.();
+    target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    return {attempted:true, found:true, clicked:true, label:buttons[0]?.label || '', text:dialog.text.slice(0, 240)};
+  })()`).catch((error) => ({attempted: true, error: error.message}));
+  return {attempted: true, nativeDialog, pageOverlay};
+}
+
+async function recoverInterferingUi(page) {
+  if (!page) return {attempted: false};
+  const newAccountBlocker = await recoverNewAccountBlockerIfPresent(page, 'step_boundary');
+  if (newAccountBlocker.recovered) {
+    return {
+      attempted: true,
+      refreshedOnly: true,
+      reason: newAccountBlocker.reason,
+      dismissedOverlay: {
+        attempted: true,
+        nativeDialog: newAccountBlocker.nativeDialog,
+        pageOverlay: newAccountBlocker.pageOverlay,
+      },
+      dismissedServerError: {attempted: false},
+      paymentSurface: false,
+      refreshed: newAccountBlocker.refreshed,
+    };
+  }
+  const dismissedOverlay = await dismissInterferingOverlays(page);
+  if (dismissedOverlay?.nativeDialog?.handled || dismissedOverlay?.pageOverlay?.clicked) await sleep(400);
+  const dismissedServerError = await dismissOpenRouterServerErrorToast(page);
+  if (dismissedServerError?.clicked) await sleep(400);
+  const state = await pageStepState(page);
+  const paymentSurface = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || '').trim();
+    const activeDialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"],form')]
+      .filter(visible)
+      .map((node) => textOf(node))
+      .filter(Boolean);
+    return activeDialogs.some((text) => /Save payment method|Card number|Expiration date|CVC|Add a Billing Address|Purchase Credits[\\s\\S]*Total due|Auto\\s*Top[- ]?Up/i.test(text));
+  })()`).catch(() => false);
+  const refreshed = state.href?.startsWith(OPENROUTER_CREDITS_URL) && state.hasServerErrorRaw && !state.hasPaymentIssue && !paymentSurface
+    ? await commandRefreshCreditsPage(page).catch(refreshErrorResult)
+    : {refreshed: false};
+  return {attempted: true, dismissedOverlay, dismissedServerError, paymentSurface, refreshed};
+}
+
+async function dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState) {
+  if (!page || (!pageState?.hasServerError && !pageState?.ignoredServerError)) return {attempted: false};
+  const dismissedPostStepServerError = await dismissOpenRouterServerErrorToast(page);
+  if (dismissedPostStepServerError?.clicked) await sleep(250);
+  const after = await pageStepState(page);
+  writeStepDiagnostic(debugDir, `${label}-server-error-dismissed`, 'success', {
+    kind: pageState?.ignoredServerError ? 'ignored_openrouter_server_error_dismissed' : 'non_fatal_server_error_dismissed',
+    dismissedPostStepServerError,
+    before: pageState,
+    after,
+  });
+  return dismissedPostStepServerError;
+}
+
+async function runLoggedStep(label, debugDir, task, page = null) {
+  const recoveredUi = page ? await recoverInterferingUi(page) : {attempted: false};
+  writeStepDiagnostic(debugDir, label, 'start', {recoveredUi, page: await pageStepState(page)});
+  try {
+    const result = await task();
+    const recoveredUiAfter = page ? await recoverInterferingUi(page) : {attempted: false};
+    const pageState = await pageStepState(page);
+    writeStepDiagnostic(debugDir, label, 'success', {result, recoveredUiAfter, page: pageState});
+    await dismissServerErrorAfterStepIfPresent(page, debugDir, label, pageState);
+    return result;
+  } catch (error) {
+    const pageState = await pageStepState(page);
+    writeStepDiagnostic(debugDir, label, 'error', {error: error.message, page: pageState});
+    if (page) {
+      await captureDiagnosticScreenshot(page, debugDir, `step-${label}-error`, {
+        kind: 'automation_step_error',
+        label,
+        error: error.message,
+        page: pageState,
+      }).catch(() => null);
+    }
+    throw error;
+  }
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`Unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'existing-billing-address' || key === 'confirm-purchase') {
+    if (key === 'stdin' || key === 'help' || key === 'no-open-purchase' || key === 'remove-existing' || key === 'verbose' || key === 'configure-auto-topup' || key === 'auto-topup-only' || key === 'billing-address-only' || key === 'credits-status-only' || key === 'purchase-only' || key === 'refund-only' || key === 'existing-billing-address' || key === 'confirm-purchase' || key === 'disable-zdr' || key === 'enable-zdr' || key === 'zdr-only' || key === 'enable-data-training' || key === 'disable-data-training' || key === 'data-training-only') {
       args[key] = true;
       continue;
     }
@@ -155,6 +726,16 @@ function readStdin() {
   }
 }
 
+function normalizeBooleanInput(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return false;
+  if (/^(false|0|no|off|null|undefined)$/i.test(normalized)) return false;
+  return true;
+}
+
 function normalizeInput(args) {
   if (args.help) {
     console.log(usage());
@@ -172,6 +753,7 @@ function normalizeInput(args) {
   const billing = {...(json.billing || {})};
   const autoTopup = {...(json.autoTopup || {})};
   const purchase = {...(json.purchase || {})};
+  const opom = {...(json.opom || {})};
   const purchaseRule = {...(json.purchaseRule || purchase.rule || {})};
   const autoTopupThreshold = args['auto-topup-threshold'] || autoTopup.threshold || process.env.AUTO_TOPUP_THRESHOLD || '';
   const autoTopupAmount = args['auto-topup-amount'] || autoTopup.amount || process.env.AUTO_TOPUP_AMOUNT || '';
@@ -197,6 +779,27 @@ function normalizeInput(args) {
     || purchase.aboveAmount
     || process.env.PURCHASE_AMOUNT_AT_OR_ABOVE_THRESHOLD
     || '';
+  const disableZdrInput = args['disable-zdr'] !== undefined
+    ? args['disable-zdr']
+    : (json.disableZdr ?? json.disable_zdr ?? process.env.DISABLE_ZDR);
+  const enableZdrInput = args['enable-zdr'] !== undefined
+    ? args['enable-zdr']
+    : (json.enableZdr ?? json.enable_zdr ?? process.env.ENABLE_ZDR);
+  const zdrOnlyInput = args['zdr-only'] !== undefined
+    ? args['zdr-only']
+    : (json.zdrOnly ?? json.disableZdrOnly ?? json.disable_zdr_only ?? process.env.ZDR_ONLY);
+  const enableDataTrainingInput = args['enable-data-training'] !== undefined
+    ? args['enable-data-training']
+    : (json.enableDataTraining ?? json.enable_data_training ?? process.env.ENABLE_DATA_TRAINING);
+  const disableDataTrainingInput = args['disable-data-training'] !== undefined
+    ? args['disable-data-training']
+    : (json.disableDataTraining ?? json.disable_data_training ?? process.env.DISABLE_DATA_TRAINING);
+  const dataTrainingOnlyInput = args['data-training-only'] !== undefined
+    ? args['data-training-only']
+    : (json.dataTrainingOnly ?? json.data_training_only ?? process.env.DATA_TRAINING_ONLY);
+  const refundOnlyInput = args['refund-only'] !== undefined
+    ? args['refund-only']
+    : (json.refundOnly ?? json.refund_only ?? process.env.REFUND_ONLY);
   const cardExpiry = args['card-expiry']
     || card.expiry
     || joinExpiry(args['card-exp-month'] || card.expMonth || card.exp_month, args['card-exp-year'] || card.expYear || card.exp_year)
@@ -221,7 +824,15 @@ function normalizeInput(args) {
     billingAddressOnly: !!(args['billing-address-only'] || json.billingAddressOnly),
     creditsStatusOnly: !!(args['credits-status-only'] || json.creditsStatusOnly),
     purchaseOnly: !!(args['purchase-only'] || json.purchaseOnly),
+    preserveExistingPaymentMethod: !!json.preserveExistingPaymentMethod,
     existingBillingAddress: !!(args['existing-billing-address'] || json.existingBillingAddress),
+    disableZdr: normalizeBooleanInput(disableZdrInput),
+    enableZdr: normalizeBooleanInput(enableZdrInput),
+    zdrOnly: normalizeBooleanInput(zdrOnlyInput),
+    enableDataTraining: normalizeBooleanInput(enableDataTrainingInput),
+    disableDataTraining: normalizeBooleanInput(disableDataTrainingInput),
+    dataTrainingOnly: normalizeBooleanInput(dataTrainingOnlyInput),
+    refundOnly: normalizeBooleanInput(refundOnlyInput),
     openPurchaseForVerification: !args['no-open-purchase'],
     preparePurchaseOnly: !!(json.preparePurchaseOnly || json.preparePurchaseForm),
     purchase: {
@@ -230,14 +841,29 @@ function normalizeInput(args) {
       rule: {
         enabled: !!(purchaseBalanceThreshold || purchaseAmountBelowThreshold || purchaseAmountAtOrAboveThreshold),
         threshold: normalizeMoneyValue(purchaseBalanceThreshold),
-        belowAmount: normalizeMoneyValue(purchaseAmountBelowThreshold),
-        atOrAboveAmount: normalizeMoneyValue(purchaseAmountAtOrAboveThreshold),
+        belowAmountConfigured: hasMoneyInput(purchaseAmountBelowThreshold) || !!purchaseRule.belowAmountConfigured || !!purchase.belowAmountConfigured,
+        belowAmount: normalizeOptionalMoneyValue(purchaseAmountBelowThreshold),
+        atOrAboveAmount: normalizeOptionalMoneyValue(purchaseAmountAtOrAboveThreshold),
       },
     },
     removeExistingPaymentMethod: !!(args['remove-existing'] || json.removeExistingPaymentMethod),
     verbose: !!(args.verbose || json.verbose),
+    opom: {
+      enabled: !!opom.enabled,
+      opomBaseUrl: opom.opomBaseUrl || '',
+      opomRechargeToken: opom.opomRechargeToken || '',
+      opomSecondaryBaseUrl: opom.opomSecondaryBaseUrl || '',
+      opomSecondaryRechargeToken: opom.opomSecondaryRechargeToken || '',
+      opomRequestTimeoutMs: opom.opomRequestTimeoutMs || '',
+      opomRequestRetries: opom.opomRequestRetries || '',
+      opomWritebackRetries: opom.opomWritebackRetries || '',
+      opomRetryDelayMs: opom.opomRetryDelayMs || '',
+      runId: opom.runId || '',
+      row: {...(opom.row || {})},
+    },
     autoTopup: {
       enabled: !!(args['configure-auto-topup'] || json.configureAutoTopup || autoTopup.enabled || autoTopupThreshold || autoTopupAmount),
+      preserveRules: !!(autoTopup.preserveRules || autoTopup.preserve_rules),
       threshold: normalizeMoneyValue(autoTopupThreshold),
       amount: normalizeMoneyValue(autoTopupAmount),
     },
@@ -258,26 +884,41 @@ function normalizeInput(args) {
   };
 
   if (!input.expectedAccount) throw new Error('expectedAccount is required');
-  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly].filter(Boolean).length > 1) {
-    throw new Error('autoTopupOnly, billingAddressOnly, and creditsStatusOnly cannot be combined');
+  if (input.disableZdr && input.enableZdr) {
+    throw new Error('disableZdr and enableZdr cannot be combined');
   }
-  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly) && input.purchase.confirmed) {
-    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, or creditsStatusOnly');
+  if (input.zdrOnly && !input.disableZdr && !input.enableZdr) {
+    throw new Error('zdrOnly requires disableZdr or enableZdr');
   }
-  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly)) {
-    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, or creditsStatusOnly');
+  if (input.enableDataTraining && input.disableDataTraining) {
+    throw new Error('enableDataTraining and disableDataTraining cannot be combined');
+  }
+  if (input.dataTrainingOnly && !input.enableDataTraining && !input.disableDataTraining) {
+    throw new Error('dataTrainingOnly requires enableDataTraining or disableDataTraining');
+  }
+  if ((input.enableDataTraining || input.disableDataTraining) && !input.dataTrainingOnly) {
+    throw new Error('Data Training changes must run in dataTrainingOnly mode');
+  }
+  if ([input.autoTopupOnly, input.billingAddressOnly, input.creditsStatusOnly, input.zdrOnly, input.dataTrainingOnly, input.refundOnly].filter(Boolean).length > 1) {
+    throw new Error('autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, and refundOnly cannot be combined');
+  }
+  if ((input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly || input.refundOnly) && input.purchase.confirmed) {
+    throw new Error('purchase.confirmed cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, or refundOnly');
+  }
+  if (input.purchaseOnly && (input.autoTopupOnly || input.billingAddressOnly || input.creditsStatusOnly || input.zdrOnly || input.dataTrainingOnly || input.refundOnly)) {
+    throw new Error('purchaseOnly cannot be combined with autoTopupOnly, billingAddressOnly, creditsStatusOnly, zdrOnly, dataTrainingOnly, or refundOnly');
   }
   if (input.purchaseOnly && !input.purchase.confirmed && !input.preparePurchaseOnly && !input.autoTopup.enabled) {
     throw new Error('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
   }
-  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmount || !input.purchase.rule.atOrAboveAmount)) {
-    throw new Error('purchase.rule.threshold, belowAmount, and atOrAboveAmount are required when any purchase rule value is supplied');
+  if (input.purchase.rule.enabled && (!input.purchase.rule.threshold || !input.purchase.rule.belowAmountConfigured)) {
+    throw new Error('purchase.rule.threshold and belowAmount are required when any purchase rule value is supplied');
   }
   if ((input.purchase.confirmed || input.preparePurchaseOnly) && !input.purchase.amount && !input.purchase.rule.enabled) {
     throw new Error('purchase.amount/--purchase-amount or a complete purchase.rule is required when purchase is confirmed or prepared');
   }
   if (input.purchase.confirmed || input.preparePurchaseOnly) input.openPurchaseForVerification = true;
-  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly;
+  const needsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly;
   if (needsCard && (!input.card.number || !input.card.expiry || !input.card.cvc)) {
     throw new Error('card.number, card.expiry, and card.cvc are required');
   }
@@ -285,7 +926,7 @@ function normalizeInput(args) {
   input.billing.postalCode ||= input.card.postalCode;
   if (needsCard && !input.existingBillingAddress && !input.card.postalCode) throw new Error('card postalCode is required');
   if ((needsCard && !input.existingBillingAddress) || input.billingAddressOnly) requireBillingAddress(input.billing);
-  if (input.autoTopup.enabled && !input.creditsStatusOnly && (!input.autoTopup.threshold || !input.autoTopup.amount)) {
+  if (input.autoTopup.enabled && !input.creditsStatusOnly && !input.autoTopup.preserveRules && (!input.autoTopup.threshold || !input.autoTopup.amount)) {
     throw new Error('autoTopup.threshold and autoTopup.amount are required when autoTopup is enabled');
   }
   if (input.autoTopupOnly && !input.autoTopup.enabled) {
@@ -313,6 +954,18 @@ function normalizeMoneyValue(value) {
   const number = Number(cleaned);
   if (!Number.isFinite(number) || number <= 0) throw new Error(`Invalid money value: ${value}`);
   return Number.isInteger(number) ? String(number) : String(number);
+}
+
+function normalizeOptionalMoneyValue(value) {
+  const cleaned = String(value ?? '').replace(/[$,\s]/g, '');
+  if (!cleaned) return '';
+  const number = Number(cleaned);
+  if (number === 0) return '';
+  return normalizeMoneyValue(cleaned);
+}
+
+function hasMoneyInput(value) {
+  return String(value ?? '').replace(/[$,\s]/g, '') !== '';
 }
 
 function normalizePositiveInteger(value, label) {
@@ -627,11 +1280,17 @@ function cdp(wsUrl, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const pending = new Map();
+    const listeners = new Map();
     const timer = setTimeout(() => reject(new Error(`CDP connect timeout: ${wsUrl}`)), timeoutMs);
 
     ws.onopen = () => {
       clearTimeout(timer);
       resolve({
+        on(method, handler) {
+          if (!listeners.has(method)) listeners.set(method, new Set());
+          listeners.get(method).add(handler);
+          return () => listeners.get(method)?.delete(handler);
+        },
         send(method, params = {}, commandTimeoutMs = timeoutMs) {
           const msg = {id: ++globalMessageId, method, params};
           ws.send(JSON.stringify(msg));
@@ -651,7 +1310,15 @@ function cdp(wsUrl, timeoutMs = 15000) {
     ws.onerror = (event) => reject(new Error(`CDP websocket error: ${event.message || wsUrl}`));
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      if (!message.id || !pending.has(message.id)) return;
+      if (!message.id || !pending.has(message.id)) {
+        const eventListeners = listeners.get(message.method);
+        if (eventListeners) {
+          for (const handler of eventListeners) {
+            try { handler(message.params || {}); } catch {}
+          }
+        }
+        return;
+      }
       const pendingCommand = pending.get(message.id);
       pending.delete(message.id);
       clearTimeout(pendingCommand.commandTimer);
@@ -715,7 +1382,7 @@ async function waitForNavigationReady(client, targetUrl, timeoutMs = DEFAULT_NAV
     ) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`navigation ready timeout after ${timeoutMs}ms: ${JSON.stringify(lastState || {})}`);
 }
@@ -726,6 +1393,7 @@ async function navigatePage(client, url, options = {}) {
   const retries = Math.max(1, Number(options.retries || DEFAULT_NAVIGATION_RETRIES));
   let lastError = null;
 
+  await waitForVisibleSecurityChallengeToClear(client);
   await client.send('Page.enable', {}, 5000).catch(() => {});
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -753,10 +1421,711 @@ async function navigatePage(client, url, options = {}) {
   throw new Error(`CDP navigation failed after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
 }
 
+function initialZdrResult(requested, targetEnabled = false) {
+  return {
+    requested: !!requested,
+    targetEnabled: !!targetEnabled,
+    configured: null,
+    changed: false,
+    status: requested ? 'pending' : 'skipped',
+    enabledBefore: null,
+    enabledAfter: null,
+    total: 0,
+    skipped: !requested,
+    reason: requested ? 'pending' : 'not_requested',
+  };
+}
+
+async function clickGuardrailsVisibleControl(page, pattern, label = pattern, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const rx = new RegExp(${JSON.stringify(pattern)}, 'i');
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+        .trim()
+        .replace(/\\s+/g, ' ');
+      const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true';
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const interactiveSelector = 'button,a,[role="button"],[role="tab"],[role="menuitem"],[role="link"]';
+      const direct = [...document.querySelectorAll(interactiveSelector)]
+        .filter((node) => visible(node) && !disabled(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .find((item) => rx.test(item.text));
+      if (direct) {
+        activate(direct.node);
+        return {clicked:true, label:direct.text, method:'interactive_text'};
+      }
+      const owner = [...document.querySelectorAll('body *')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .find((item) => rx.test(item.text) && item.text.length <= 260);
+      const target = owner?.node.closest?.(interactiveSelector);
+      if (target && visible(target) && !disabled(target)) {
+        activate(target);
+        return {clicked:true, label:textOf(target), method:'closest_interactive_text'};
+      }
+      return {clicked:false, tail:textOf(document.body).slice(-1600)};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Guardrails control not clickable: ${label}; ${last?.error || last?.tail || ''}`);
+}
+
+async function openDefaultWorkspaceGuardrail(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+        .trim()
+        .replace(/\\s+/g, ' ');
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      // OpenRouter 新版 Guardrails 首页把默认规则展示为表格行，不一定提供 button/a 语义。
+      const owners = [...document.querySelectorAll('a,button,[role="link"],[role="button"],[role="row"],tr,[tabindex],div')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}))
+        .filter((item) => /\\bWorkspace\\s+Guardrail\\b/i.test(item.text) && item.text.length <= 260)
+        .sort((left, right) => left.text.length - right.text.length);
+      const owner = owners[0]?.node;
+      if (!owner) return {clicked:false, tail:textOf(document.body).slice(-1600)};
+      const target = owner.closest?.('a,button,[role="link"],[role="button"],[role="row"],tr,[tabindex]') || owner;
+      activate(target);
+      return {clicked:true, label:textOf(target), method: target === owner ? 'guardrail_row_text' : 'guardrail_row_owner'};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Default Workspace Guardrail row not clickable: ${last?.error || last?.tail || ''}`);
+}
+
+function zdrDomExpression(action = 'read') {
+  return `(() => {
+    const action = ${JSON.stringify(action)};
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    const checkedState = (node) => {
+      const aria = node.getAttribute?.('aria-checked');
+      if (/^(true|false)$/i.test(aria || '')) return aria === 'true';
+      const dataState = node.getAttribute?.('data-state') || '';
+      if (/^(checked|on|true)$/i.test(dataState)) return true;
+      if (/^(unchecked|off|false)$/i.test(dataState)) return false;
+      const input = node.matches?.('input') ? node : node.querySelector?.('input[type="checkbox"],input[role="switch"]');
+      if (input && typeof input.checked === 'boolean') return input.checked;
+      return null;
+    };
+    const disabled = (node) => (
+      node.disabled
+      || node.getAttribute?.('aria-disabled') === 'true'
+      || node.getAttribute?.('data-disabled') === 'true'
+    );
+    const activate = (node) => {
+      node.scrollIntoView?.({block:'center', inline:'center'});
+      node.focus?.({preventScroll:true});
+      if (typeof node.click === 'function') node.click();
+      else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    };
+    const labelForSwitch = (node) => {
+      let best = '';
+      let current = node;
+      for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        const rect = current.getBoundingClientRect();
+        if (text && text.length <= 260 && rect.height <= 170 && !/Zero\\s+Data\\s+Retention/i.test(text)) best = text;
+      }
+      return best || node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '';
+    };
+    const switchSelector = '[role="switch"],button[aria-checked],input[type="checkbox"][role="switch"],input[type="checkbox"][aria-checked]';
+    const allSwitchesIn = (root, heading) => [...root.querySelectorAll(switchSelector)]
+      .filter((node) => visible(node))
+      .filter((node) => {
+        if (!heading) return true;
+        const relation = heading.compareDocumentPosition(node);
+        return heading.contains(node) || !!(relation & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+    const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"],p,div,span')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text: textOf(node)}))
+      .filter((item) => /\\bZero\\s+Data\\s+Retention\\b/i.test(item.text) && item.text.length <= 260)
+      .sort((a, b) => a.text.length - b.text.length);
+    const candidates = [];
+    for (const heading of headings) {
+      let current = heading.node;
+      for (let depth = 0; current && depth < 11; depth += 1, current = current.parentElement) {
+        if (!visible(current)) continue;
+        const text = textOf(current);
+        if (!/Zero\\s+Data\\s+Retention/i.test(text)) continue;
+        const switches = allSwitchesIn(current, heading.node);
+        if (!switches.length) continue;
+        const rect = current.getBoundingClientRect();
+        const hasDataTraining = /\\bData\\s+Training\\b/i.test(text);
+        candidates.push({
+          node: current,
+          heading: heading.node,
+          text,
+          switches,
+          hasDataTraining,
+          score: (hasDataTraining ? -100000 : 0) + (switches.length * 10000) - Math.min(text.length, 6000) - Math.round((rect.width * rect.height) / 10000),
+        });
+      }
+    }
+    const section = candidates
+      .filter((candidate) => !candidate.hasDataTraining)
+      .sort((a, b) => b.score - a.score)[0];
+    if (!section) {
+      return {
+        found: false,
+        reason: candidates.length ? 'zdr_section_not_isolated_from_data_training' : 'zdr_section_not_found',
+        candidateCount: candidates.length,
+        href: location.href,
+        pageHasGuardrails: /Workspace\\s+Guardrail|Model\\s+&\\s+Provider\\s+Access|Zero\\s+Data\\s+Retention/i.test(textOf(document.body)),
+        tail: textOf(document.body).slice(-1600),
+      };
+    }
+    const switches = section.switches.map((node, index) => ({
+      node,
+      index,
+      checked: checkedState(node),
+      disabled: disabled(node),
+      label: labelForSwitch(node).slice(0, 260),
+    }));
+    let clicked = null;
+    if (action === 'disable-first-enabled') {
+      const target = switches.find((item) => item.checked === true && !item.disabled);
+      if (target) {
+        activate(target.node);
+        clicked = {index: target.index, label: target.label || String(target.index)};
+      }
+    }
+    if (action === 'enable-first-disabled') {
+      const target = switches.find((item) => item.checked === false && !item.disabled);
+      if (target) {
+        activate(target.node);
+        clicked = {index: target.index, label: target.label || String(target.index)};
+      }
+    }
+    return {
+      found: true,
+      href: location.href,
+      sectionText: section.text.slice(0, 1200),
+      total: switches.length,
+      switches: switches.map(({index, checked, disabled, label}) => ({index, checked, disabled, label})),
+      enabled: switches.filter((item) => item.checked === true).map((item) => item.label || String(item.index)),
+      disabledUnchecked: switches.filter((item) => item.checked === false && item.disabled).map((item) => item.label || String(item.index)),
+      unknown: switches.filter((item) => item.checked == null).map((item) => item.label || String(item.index)),
+      disabledEnabled: switches.filter((item) => item.checked === true && item.disabled).map((item) => item.label || String(item.index)),
+      clicked,
+    };
+  })()`;
+}
+
+async function readZdrSwitchState(page, targetEnabled = null) {
+  const state = await evaluate(page, zdrDomExpression('read'), 15000);
+  if (!state.found) {
+    throw new Error(`Zero Data Retention section not found or isolated: ${state.reason}; tail=${state.tail || ''}`);
+  }
+  if (!state.total) throw new Error('Zero Data Retention section has no switches');
+  if (state.unknown?.length) {
+    throw new Error(`Zero Data Retention switch state cannot be established: ${state.unknown.join(', ')}`);
+  }
+  if (targetEnabled === false && state.disabledEnabled?.length) {
+    throw new Error(`Zero Data Retention has enabled switches that cannot be changed: ${state.disabledEnabled.join(', ')}`);
+  }
+  if (targetEnabled === true && state.disabledUnchecked?.length) {
+    throw new Error(`Zero Data Retention has disabled switches that cannot be changed: ${state.disabledUnchecked.join(', ')}`);
+  }
+  return state;
+}
+
+async function waitForZdrPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS, targetEnabled = null) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await readZdrSwitchState(page, targetEnabled);
+    } catch (error) {
+      lastError = error;
+      await sleep(DEFAULT_DOM_POLL_MS);
+    }
+  }
+  throw lastError || new Error('Zero Data Retention panel did not load');
+}
+
+async function openZdrGuardrailsPanel(page, options = {}) {
+  if (!options.skipNavigate) {
+    await navigatePage(page, OPENROUTER_GUARDRAILS_MODELS_URL);
+    await sleep(PAGE_SETTLE_MS);
+  }
+  const initial = await readZdrSwitchState(page).catch(() => null);
+  if (initial) {
+    return {
+      navigated: !options.skipNavigate,
+      directUrl: !options.skipNavigate ? OPENROUTER_GUARDRAILS_MODELS_URL : '',
+      alreadyOpen: true,
+      state: initial,
+    };
+  }
+  if (!options.skipNavigate) {
+    await navigatePage(page, OPENROUTER_GUARDRAILS_URL);
+    await sleep(PAGE_SETTLE_MS);
+  }
+  const workspace = await openDefaultWorkspaceGuardrail(page);
+  await sleep(1000);
+  const tab = await clickGuardrailsVisibleControl(page, '\\bModel\\s*&\\s*Provider\\s+Access\\b', 'Model & Provider Access');
+  await sleep(PAGE_SETTLE_MS);
+  const state = await waitForZdrPanel(page);
+  return {navigated: !options.skipNavigate, workspace, tab, state};
+}
+
+async function waitForZdrSwitchProgress(page, previousEnabledCount, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readZdrSwitchState(page, false);
+    if (lastState.enabled.length < previousEnabledCount) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Zero Data Retention switch did not transition off after click; still enabled: ${(lastState?.enabled || []).join(', ')}`);
+}
+
+async function waitForZdrSwitchEnableProgress(page, previousEnabledCount, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readZdrSwitchState(page, true);
+    if (lastState.enabled.length > previousEnabledCount) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Zero Data Retention switch did not transition on after click; enabled: ${(lastState?.enabled || []).join(', ')}`);
+}
+
+async function clickEnabledZdrSwitches(page) {
+  const before = await readZdrSwitchState(page, false);
+  if (!before.enabled.length) return {changed: false, before, afterClick: before, clicks: []};
+  const guardLimit = before.total + 3;
+  const clicks = [];
+  let current = before;
+  for (let attempt = 1; attempt <= guardLimit && current.enabled.length; attempt += 1) {
+    const previousEnabledCount = current.enabled.length;
+    const clicked = await evaluate(page, zdrDomExpression('disable-first-enabled'), 15000);
+    if (!clicked?.clicked) {
+      throw new Error(`Zero Data Retention enabled switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+    }
+    current = await waitForZdrSwitchProgress(page, previousEnabledCount);
+    clicks.push({
+      attempt,
+      clicked: clicked.clicked,
+      enabledBefore: previousEnabledCount,
+      enabledAfter: current.enabled.length,
+    });
+  }
+  if (current.enabled.length) {
+    throw new Error(`Zero Data Retention disable loop exceeded guard limit ${guardLimit}; still enabled: ${current.enabled.join(', ')}`);
+  }
+  return {changed: true, before, afterClick: current, clicks};
+}
+
+async function clickDisabledZdrSwitches(page) {
+  const before = await readZdrSwitchState(page, true);
+  if (before.enabled.length === before.total) return {changed: false, before, afterClick: before, clicks: []};
+  const guardLimit = before.total + 3;
+  const clicks = [];
+  let current = before;
+  for (let attempt = 1; attempt <= guardLimit && current.enabled.length < current.total; attempt += 1) {
+    const previousEnabledCount = current.enabled.length;
+    const clicked = await evaluate(page, zdrDomExpression('enable-first-disabled'), 15000);
+    if (!clicked?.clicked) {
+      throw new Error(`Zero Data Retention disabled switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+    }
+    current = await waitForZdrSwitchEnableProgress(page, previousEnabledCount);
+    clicks.push({
+      attempt,
+      clicked: clicked.clicked,
+      enabledBefore: previousEnabledCount,
+      enabledAfter: current.enabled.length,
+    });
+  }
+  if (current.enabled.length !== current.total) {
+    throw new Error(`Zero Data Retention enable loop exceeded guard limit ${guardLimit}; enabled: ${current.enabled.join(', ')}`);
+  }
+  return {changed: true, before, afterClick: current, clicks};
+}
+
+async function clickGuardrailsSave(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '').trim().replace(/\\s+/g, ' ');
+      const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true' || node.getAttribute?.('data-disabled') === 'true';
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const buttons = [...document.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node), disabled:disabled(node), rect:node.getBoundingClientRect()}))
+        .filter((item) => /^Save$/i.test(item.text) || /^Save\\s+Changes$/i.test(item.text));
+      const target = buttons
+        .filter((item) => !item.disabled)
+        .sort((a, b) => a.rect.top - b.rect.top || b.rect.right - a.rect.right)[0];
+      if (!target) {
+        return {clicked:false, found:buttons.length, disabled:buttons.filter((item) => item.disabled).map((item) => item.text), tail:textOf(document.body).slice(-1200)};
+      }
+      activate(target.node);
+      return {clicked:true, text:target.text, method:'top_right_save', x:target.rect.right, y:target.rect.top};
+    })()`, 15000).catch((error) => ({clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Zero Data Retention Save button not clickable: ${JSON.stringify(last)}`);
+}
+
+async function clickGuardrailsConfirmationIfPresent(page, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '').trim().replace(/\\s+/g, ' ');
+      const activate = (node) => {
+        node.scrollIntoView?.({block:'center', inline:'center'});
+        node.focus?.({preventScroll:true});
+        if (typeof node.click === 'function') node.click();
+        else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      };
+      const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[data-slot="dialog-content"]')]
+        .filter((node) => visible(node))
+        .map((node) => ({node, text:textOf(node)}));
+      const dialog = dialogs.find((item) => /Confirm\\s+Eligibility\\s+Changes|Confirm|Eligibility/i.test(item.text));
+      if (!dialog) return {found:false};
+      const button = [...dialog.node.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node))
+        .find((node) => /Confirm\\s*&\\s*Save|Confirm|Save/i.test(textOf(node)) && !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+      if (!button) return {found:true, clicked:false, reason:'confirm_button_not_found', text:dialog.text.slice(0, 600)};
+      const text = textOf(button);
+      activate(button);
+      return {found:true, clicked:true, text};
+    })()`, 15000).catch((error) => ({found: false, clicked: false, error: error.message}));
+    if (last.clicked) return last;
+    if (!last.found) {
+      await sleep(500);
+      continue;
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  return last?.found ? last : {found: false, clicked: false};
+}
+
+async function configureOpenRouterZdr(page, targetEnabled = false) {
+  const opened = await openZdrGuardrailsPanel(page);
+  const initial = await readZdrSwitchState(page, targetEnabled);
+  const enabledBefore = initial.enabled || [];
+  const alreadyConfigured = targetEnabled ? enabledBefore.length === initial.total : !enabledBefore.length;
+  if (alreadyConfigured) {
+    return {
+      requested: true,
+      configured: true,
+      changed: false,
+      status: targetEnabled ? 'already_enabled' : 'already_disabled',
+      targetEnabled,
+      enabledBefore,
+      enabledAfter: [],
+      total: initial.total,
+      switches: initial.switches,
+      opened,
+    };
+  }
+  // 仅 ZDR 模式逐项切换，保留每个开关的状态变化，避免误触 Data Training 区域。
+  const toggled = targetEnabled ? await clickDisabledZdrSwitches(page) : await clickEnabledZdrSwitches(page);
+  const save = await clickGuardrailsSave(page);
+  const confirmation = await clickGuardrailsConfirmationIfPresent(page);
+  await sleep(PAGE_SETTLE_MS);
+  const reopened = await openZdrGuardrailsPanel(page, {skipNavigate: false});
+  const verified = reopened.state || await waitForZdrPanel(page, DEFAULT_DOM_WAIT_MS, targetEnabled);
+  const enabledAfter = verified.enabled || [];
+  if (targetEnabled ? enabledAfter.length !== verified.total : enabledAfter.length) {
+    throw new Error(targetEnabled
+      ? `Zero Data Retention verification failed; still disabled: ${(verified.switches || []).filter((item) => item.checked === false).map((item) => item.label || item.index).join(', ')}`
+      : `Zero Data Retention verification failed; still enabled: ${enabledAfter.join(', ')}`);
+  }
+  return {
+    requested: true,
+    configured: true,
+    changed: true,
+    status: targetEnabled ? 'enabled' : 'disabled',
+    targetEnabled,
+    enabledBefore,
+    enabledAfter,
+    total: verified.total,
+    switches: verified.switches,
+    opened,
+    save,
+    confirmation,
+    reopened,
+    toggledCount: toggled.before.enabled.length,
+    toggledClicks: toggled.clicks,
+  };
+}
+
+function initialDataTrainingResult(requested, targetEnabled = true) {
+  return {
+    requested: !!requested,
+    targetEnabled: !!targetEnabled,
+    configured: null,
+    changed: false,
+    status: requested ? 'pending' : 'skipped',
+    skipped: !requested,
+    reason: requested ? 'pending' : 'not_requested',
+  };
+}
+
+function dataTrainingDomExpression(action = 'read') {
+  return `(() => {
+    const action = ${JSON.stringify(action)};
+    const targetText = 'Allow paid endpoints that train on request data';
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (node) => (node?.innerText || node?.textContent || node?.getAttribute?.('aria-label') || '')
+      .trim()
+      .replace(/\\s+/g, ' ');
+    const checkedState = (node) => {
+      const aria = node.getAttribute?.('aria-checked');
+      if (/^(true|false)$/i.test(aria || '')) return aria === 'true';
+      const dataState = node.getAttribute?.('data-state') || '';
+      if (/^(checked|on|true)$/i.test(dataState)) return true;
+      if (/^(unchecked|off|false)$/i.test(dataState)) return false;
+      const input = node.matches?.('input') ? node : node.querySelector?.('input[type="checkbox"],input[role="switch"]');
+      return input && typeof input.checked === 'boolean' ? input.checked : null;
+    };
+    const disabled = (node) => node.disabled || node.getAttribute?.('aria-disabled') === 'true' || node.getAttribute?.('data-disabled') === 'true';
+    const activate = (node) => {
+      node.scrollIntoView?.({block:'center', inline:'center'});
+      node.focus?.({preventScroll:true});
+      if (typeof node.click === 'function') node.click();
+      else node.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    };
+    const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')]
+      .filter((node) => visible(node) && /^Data\\s+Training$/i.test(textOf(node)));
+    const labels = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node))
+      .map((node) => ({node, text:textOf(node), rect:node.getBoundingClientRect()}))
+      .filter((item) => item.text.startsWith(targetText) && item.text.length <= 320)
+      .filter((item) => headings.some((heading) => heading.compareDocumentPosition(item.node) & Node.DOCUMENT_POSITION_FOLLOWING))
+      .sort((left, right) => left.text.length - right.text.length || (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height));
+    const label = labels[0]?.node;
+    if (!label) {
+      return {found:false, reason:'paid_data_training_label_not_found', href:location.href, tail:textOf(document.body).slice(-1600)};
+    }
+    const switchSelector = '[role="switch"],button[aria-checked],input[type="checkbox"][role="switch"],input[type="checkbox"][aria-checked]';
+    let row = null;
+    let switches = [];
+    for (let current = label, depth = 0; current && depth < 9; current = current.parentElement, depth += 1) {
+      const candidates = [...current.querySelectorAll(switchSelector)].filter((node) => visible(node));
+      if (candidates.length) {
+        row = current;
+        switches = candidates;
+        break;
+      }
+    }
+    if (!row || !switches.length) {
+      return {found:false, reason:'paid_data_training_switch_not_found', href:location.href, tail:textOf(document.body).slice(-1600)};
+    }
+    const labelRect = label.getBoundingClientRect();
+    const target = switches
+      .map((node) => ({node, rect:node.getBoundingClientRect()}))
+      .sort((left, right) => Math.abs((left.rect.top + left.rect.height / 2) - (labelRect.top + labelRect.height / 2))
+        - Math.abs((right.rect.top + right.rect.height / 2) - (labelRect.top + labelRect.height / 2)))[0]?.node;
+    const checked = checkedState(target);
+    const isDisabled = disabled(target);
+    let clicked = false;
+    if (((action === 'enable' && checked === false) || (action === 'disable' && checked === true)) && !isDisabled) {
+      activate(target);
+      clicked = true;
+    }
+    return {
+      found:true,
+      href:location.href,
+      headingCount:headings.length,
+      label:textOf(label).slice(0, 320),
+      rowText:textOf(row).slice(0, 600),
+      checked,
+      disabled:isDisabled,
+      clicked,
+    };
+  })()`;
+}
+
+async function readDataTrainingSwitchState(page) {
+  const state = await evaluate(page, dataTrainingDomExpression('read'), 15000);
+  if (!state.found) throw new Error(`Data Training paid endpoint switch not found: ${state.reason}; tail=${state.tail || ''}`);
+  if (state.checked == null) throw new Error('Data Training paid endpoint switch state cannot be established');
+  return state;
+}
+
+async function waitForDataTrainingPanel(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return await readDataTrainingSwitchState(page);
+    } catch (error) {
+      lastError = error;
+      await sleep(DEFAULT_DOM_POLL_MS);
+    }
+  }
+  throw lastError || new Error('Data Training panel did not load');
+}
+
+async function waitForDataTrainingSwitch(page, expectedEnabled = true, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readDataTrainingSwitchState(page);
+    if (lastState.checked === expectedEnabled) return lastState;
+    await sleep(500);
+  }
+  throw new Error(`Data Training paid endpoint switch did not become ${expectedEnabled ? 'enabled' : 'disabled'}; state=${JSON.stringify(lastState || {})}`);
+}
+
+async function setCurrentDataTrainingSwitch(page, targetEnabled) {
+  const before = await waitForDataTrainingPanel(page);
+  if (before.checked === targetEnabled) return {changed:false, before, afterClick:before};
+  const action = targetEnabled ? 'enable' : 'disable';
+  const clicked = await evaluate(page, dataTrainingDomExpression(action), 15000);
+  if (!clicked?.clicked) throw new Error(`Data Training paid endpoint switch could not be clicked: ${JSON.stringify(clicked || {})}`);
+  const afterClick = await waitForDataTrainingSwitch(page, targetEnabled);
+  return {changed:true, before, afterClick, clicked};
+}
+
+async function openDataTrainingGuardrailsPanel(page) {
+  await navigatePage(page, OPENROUTER_GUARDRAILS_MODELS_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const directState = await waitForDataTrainingPanel(page, 5000).catch(() => null);
+  if (directState) return {directUrl:OPENROUTER_GUARDRAILS_MODELS_URL, alreadyOpen:true, state:directState};
+
+  await navigatePage(page, OPENROUTER_GUARDRAILS_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const workspace = await openDefaultWorkspaceGuardrail(page);
+  await sleep(1000);
+  const tab = await clickGuardrailsVisibleControl(page, '\\bModel\\s*&\\s*Provider\\s+Access\\b', 'Model & Provider Access');
+  await sleep(PAGE_SETTLE_MS);
+  const state = await waitForDataTrainingPanel(page);
+  return {workspace, tab, state};
+}
+
+async function configurePrivacyDataTraining(page, targetEnabled = true) {
+  await navigatePage(page, OPENROUTER_PRIVACY_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const toggled = await setCurrentDataTrainingSwitch(page, targetEnabled);
+  const targetStatus = targetEnabled ? 'enabled' : 'disabled';
+  if (!toggled.changed) return {configured:true, changed:false, status:`already_${targetStatus}`, state:toggled.before};
+
+  const save = await clickGuardrailsSave(page);
+  if (!targetEnabled) {
+    // 关闭账号级总开关并点击保存后即可结束；不再刷新 Privacy 或进入 Guardrails。
+    const verified = await waitForDataTrainingSwitch(page, false, 2000);
+    return {configured:true, changed:true, status:targetStatus, save, verified, toggled};
+  }
+  await sleep(PAGE_SETTLE_MS);
+  await navigatePage(page, OPENROUTER_PRIVACY_URL);
+  await sleep(PAGE_SETTLE_MS);
+  const verified = await waitForDataTrainingSwitch(page, targetEnabled);
+  return {configured:true, changed:true, status:targetStatus, save, verified, toggled};
+}
+
+async function configureGuardrailDataTraining(page) {
+  const opened = await openDataTrainingGuardrailsPanel(page);
+  const toggled = await setCurrentDataTrainingSwitch(page, true);
+  if (!toggled.changed) return {configured:true, changed:false, status:'already_enabled', opened, state:toggled.before};
+
+  const save = await clickGuardrailsSave(page);
+  const confirmation = await clickGuardrailsConfirmationIfPresent(page);
+  await sleep(PAGE_SETTLE_MS);
+  const reopened = await openDataTrainingGuardrailsPanel(page);
+  const verified = reopened.state || await waitForDataTrainingSwitch(page, true);
+  if (!verified.checked) throw new Error('Guardrail Data Training verification failed; paid endpoint switch is still disabled');
+  return {configured:true, changed:true, status:'enabled', opened, save, confirmation, reopened, verified, toggled};
+}
+
+async function configureOpenRouterDataTraining(page, targetEnabled = true) {
+  const privacy = await configurePrivacyDataTraining(page, targetEnabled);
+  if (!targetEnabled) {
+    // Privacy 总开关关闭后 Guardrail 会随之失效，本任务不再操作第二层开关。
+    return {
+      requested:true,
+      configured:true,
+      changed:privacy.changed,
+      status:privacy.changed ? 'disabled' : 'already_disabled',
+      privacy,
+    };
+  }
+
+  // 开启时账号级和默认 Guardrail 都要打开，避免只改一层导致实际路由仍受限制。
+  const guardrail = await configureGuardrailDataTraining(page);
+  const changed = privacy.changed || guardrail.changed;
+  return {
+    requested:true,
+    configured:true,
+    changed,
+    status:changed ? 'enabled' : 'already_enabled',
+    privacy,
+    guardrail,
+  };
+}
+
 async function ensureCreditsPage(page) {
   const state = await evaluate(page, `(() => ({
     href: location.href,
-    hasCreditsUi: /Add Credits|Auto\\s*Top[- ]?Up/i.test(document.body.innerText || ''),
+    hasCreditsUi: /Add Credits|Auto\\s*Top[- ]?Up/i.test(document.body?.innerText || ''),
   }))()`).catch(() => ({href: '', hasCreditsUi: false}));
   if (state.href.startsWith(OPENROUTER_CREDITS_URL) && state.hasCreditsUi) {
     return {navigated: false, state};
@@ -786,80 +2155,99 @@ async function fetchStripeData(page) {
   })()`);
 }
 
-async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
+async function verifySavedPaymentMethodFromCreditsUi(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  await ensureCreditsPage(page);
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await evaluate(page, `(() => {
+      const visible = (node) => {
+        if (!node) return false;
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const cardPattern = /\\b(VISA|MASTERCARD|MASTER CARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\b[\\s\\S]{0,80}?(?:ending in\\s*)?(?:[•*·xX()\\s-])*(\\d{4})\\b/i;
+      const maskedPattern = /(?:[•*·xX]\\s*){4,}(\\d{4})\\b/;
+      const candidates = [...document.querySelectorAll('button, [role="button"], [role="radio"], label, section, article, div, span, p')]
+        .filter(visible)
+        .map((node) => String(node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim())
+        .filter((text) => text && text.length <= 500);
+      const match = candidates
+        .map((text) => ({text, match: text.match(cardPattern) || text.match(maskedPattern)}))
+        .find((item) => item.match);
+      const last4 = match?.match?.[2] || match?.match?.[1] || '';
+      return {
+        verified: /^\\d{4}$/.test(last4),
+        absenceVerified: false,
+        paymentMethodCount: /^\\d{4}$/.test(last4) ? 1 : 0,
+        paymentMethods: /^\\d{4}$/.test(last4) ? [{type:'card', brand:'', last4}] : [],
+        source: 'credits_ui',
+      };
+    })()`);
+    if (state.verified) return state;
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  return state || {verified: false, absenceVerified: false, paymentMethodCount: 0, paymentMethods: [], source: 'credits_ui'};
+}
+
+async function openPurchaseCreditsModal(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
+  const initial = await getPurchaseModalState(page);
+  if (initial.purchase) {
+    return {opened: false, alreadyOpen: true, state: initial};
+  }
+
+  const clicked = await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getPurchaseModalState(page);
+    if (state.purchase) {
+      return {opened: true, clicked, state};
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  throw new Error(`Add Credits was clicked but Purchase Credits amount modal did not open after ${timeoutMs}ms: ${state?.tail || ''}`);
+}
+
+async function inspectSavedPaymentMethod(page, expectedAccount) {
   const stripe = await fetchStripeData(page);
   if (!stripe.ok) {
-    throw new Error(`Could not verify saved payment method before Auto top-up: ${stripe.status} ${stripe.text}`);
+    if (stripe.status === 404) {
+      await openPurchaseCreditsModal(page).catch(() => null);
+      const uiFallback = await verifySavedPaymentMethodFromCreditsUi(page);
+      const customerNotFound = /Customer not found/i.test(stripe.text || '');
+      if (uiFallback.verified || customerNotFound) {
+        return {
+          ...uiFallback,
+          absenceVerified: customerNotFound,
+          source: 'stripe_data_404_ui_fallback',
+        };
+      }
+      throw new Error(`Could not determine whether a saved payment method exists: ${stripe.status} ${stripe.text}`);
+    }
+    throw new Error(`Could not inspect saved payment method: ${stripe.status} ${stripe.text}`);
   }
   const expected = String(expectedAccount || '').trim().toLowerCase();
   const customerEmail = String(stripe.customerEmail || '').trim().toLowerCase();
   if (expected && customerEmail && expected !== customerEmail) {
-    throw new Error(`Stripe customer mismatch before Auto top-up: expected ${expectedAccount}, got ${stripe.customerEmail}`);
-  }
-  if (!stripe.paymentMethods.length) {
-    throw new Error('Saved payment method is required before Auto top-up configuration');
+    throw new Error(`Stripe customer mismatch while inspecting saved payment method: expected ${expectedAccount}, got ${stripe.customerEmail}`);
   }
   return {
-    verified: true,
+    verified: stripe.paymentMethods.length > 0,
+    absenceVerified: stripe.paymentMethods.length === 0,
     paymentMethodCount: stripe.paymentMethods.length,
     paymentMethods: stripe.paymentMethods.map(maskPaymentMethod),
+    source: 'stripe_data',
   };
 }
 
-async function clearDefaultPaymentMethod(page) {
-  const before = await fetchStripeData(page);
-  if (!before.ok) {
-    if (before.status === 404 && /Customer not found/i.test(before.text || '')) {
-      return {
-        clearedDefault: false,
-        skipped: true,
-        reason: 'stripe_customer_not_found',
-        existingPaymentMethodCount: 0,
-        existingPaymentMethods: [],
-      };
-    }
-    throw new Error(`Could not read Stripe data before clearing default payment method: ${before.status} ${before.text}`);
+async function verifySavedPaymentMethodForAutoTopup(page, expectedAccount) {
+  const paymentMethod = await inspectSavedPaymentMethod(page, expectedAccount);
+  if (!paymentMethod.verified) {
+    throw new Error('Could not verify saved payment method before Auto top-up: Credits UI fallback found no saved payment method');
   }
-
-  const updateResult = await evaluate(page, `(async () => {
-    const res = await fetch(location.href, {
-      method: 'POST',
-      headers: {
-        'Next-Action': ${JSON.stringify(UPDATE_CURRENT_USER_ACTION)},
-        'Content-Type': 'text/plain;charset=UTF-8',
-        'Accept': 'text/x-component',
-      },
-      body: JSON.stringify([{stripe_payment_method_id:null, stripe_payment_method_backup_list:[]}]),
-    });
-    const text = await res.text();
-    return {
-      ok: res.ok && /"__kind":"OK"/.test(text) && /"stripe_payment_method_id":null/.test(text),
-      status: res.status,
-      text: text.slice(0, 1200),
-    };
-  })()`, 20000);
-  if (!updateResult.ok) {
-    if (/Server action not found/i.test(updateResult.text || '')) {
-      await navigatePage(page, OPENROUTER_CREDITS_URL).catch(() => null);
-      await sleep(1500);
-      return {
-        clearedDefault: false,
-        skipped: true,
-        reason: 'openrouter_update_current_user_action_not_found',
-        existingPaymentMethodCount: before.paymentMethods.length,
-        existingPaymentMethods: before.paymentMethods.map(maskPaymentMethod),
-      };
-    }
-    throw new Error(`Could not clear default payment method: ${updateResult.status} ${updateResult.text}`);
-  }
-
-  await navigatePage(page, OPENROUTER_CREDITS_URL);
-  await sleep(1500);
-  return {
-    clearedDefault: true,
-    existingPaymentMethodCount: before.paymentMethods.length,
-    existingPaymentMethods: before.paymentMethods.map(maskPaymentMethod),
-  };
+  return paymentMethod;
 }
 
 async function ensureOpenRouterPage(input) {
@@ -901,20 +2289,63 @@ async function ensureOpenRouterPage(input) {
   return pageTarget.webSocketDebuggerUrl;
 }
 
-async function waitForPaymentTarget(debugPort) {
-  for (let i = 0; i < 20; i += 1) {
-    const target = getTargets(debugPort).find((item) => (
+async function waitForPaymentTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStripeTargets = [];
+  let lastCandidateStates = [];
+  while (Date.now() < deadline) {
+    const targets = getTargets(debugPort);
+    lastStripeTargets = targets
+      .filter((item) => item.type === 'iframe' && /stripe\.com/.test(item.url || ''))
+      .map((item) => item.url.split('#')[0])
+      .slice(0, 8);
+    const candidates = targets.filter((item) => (
       item.type === 'iframe'
       && /elements-inner/.test(item.url)
       && /componentName=payment/.test(item.url)
     ));
-    if (target) return target.webSocketDebuggerUrl;
-    await sleep(500);
+    lastCandidateStates = [];
+    for (const target of candidates) {
+      let frame;
+      try {
+        frame = await cdp(target.webSocketDebuggerUrl, 3000);
+        await frame.send('Runtime.enable').catch(() => {});
+        const state = await evaluate(frame, `(() => {
+          const text = document.body?.innerText || '';
+          const hasCardNumber = !!document.querySelector('#payment-numberInput');
+          const cardTabSelected = /Card\\s+selected/i.test(text) || /Card number/i.test(text);
+          return {
+            hasCardNumber,
+            cardTabSelected,
+            visibilityState: document.visibilityState,
+            tail: text.slice(-500),
+          };
+        })()`, 3000);
+        const focusState = state.hasCardNumber
+          ? await focusStripeFieldWithCdp(frame, '#payment-numberInput')
+          : {found: false, active: false, method: 'DOM.focus'};
+        lastCandidateStates.push({
+          targetId: target.id || '',
+          ...state,
+          focusState,
+        });
+        // Stripe may leave hidden/preloaded Payment Element targets alive. DOM value and text are
+        // insufficient; only the target whose real card input accepts DOM.focus can receive key events.
+        if (state.hasCardNumber && focusState.active && !focusState.disabled && !focusState.readOnly) {
+          return target.webSocketDebuggerUrl;
+        }
+      } catch (error) {
+        lastCandidateStates.push({targetId: target.id || '', error: error.message});
+      } finally {
+        if (frame) frame.close();
+      }
+    }
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-  throw new Error('Stripe payment iframe target not found');
+  throw new Error(`Stripe card payment iframe target not found after ${timeoutMs}ms; stripeTargets=${lastStripeTargets.join(' | ') || 'none'}; lastCandidateStates=${JSON.stringify(lastCandidateStates).slice(0, 1800)}`);
 }
 
-async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
+async function waitForAddressTarget(debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastUrls = [];
   let lastStates = [];
@@ -946,7 +2377,7 @@ async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
           return {
             readyState: document.readyState,
             controlCount: controls.length,
-            text: (document.body.innerText || '').slice(0, 500),
+            text: (document.body?.innerText || '').slice(0, 500),
           };
         })()`, 3000);
         lastStates.push({url: target.url.split('#')[0], ...state});
@@ -957,7 +2388,7 @@ async function waitForAddressTarget(debugPort, timeoutMs = 20000) {
         if (frame) frame.close();
       }
     }
-    await sleep(500);
+    await sleep(SLOW_DOM_POLL_MS);
   }
   throw new Error(`Stripe address iframe not ready; stripeTargets=${lastUrls.join(' | ')}; states=${JSON.stringify(lastStates).slice(0, 1200)}`);
 }
@@ -972,7 +2403,7 @@ async function detectSecurityChallenge(debugPort) {
       await frame.send('Runtime.enable');
       const state = await evaluate(frame, `(() => ({
         url: location.href,
-        text: (document.body.innerText || '').slice(0, 500),
+        text: (document.body?.innerText || '').slice(0, 500),
       }))()`, 3000);
       if (/select all|complete the security|hcaptcha|captcha|3D Secure|bank verification|security code|authentication required/i.test(state.text || '')) {
         return state;
@@ -1001,7 +2432,7 @@ async function clickByText(page, pattern, options = {}) {
       const text = (node.innerText || node.textContent || '').trim();
       return rx.test(text) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
     });
-    if (!el) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim()};
@@ -1032,7 +2463,7 @@ async function clickExactText(page, label, options = {}) {
       ));
       el = textNodeOwner?.closest('button,a,[role="button"]') || null;
     }
-    if (!el || !isVisible(el) || isDisabled(el)) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el || !isVisible(el) || isDisabled(el)) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim()};
@@ -1052,9 +2483,15 @@ async function clickAddPaymentMethod(page, options = {}) {
     };
     const isDisabled = (node) => !!node.disabled || node.getAttribute('aria-disabled') === 'true';
     const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+    const isPlusIconButton = (node) => {
+      const pathD = [...node.querySelectorAll?.('svg path') || []].map((path) => path.getAttribute('d') || '').join(' ');
+      const className = String(node.getAttribute('class') || '');
+      return /M12\\s*4\\.5v15m7\\.5-7\\.5h-15/i.test(pathD)
+        || (/\\bw-10\\b/.test(className) && /\\bh-full\\b/.test(className) && !!node.querySelector?.('svg'));
+    };
     const candidates = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => isVisible(node) && !isDisabled(node))
-      .map((node) => ({node, text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '')}));
+      .map((node) => ({node, text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || ''), plusIcon: isPlusIconButton(node)}));
     let item = candidates.find((candidate) => /^Add a Payment Method$|^Add Payment Method$/i.test(candidate.text));
     if (!item) {
       item = candidates.find((candidate) => /\\bAdd a Payment Method\\b|\\bAdd Payment Method\\b/i.test(candidate.text));
@@ -1067,7 +2504,30 @@ async function clickAddPaymentMethod(page, options = {}) {
       const owner = textOwner?.node.closest('button,a,[role="button"]');
       if (owner && isVisible(owner) && !isDisabled(owner)) item = {node: owner, text: normalize(owner.innerText || owner.textContent || '')};
     }
-    if (!item) return {clicked:false, tail:(document.body.innerText || '').slice(-1800)};
+    if (!item && /Purchase Credits/i.test(document.body?.innerText || '')) {
+      const modal = [...document.querySelectorAll('body *')]
+        .filter((node) => isVisible(node))
+        .map((node) => ({node, text: normalize(node.innerText || node.textContent || ''), rect: node.getBoundingClientRect()}))
+        .filter((candidate) => /Purchase Credits/i.test(candidate.text) && /Total due/i.test(candidate.text))
+        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0];
+      const modalRect = modal?.rect;
+      const iconItem = candidates
+        .map((candidate) => ({...candidate, rect: candidate.node.getBoundingClientRect(), hasSvg: !!candidate.node.querySelector?.('svg')}))
+        .filter((candidate) => {
+          if (!modalRect) return false;
+          const rect = candidate.rect;
+          const inTopCardArea = rect.x > modalRect.x + modalRect.width * 0.62
+            && rect.x < modalRect.x + modalRect.width - 35
+            && rect.y > modalRect.y + 55
+            && rect.y < modalRect.y + modalRect.height * 0.35;
+          const plusLike = candidate.plusIcon || candidate.text === '+' || candidate.text === '' || candidate.hasSvg;
+          const notClose = rect.y > modalRect.y + 45 && !/close|purchase/i.test(candidate.text);
+          return inTopCardArea && plusLike && notClose && rect.width >= 35 && rect.width <= 140 && rect.height >= 45 && rect.height <= 180;
+        })
+        .sort((a, b) => b.rect.x - a.rect.x || a.rect.y - b.rect.y)[0];
+      if (iconItem) item = {node: iconItem.node, text: iconItem.text || 'icon:add-payment-method'};
+    }
+    if (!item) return {clicked:false, tail:(document.body?.innerText || '').slice(-1800)};
     item.node.scrollIntoView({block:'center', inline:'center'});
     item.node.click();
     return {clicked:true, label:item.text};
@@ -1079,31 +2539,51 @@ async function clickAddPaymentMethod(page, options = {}) {
   return result;
 }
 
-async function waitForExactText(page, label, timeoutMs = 10000) {
+async function waitForExactText(page, label, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
+  const pollMs = options.pollMs || DEFAULT_DOM_POLL_MS;
   let lastResult = null;
   while (Date.now() < deadline) {
     lastResult = await clickExactText(page, label, {required: false});
     if (lastResult.clicked) return lastResult;
-    await sleep(500);
+    await sleep(pollMs);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    try {
+      const retry = await waitForExactText(page, label, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Button not found after ${timeoutMs}ms, refreshed once and retried: ${label}; ${error.message}`);
+    }
   }
   throw new Error(`Button not found: ${label}; tail=${lastResult?.tail || ''}`);
 }
 
-async function waitForClickableText(page, pattern, timeoutMs = 10000) {
+async function waitForClickableText(page, pattern, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
+  const pollMs = options.pollMs || DEFAULT_DOM_POLL_MS;
   let lastResult = null;
   while (Date.now() < deadline) {
     lastResult = await clickByText(page, pattern, {required: false});
     if (lastResult.clicked) return lastResult;
-    await sleep(500);
+    await sleep(pollMs);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    try {
+      const retry = await waitForClickableText(page, pattern, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Button not found after ${timeoutMs}ms, refreshed once and retried: ${pattern}; ${error.message}`);
+    }
   }
   throw new Error(`Button not found: ${pattern}; tail=${lastResult?.tail || ''}`);
 }
 
 async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '') {
   return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const last4 = ${JSON.stringify(expectedLast4 || '')};
     const expiry = ${JSON.stringify(expectedExpiry || '')};
     const targetCardVisible = (() => {
@@ -1150,10 +2630,18 @@ async function getPaymentEntryState(page, expectedLast4 = '', expectedExpiry = '
   })()`);
 }
 
+function isBillingAddressFormOpen(state) {
+  const tail = state?.tail || '';
+  // OpenRouter 新号有时会直接弹出地址表单，此时入口按钮已经不存在，必须继续填地址。
+  return !!state?.hasAddressForm
+    || /Add a Billing Address[\s\S]{0,1000}(Full name|Address line 1|Complete address details to continue|A billing address is required)/i.test(tail)
+    || /A billing address is required to verify your identity/i.test(tail);
+}
+
 async function openBillingAddressFormIfNeeded(page) {
   const before = await getPaymentEntryState(page);
-  if (before.hasSavePaymentMethod || before.hasCardFormText || before.hasAddressForm) {
-    return {opened: false, state: before};
+  if (before.hasSavePaymentMethod || before.hasCardFormText || isBillingAddressFormOpen(before)) {
+    return {opened: false, alreadyOpen: isBillingAddressFormOpen(before), state: before};
   }
   if (!before.hasAddBillingAddress && !/Complete address details to continue/i.test(before.tail)) {
     return {opened: false, state: before};
@@ -1169,7 +2657,7 @@ async function openBillingAddressFormIfNeeded(page) {
 }
 
 async function fillStripeBillingAddress(debugPort, billing) {
-  const targetWs = await waitForAddressTarget(debugPort, 12000);
+  const targetWs = await waitForAddressTarget(debugPort, DEFAULT_STRIPE_IFRAME_WAIT_MS);
   const address = await cdp(targetWs);
   try {
     await address.send('Runtime.enable');
@@ -1282,7 +2770,7 @@ async function fillStripeBillingAddress(debugPort, billing) {
 }
 
 async function maybeFillBillingAddress(page, billing, debugPort = '') {
-  const text = await evaluate(page, 'document.body.innerText || ""');
+  const text = await evaluate(page, 'document.body?.innerText || ""');
   if (!/Complete address details|Update Address|Billing address|Full name|Address line 1|City|State|Postal/i.test(text)) {
     return {filled: false};
   }
@@ -1309,7 +2797,7 @@ async function maybeFillBillingAddress(page, billing, debugPort = '') {
         }
         throw new Error(`Billing address form was not completely filled: ${JSON.stringify(stripeAddress.result)}`);
       }
-      const clicked = await waitForClickableText(page, 'Update Address|Save|Continue', 12000);
+      const clicked = await waitForClickableText(page, 'Update Address|Save|Continue', DEFAULT_DOM_WAIT_MS);
       await sleep(2500);
       return {...stripeAddress, clicked};
     } catch (error) {
@@ -1379,18 +2867,344 @@ async function maybeFillBillingAddress(page, billing, debugPort = '') {
   return result;
 }
 
-async function focusAndInsertText(client, selector, text) {
-  const ok = await evaluate(client, `(() => {
+function normalizeStripeInputValue(value) {
+  return String(value || '').replace(/[^\dA-Za-z]/g, '').toLowerCase();
+}
+
+function stripeFieldErrorPattern(selector) {
+  if (/numberInput/.test(selector)) return '(?:card\\s+number|card\\s+no\\.?)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
+  if (/expiryInput/.test(selector)) return "(?:expiration(?:\\s+(?:date|month|year))?|card[\\'’]?s\\s+expiration)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|expired|past)";
+  if (/cvcInput/.test(selector)) return '(?:security\\s+code|cvc)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
+  if (/postalCodeInput/.test(selector)) return '(?:zip|postal)[\\s\\S]{0,80}(?:incomplete|invalid|incorrect|not\\s+valid)';
+  return '(?:incomplete|invalid|incorrect)';
+}
+
+function keyDescriptor(character) {
+  const value = String(character || '');
+  if (/^\d$/.test(value)) {
+    const keyCode = value.charCodeAt(0);
+    return {key: value, code: `Digit${value}`, keyCode};
+  }
+  if (/^[a-z]$/i.test(value)) {
+    const upper = value.toUpperCase();
+    return {key: value, code: `Key${upper}`, keyCode: upper.charCodeAt(0)};
+  }
+  if (value === ' ') return {key: ' ', code: 'Space', keyCode: 32};
+  const keyCode = value.charCodeAt(0) || 0;
+  return {key: value, code: '', keyCode};
+}
+
+async function clearFocusedFieldWithBackspaces(client, currentValueLength = 0) {
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'rawKeyDown',
+    key: 'End',
+    code: 'End',
+    windowsVirtualKeyCode: 35,
+    nativeVirtualKeyCode: 35,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'End',
+    code: 'End',
+    windowsVirtualKeyCode: 35,
+    nativeVirtualKeyCode: 35,
+  });
+  for (let index = 0; index < Math.max(8, Number(currentValueLength || 0) + 4); index += 1) {
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8,
+    });
+  }
+}
+
+async function typeFocusedFieldWithKeyEvents(client, text) {
+  for (const character of String(text || '')) {
+    const descriptor = keyDescriptor(character);
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: descriptor.key,
+      code: descriptor.code,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'char',
+      key: descriptor.key,
+      code: descriptor.code,
+      text: character,
+      unmodifiedText: character,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: descriptor.key,
+      code: descriptor.code,
+      windowsVirtualKeyCode: descriptor.keyCode,
+      nativeVirtualKeyCode: descriptor.keyCode,
+    });
+    await sleep(24);
+  }
+}
+
+async function blurFocusedFieldWithTab(client) {
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
+  await client.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'Tab',
+    code: 'Tab',
+    windowsVirtualKeyCode: 9,
+    nativeVirtualKeyCode: 9,
+  });
+}
+
+async function focusStripeFieldWithCdp(client, selector) {
+  await client.send('DOM.enable').catch(() => {});
+  const remote = await client.send('Runtime.evaluate', {
+    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    returnByValue: false,
+    awaitPromise: false,
+  });
+  const objectId = remote?.result?.objectId || '';
+  if (!objectId) return {found: false, active: false, method: 'DOM.focus'};
+  try {
+    try {
+      await client.send('DOM.focus', {objectId});
+    } catch (error) {
+      return {
+        found: true,
+        active: false,
+        focusError: error.message || String(error),
+        method: 'DOM.focus',
+      };
+    }
+  } finally {
+    await client.send('Runtime.releaseObject', {objectId}).catch(() => {});
+  }
+  return evaluate(client, `(() => {
     const el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return false;
-    el.focus();
-    if (el.select) el.select();
-    return true;
+    if (!el) return {found:false, active:false, method:'DOM.focus'};
+    return {
+      found: true,
+      active: document.activeElement === el,
+      disabled: !!el.disabled,
+      readOnly: !!el.readOnly,
+      connected: !!el.isConnected,
+      method: 'DOM.focus',
+    };
   })()`);
-  if (!ok) throw new Error(`Missing Stripe field: ${selector}`);
-  await sleep(120);
-  await client.send('Input.insertText', {text});
-  await sleep(180);
+}
+
+async function focusAndTypeStripeField(client, selector, text, options = {}) {
+  const expected = normalizeStripeInputValue(options.expectedValue || text);
+  const errorPattern = stripeFieldErrorPattern(selector);
+  let lastState = null;
+
+  const readValueState = async () => evaluate(client, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return {found:false};
+    const value = el.value || '';
+    const normalized = String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase();
+    const expectedValue = ${JSON.stringify(expected)};
+    const errorMatch = (document.body?.innerText || '').match(new RegExp(${JSON.stringify(errorPattern)}, 'i'));
+    const ariaInvalid = el.getAttribute('aria-invalid') === 'true';
+    const safeValue = /numberInput/.test(${JSON.stringify(selector)})
+      ? (normalized ? '****' + normalized.slice(-4) : '')
+      : (/cvcInput/.test(${JSON.stringify(selector)}) ? (normalized ? '***' : '') : normalized);
+    const safeExpected = /numberInput/.test(${JSON.stringify(selector)})
+      ? (expectedValue ? '****' + expectedValue.slice(-4) : '')
+      : (/cvcInput/.test(${JSON.stringify(selector)}) ? (expectedValue ? '***' : '') : expectedValue);
+    return {
+      found: true,
+      valueLength: normalized.length,
+      matchesExpected: normalized === ${JSON.stringify(expected)},
+      active: document.activeElement === el,
+      observed: safeValue,
+      expected: safeExpected,
+      ariaInvalid,
+      invalidByText: !!errorMatch,
+      errorText: errorMatch?.[0] || '',
+      accepted: !ariaInvalid && !errorMatch,
+    };
+  })()`);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const target = await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return {found:false};
+      el.scrollIntoView?.({block:'center', inline:'center'});
+      const rect = el.getBoundingClientRect();
+      el.focus();
+      if (el.select) el.select();
+      if (el.setSelectionRange) {
+        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
+      }
+      return {
+        found: true,
+        visible: rect.width > 0 && rect.height > 0,
+        valueLength: String(el.value || '').length,
+        rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+      };
+    })()`);
+    if (!target.found) throw new Error(`Missing Stripe field: ${selector}`);
+    lastState = target;
+
+    if (target.visible && target.rect) {
+      const x = target.rect.x + target.rect.width / 2;
+      const y = target.rect.y + target.rect.height / 2;
+      await client.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
+      await client.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1}).catch(() => {});
+      await client.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1}).catch(() => {});
+    }
+
+    await sleep(120);
+    const focusState = await focusStripeFieldWithCdp(client, selector);
+    if (!focusState.found || !focusState.active) {
+      lastState = {...focusState, phase: 'focus_before_key_events'};
+      await sleep(350);
+      continue;
+    }
+    // 鼠标点击会折叠之前的选区；重新选中后先确认清空，避免旧卡值和当前任务输入拼接或残留。
+    const selectionState = await evaluate(client, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return {found:false};
+      el.focus();
+      if (el.select) el.select();
+      if (el.setSelectionRange) {
+        try { el.setSelectionRange(0, String(el.value || '').length); } catch {}
+      }
+      return {found:true, active:document.activeElement === el, selectedLength:Math.abs((el.selectionEnd || 0) - (el.selectionStart || 0))};
+    })()`);
+    if (!selectionState.found || !selectionState.active) {
+      lastState = {...selectionState, phase: 'select_before_clear'};
+      await sleep(350);
+      continue;
+    }
+    await clearFocusedFieldWithBackspaces(client, target.valueLength);
+    await sleep(80);
+    const cleared = await readValueState();
+    if (cleared.valueLength !== 0) {
+      lastState = {...cleared, phase: 'clear_before_insert'};
+      await sleep(350);
+      continue;
+    }
+    // Stripe 所有文本字段都逐位触发真实键盘事件；整串注入可能只更新 DOM value，未同步 Stripe 内部状态。
+    await typeFocusedFieldWithKeyEvents(client, text);
+    await blurFocusedFieldWithTab(client);
+    await sleep(320);
+
+    const state = await readValueState();
+    lastState = state;
+    // Stripe 必须同时保留值并清除字段级 incomplete/invalid 状态；DOM value 不能单独证明 Stripe 已接收输入。
+    if (state.matchesExpected && state.accepted) {
+      return {
+        ...state,
+        method: 'dispatch_key_events',
+        attempt: attempt + 1,
+      };
+    }
+    await sleep(350);
+  }
+
+  throw new Error(`Stripe payment field was not accepted: ${selector}; state=${JSON.stringify(lastState)}`);
+}
+
+async function readStripePaymentFieldState(payment, card) {
+  const expected = {
+    number: normalizeStripeInputValue(card.number),
+    expiry: normalizeStripeInputValue(normalizeExpiry(card.expiry)),
+    cvc: normalizeStripeInputValue(card.cvc),
+    postalCode: normalizeStripeInputValue(card.postalCode),
+  };
+  return evaluate(payment, `(() => {
+    const valueOf = (selector, expectedValue, errorPattern, mask) => {
+      const el = document.querySelector(selector);
+      if (!el) return {exists:false, valueLength:0, matchesExpected:false, accepted:false};
+      const value = el.value || '';
+      const normalized = String(value).replace(/[^\\dA-Za-z]/g, '').toLowerCase();
+      const errorMatch = (document.body?.innerText || '').match(new RegExp(errorPattern, 'i'));
+      const ariaInvalid = el.getAttribute('aria-invalid') === 'true';
+      return {
+        exists: true,
+        visible: (() => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })(),
+        valueLength: normalized.length,
+        masked: mask === 'number' ? ('****' + normalized.slice(-4)) : (mask === 'secret' ? '***' : value),
+        matchesExpected: normalized === expectedValue,
+        ariaInvalid,
+        invalidByText: !!errorMatch,
+        errorText: errorMatch?.[0] || '',
+        accepted: !ariaInvalid && !errorMatch,
+      };
+    };
+    const patterns = {
+      number: ${JSON.stringify(stripeFieldErrorPattern('#payment-numberInput'))},
+      expiry: ${JSON.stringify(stripeFieldErrorPattern('#payment-expiryInput'))},
+      cvc: ${JSON.stringify(stripeFieldErrorPattern('#payment-cvcInput'))},
+      postalCode: ${JSON.stringify(stripeFieldErrorPattern('#payment-postalCodeInput'))},
+    };
+    const fields = {
+      number: valueOf('#payment-numberInput', ${JSON.stringify(expected.number)}, patterns.number, 'number'),
+      expiry: valueOf('#payment-expiryInput', ${JSON.stringify(expected.expiry)}, patterns.expiry, 'plain'),
+      cvc: valueOf('#payment-cvcInput', ${JSON.stringify(expected.cvc)}, patterns.cvc, 'secret'),
+      postalCode: valueOf('#payment-postalCodeInput', ${JSON.stringify(expected.postalCode)}, patterns.postalCode, 'plain'),
+    };
+    const complete = {
+      number: fields.number.exists && fields.number.matchesExpected && fields.number.accepted,
+      expiry: fields.expiry.exists && fields.expiry.matchesExpected && fields.expiry.accepted,
+      cvc: fields.cvc.exists && fields.cvc.matchesExpected && fields.cvc.accepted,
+      postalCode: !fields.postalCode.exists || (fields.postalCode.matchesExpected && fields.postalCode.accepted),
+    };
+    return {
+      fields,
+      complete,
+      ready: Object.values(complete).every(Boolean),
+    };
+  })()`);
+}
+
+async function ensureStripeCardReadyForSubmit(payment, card) {
+  let state = await readStripePaymentFieldState(payment, card);
+  if (state.ready) return {ready: true, retried: false, state};
+
+  // 提交 Save payment method 前必须回读 Stripe iframe 字段；若页面重渲染吞值，只重填一次，避免空卡号/有效期/邮编被提交。
+  if (!state.complete.number) {
+    await focusAndTypeStripeField(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+  }
+  if (!state.complete.expiry) {
+    await focusAndTypeStripeField(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+  }
+  if (!state.complete.cvc) {
+    await focusAndTypeStripeField(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
+  }
+  if (!state.complete.postalCode) {
+    if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
+    await focusAndTypeStripeField(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
+  }
+
+  state = await readStripePaymentFieldState(payment, card);
+  if (!state.ready) {
+    throw new Error(`Stripe payment fields are not ready before Save payment method: ${JSON.stringify(state)}`);
+  }
+  return {ready: true, retried: true, state};
 }
 
 async function ensureStripeLinkUnchecked(payment) {
@@ -1413,34 +3227,66 @@ async function ensureStripeLinkUnchecked(payment) {
         found: !!checkbox,
         checked: checkbox ? !!checkbox.checked : null,
         phoneVisible,
-        phoneInvalidText: /Please provide a mobile phone number/i.test(document.body.innerText || ''),
+        phoneInvalidText: /Please provide a mobile phone number/i.test(document.body?.innerText || ''),
       };
     })()`);
     if ((lastState.found === false || lastState.checked === false) && !lastState.phoneVisible && !lastState.phoneInvalidText) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`Stripe Link save-info checkbox or phone subform is still active: ${JSON.stringify(lastState)}`);
 }
 
 async function fillStripeCard(payment, card) {
-  for (let i = 0; i < 20; i += 1) {
-    const ready = await evaluate(payment, `(() => !!document.querySelector('#payment-numberInput'))()`);
+  const deadline = Date.now() + DEFAULT_STRIPE_IFRAME_WAIT_MS;
+  let ready = false;
+  while (Date.now() < deadline) {
+    ready = await evaluate(payment, `(() => !!document.querySelector('#payment-numberInput'))()`);
     if (ready) break;
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-  await focusAndInsertText(payment, '#payment-numberInput', card.number);
-  await focusAndInsertText(payment, '#payment-expiryInput', normalizeExpiry(card.expiry));
-  await focusAndInsertText(payment, '#payment-cvcInput', card.cvc);
-  await evaluate(payment, `(() => {
+  if (!ready) throw new Error(`Missing Stripe field after ${DEFAULT_STRIPE_IFRAME_WAIT_MS}ms: #payment-numberInput`);
+  await focusAndTypeStripeField(payment, '#payment-numberInput', card.number, {expectedValue: card.number});
+  await focusAndTypeStripeField(payment, '#payment-expiryInput', normalizeExpiry(card.expiry), {expectedValue: normalizeExpiry(card.expiry)});
+  await focusAndTypeStripeField(payment, '#payment-cvcInput', card.cvc, {expectedValue: card.cvc});
+  const countryState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-countryInput');
-    if (!el) return false;
+    if (!el) return {exists:false, changedFromNonUs:false, selected:false};
+    const countryText = (node) => {
+      if (!node) return '';
+      if (node.tagName === 'SELECT') {
+        return node.selectedOptions?.[0]?.textContent || '';
+      }
+      return node.value || node.textContent || '';
+    };
+    const isUnitedStates = (value, text = '') => /^(us|usa|united states|u\\.s\\.|u\\.s\\.a\\.)$/i.test(String(value || '').trim())
+      || /^(us|usa|united states|u\\.s\\.|u\\.s\\.a\\.)$/i.test(String(text || '').trim());
+    const beforeValue = el.value || '';
+    const beforeText = countryText(el);
+    const beforeMeaningful = String(beforeValue || '').trim()
+      && !/^(country|select|select country|选择|请选择)$/i.test(String(beforeValue || '').trim());
     el.focus();
-    el.value = ${JSON.stringify(normalizeCountry(card.country || 'US'))};
+    const desired = ${JSON.stringify(normalizeCountry(card.country || 'US'))};
+    if (el.tagName === 'SELECT') {
+      const option = [...el.options].find((item) => isUnitedStates(item.value, item.textContent))
+        || [...el.options].find((item) => String(item.value || '').trim().toLowerCase() === desired.toLowerCase());
+      if (option) el.value = option.value;
+      else el.value = desired;
+    } else {
+      el.value = desired;
+    }
     el.dispatchEvent(new Event('input', {bubbles:true}));
     el.dispatchEvent(new Event('change', {bubbles:true}));
-    return true;
+    return {
+      exists: true,
+      changedFromNonUs: !!beforeMeaningful && !isUnitedStates(beforeValue, beforeText),
+      selected: isUnitedStates(el.value, countryText(el)),
+      beforeValue,
+      beforeText,
+      afterValue: el.value || '',
+      afterText: countryText(el),
+    };
   })()`);
   const postalState = await evaluate(payment, `(() => {
     const el = document.querySelector('#payment-postalCodeInput');
@@ -1450,7 +3296,7 @@ async function fillStripeCard(payment, card) {
   })()`);
   if (postalState.exists) {
     if (!card.postalCode) throw new Error('card postalCode is required because Stripe payment postal-code field is visible');
-    await focusAndInsertText(payment, '#payment-postalCodeInput', card.postalCode);
+    await focusAndTypeStripeField(payment, '#payment-postalCodeInput', card.postalCode, {expectedValue: card.postalCode});
   }
 
   const values = await evaluate(payment, `(() => [...document.querySelectorAll('input,select')].map((el) => ({
@@ -1462,8 +3308,17 @@ async function fillStripeCard(payment, card) {
     label: (el.labels?.[0]?.innerText || '').slice(0, 80),
   })))()`);
 
-  const linkState = await ensureStripeLinkUnchecked(payment);
-  return {values, linkChecked: linkState.checked, linkState};
+  const linkState = countryState.changedFromNonUs && countryState.selected
+    ? {
+        found: null,
+        checked: null,
+        skipped: true,
+        reason: 'country_changed_to_united_states_before_save',
+        country: countryState,
+      }
+    : await ensureStripeLinkUnchecked(payment);
+  await sleep(STRIPE_POST_FILL_SETTLE_MS);
+  return {values, linkChecked: linkState.checked, linkState, countryState};
 }
 
 async function declineStripeLinkPrompts(debugPort) {
@@ -1494,18 +3349,10 @@ async function declineStripeLinkPrompts(debugPort) {
 async function dismissSaveCardOverlays(page, debugPort = '') {
   const stripePrompts = debugPort ? await declineStripeLinkPrompts(debugPort) : [];
 
-  // Chrome/SunBrowser can show a browser-level "Save card?" bubble after Stripe
-  // saves the payment method. It is not part of the page DOM, but Escape normally
-  // dismisses it and prevents it from intercepting the Auto Top-Up Save click.
-  await page.send('Page.bringToFront').catch(() => {});
-  for (let i = 0; i < 2; i += 1) {
-    await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).catch(() => {});
-    await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).catch(() => {});
-    await sleep(250);
-  }
+  const browserBubble = await dismissBrowserChromeBubbles(page);
 
   const pageState = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -1521,45 +3368,77 @@ async function dismissSaveCardOverlays(page, debugPort = '') {
     };
   })()`).catch((error) => ({error: error.message}));
 
-  return {stripePrompts, pageState};
+  return {stripePrompts, browserBubble, pageState};
 }
 
-async function waitUntilSaveModalCloses(page) {
-  for (let i = 0; i < 60; i += 1) {
+async function dismissBrowserChromeBubbles(page) {
+  if (!page) return {attempted: false};
+  // Auto Top-Up 全程通过 CDP 操作目标页，不抢占 macOS 前台窗口，避免影响用户处理其他应用。
+  const escapes = [];
+  for (let i = 0; i < 4; i += 1) {
+    const down = await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).then(() => true).catch(() => false);
+    const up = await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}).then(() => true).catch(() => false);
+    escapes.push({down, up});
+    await sleep(180);
+  }
+  const clickAway = await evaluate(page, `(() => ({
+    x: Math.round(window.innerWidth * 0.42),
+    y: Math.round(Math.max(120, window.innerHeight * 0.18)),
+  }))()`).catch(() => ({x: 500, y: 140}));
+  await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: clickAway.x, y: clickAway.y}).catch(() => {});
+  await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: clickAway.x, y: clickAway.y, button: 'left', clickCount: 1}).catch(() => {});
+  await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: clickAway.x, y: clickAway.y, button: 'left', clickCount: 1}).catch(() => {});
+  await sleep(300);
+  return {attempted: true, escapes, clickAway};
+}
+
+async function waitUntilSaveModalCloses(page, payment, timeoutMs = SAVE_PAYMENT_METHOD_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    // 先检查主页面拒卡提示；保存成功后 Stripe iframe 会失效，不能让旧 iframe 阻塞 Purchase 页面识别。
+    const pagePaymentIssue = await detectPaymentIssue(page);
+    if (pagePaymentIssue.found) throw new Error(`payment_issue_card_declined: ${pagePaymentIssue.message || 'Payment Issue'}`);
     const state = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       return {
-        stillSave: /Save payment method/.test(text),
+        // 按钮点击后文案会从 Save payment method 变为 Saving，二者都代表卡尚未持久化完成。
+        stillSaving: /Save payment method|\\bSaving\\b/i.test(text),
         challenge: /hCaptcha|3D Secure|complete the security|security code|bank verification|SMS|passkey|suspicious/i.test(text),
         hasAddCredits: /Add Credits/.test(text),
         tail: text.slice(-1500),
       };
     })()`);
+    lastState = state;
     if (state.challenge) throw new Error(`Security challenge visible: ${state.tail}`);
-    if (!state.stillSave && state.hasAddCredits) return state;
-    await sleep(500);
+    if (!state.stillSaving && state.hasAddCredits) return state;
+    // 只有保存页仍存在时才读取 Stripe iframe，继续覆盖 iframe 内出现的拒卡提示。
+    const stripeFrameIssue = payment ? await detectPaymentIssue(payment) : {found: false};
+    if (stripeFrameIssue.found) throw new Error(`payment_issue_card_declined: ${stripeFrameIssue.message || 'Payment Issue'}`);
+    await sleep(SLOW_DOM_POLL_MS);
   }
-  const state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2000)}))()`);
-  throw new Error(`Save modal did not close: ${state.tail}`);
+  throw new Error(`Save modal did not close after ${timeoutMs}ms: ${lastState?.tail || ''}`);
 }
 
-async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
-  return waitForPurchaseCard(page, expectedLast4, expectedExpiry);
+async function verifyByPurchaseModal(page, expectedLast4, expectedExpiry, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || DEFAULT_DOM_WAIT_MS);
+  const refreshOnTimeout = options.refreshOnTimeout !== false;
+  await waitForExactText(page, 'Add Credits', timeoutMs, {refreshOnTimeout});
+  return waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs, {refreshOnTimeout});
 }
 
-async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs = 45000) {
+async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_DOM_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
   while (Date.now() < deadline) {
     const verified = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
       const expiry = ${JSON.stringify(expectedExpiry)};
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
       return {
         purchase: /Purchase Credits/.test(text),
-        stillSaving: /Save payment method/.test(text),
+        stillSaving: /Save payment method|\\bSaving\\b/i.test(text),
         hasAddCredits: /Add Credits/.test(text),
         verified: brandAndLast4.test(text) || new RegExp(last4 + '[\\\\s\\\\S]*' + expiry.replace('/', '\\\\/') + '|' + expiry.replace('/', '\\\\/') + '[\\\\s\\\\S]*' + last4, 'i').test(text),
         tail: text.slice(-2000),
@@ -1570,9 +3449,19 @@ async function waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutM
     if (!verified.purchase && verified.hasAddCredits && !verified.stillSaving) {
       await clickExactText(page, 'Add Credits', {required: false});
     }
-    await sleep(1500);
+    await sleep(SLOW_DOM_POLL_MS);
   }
-  if (!state) state = await evaluate(page, `(() => ({tail:(document.body.innerText || '').slice(-2500)}))()`);
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+    try {
+      const retry = await waitForPurchaseCard(page, expectedLast4, expectedExpiry, timeoutMs, {...options, refreshOnTimeout: false});
+      return {...retry, refreshedOnce: true};
+    } catch (error) {
+      throw new Error(`Saved card was not visible after ${timeoutMs}ms, refreshed once and retried: ${error.message}`);
+    }
+  }
+  if (!state) state = await evaluate(page, `(() => ({tail:(document.body?.innerText || '').slice(-2500)}))()`);
   throw new Error(`Saved card was not visible in Purchase Credits modal after ${timeoutMs}ms: ${state.tail}`);
 }
 
@@ -1685,7 +3574,11 @@ const findSwitchByLabel = (labelPattern) => {
 async function getPurchaseModalState(page) {
   return evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
+    const purchaseHeading = [...document.querySelectorAll('body *')]
+      .filter((node) => visible(node) && /^Purchase Credits$/i.test(textOf(node)))
+      .map((node) => ({node, rect: node.getBoundingClientRect()}))
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0] || null;
     const controls = [...document.querySelectorAll('input,button,[role="button"],[role="switch"]')]
       .filter((node) => visible(node))
       .map((node, index) => {
@@ -1710,7 +3603,8 @@ async function getPurchaseModalState(page) {
     const invoiceSwitchRaw = findSwitchByLabel(/\\bSend me invoices\\b/i);
     const {node: _invoiceSwitchNode, ...invoiceSwitch} = invoiceSwitchRaw;
     return {
-      purchase: /Purchase Credits/i.test(text),
+      purchase: !!purchaseHeading,
+      purchaseHeadingVisible: !!purchaseHeading,
       amountValue: amountControl?.value || '',
       sendInvoicesText: invoiceSwitch.found || /Send me invoices/i.test(text),
       sendInvoicesChecked: invoiceSwitch.found && !invoiceSwitch.ambiguous ? invoiceSwitch.checked === true : false,
@@ -1724,16 +3618,190 @@ async function getPurchaseModalState(page) {
   })()`);
 }
 
-async function getCurrentCreditBalance(page) {
-  const state = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+async function refundOpenRouterTransactions(page) {
+  const refundableTransactions = await evaluate(page, `(() => {
+    const visible = (node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+    const buttons = [...document.querySelectorAll('button,[role="button"]')]
+      .filter((node) => visible(node) && !node.disabled && /^Refund$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label'))));
+    const occurrences = new Map();
+    return buttons.map((button) => {
+      const row = button.closest('tr,[role="row"]') || button.parentElement;
+      const rowText = normalize(row?.innerText || row?.textContent || '');
+      const occurrence = occurrences.get(rowText) || 0;
+      occurrences.set(rowText, occurrence + 1);
+      return {
+        rowText,
+        occurrence,
+        amount: (rowText.match(/\\$\\s*[0-9][\\d,]*(?:\\.\\d+)?/) || [''])[0],
+      };
+    });
+  })()`);
+
+  const refunded = [];
+  // 从末行向前处理；即使相同日期和金额的上一笔退款后从列表消失，也不会让后续索引顺延错位。
+  for (const transaction of [...refundableTransactions].reverse()) {
+    const click = await evaluate(page, `((target) => {
+      const visible = (node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+      const matches = [...document.querySelectorAll('button,[role="button"]')]
+        .filter((node) => visible(node) && !node.disabled && /^Refund$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label'))))
+        .filter((button) => normalize((button.closest('tr,[role="row"]') || button.parentElement)?.innerText || '') === target.rowText);
+      const button = matches[target.occurrence];
+      if (!button) return {clicked:false, reason:'refund_button_not_found'};
+      button.scrollIntoView({block:'center', inline:'center'});
+      button.click();
+      return {clicked:true};
+    })(${JSON.stringify(transaction)})`);
+    if (!click.clicked) {
+      throw new Error(`Refund button disappeared before it could be clicked: ${JSON.stringify(transaction)}`);
+    }
+
+    const deadline = Date.now() + 10000;
+    let feedback = null;
+    let confirmationAccepted = false;
+    while (Date.now() < deadline) {
+      feedback = await evaluate(page, `(() => {
+        const text = document.body?.innerText || '';
+        const visible = (node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+        const title = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
+          .find((node) => visible(node) && /^Confirm refund$/i.test(normalize(node.innerText || node.textContent || '')));
+        const accept = title && [...document.querySelectorAll('button,[role="button"]')]
+          .find((node) => visible(node) && !node.disabled
+            && /^Accept$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label')))
+            && ((button) => {
+              let ancestor = button.parentElement;
+              for (let depth = 0; ancestor && ancestor !== document.body && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+                if (ancestor.contains(title)) return true;
+              }
+              return false;
+            })(node));
+        return {
+          confirmationVisible: !!title,
+          acceptReady: !!accept,
+          initiated: /Refund initiated|Your refund has been created/i.test(text),
+          tail: text.slice(-1200),
+        };
+      })()`);
+      if (feedback.confirmationVisible) {
+        if (!feedback.acceptReady) {
+          // OpenRouter 会先显示 Checking refund details，此时 Accept 暂时禁用，等待其完成即可。
+          await sleep(250);
+          continue;
+        }
+        if (!confirmationAccepted) {
+          const accepted = await evaluate(page, `(() => {
+            const visible = (node) => {
+              const rect = node.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const normalize = (value) => String(value || '').trim().replace(/\\s+/g, ' ');
+            const title = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
+              .find((node) => visible(node) && /^Confirm refund$/i.test(normalize(node.innerText || node.textContent || '')));
+            const accept = title && [...document.querySelectorAll('button,[role="button"]')]
+              .find((node) => visible(node) && !node.disabled
+                && /^Accept$/i.test(normalize(node.innerText || node.textContent || node.getAttribute('aria-label')))
+                && ((button) => {
+                  let ancestor = button.parentElement;
+                  for (let depth = 0; ancestor && ancestor !== document.body && depth < 8; depth += 1, ancestor = ancestor.parentElement) {
+                    if (ancestor.contains(title)) return true;
+                  }
+                  return false;
+                })(node));
+            if (!accept) return {clicked:false};
+            accept.click();
+            return {clicked:true};
+          })()`);
+          if (!accepted.clicked) throw new Error('Refund confirmation Accept button disappeared before it could be clicked');
+          confirmationAccepted = true;
+        }
+        await sleep(250);
+        continue;
+      }
+      if (confirmationAccepted || feedback.initiated) break;
+      await sleep(250);
+    }
+    if (!confirmationAccepted && !feedback?.initiated) {
+      throw new Error(`Refund confirmation Accept button did not become ready: ${feedback?.tail || ''}`);
+    }
+    refunded.push({
+      amount: transaction.amount,
+      occurrence: transaction.occurrence,
+      confirmationAccepted,
+      noticeVerified: feedback?.initiated === true,
+    });
+    await sleep(500);
+  }
+
+  // 退款后可能残留 0.01 美元以内的舍入余额，小于等于 0.01 即视为退款完成。
+  const balanceDeadline = Date.now() + CREDIT_BALANCE_READ_WAIT_MS;
+  let balanceState = null;
+  while (Date.now() < balanceDeadline) {
+    balanceState = await getCurrentCreditBalance(page, 1000);
+    if (balanceState.balance <= 0.01) break;
+    await sleep(250);
+  }
+  if (!Number.isFinite(balanceState?.balance) || balanceState.balance > 0.01) {
+    throw new Error(`Refund did not reduce OpenRouter credit balance to 0.01 or below: balance=${balanceState?.balance ?? 'unreadable'}`);
+  }
+
+  return {
+    verified: true,
+    status: refunded.length ? 'refunded' : 'already_zero',
+    refundableCount: refundableTransactions.length,
+    refundedCount: refunded.length,
+    afterBalance: balanceState.balance,
+    balanceSource: balanceState.source,
+    transactions: refunded,
+  };
+}
+
+async function getCurrentCreditBalance(page, timeoutMs = CREDIT_BALANCE_READ_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const state = await evaluate(page, `(() => {
+    const text = document.body?.innerText || '';
     const ariaBalance = [...document.querySelectorAll('[aria-label]')]
       .map((node) => node.getAttribute('aria-label') || '')
       .find((label) => /Remaining credits:\\s*[-+]?\\d/i.test(label));
-    const ariaMatch = ariaBalance?.match(/Remaining credits:\\s*([-+]?[0-9][\\d,]*(?:\\.\\d+)?)/i) || null;
+    const ariaMatch = ariaBalance?.match(/Remaining credits:\\s*\\$?\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/i) || null;
     const normalized = text.replace(/\\s+/g, ' ');
     const beforeBuy = normalized.split(/\\b(?:Buy|Add)\\s+Credits\\b|\\bAuto\\s*Top[- ]?Up\\b/i)[0] || normalized;
-    const fromCreditsBlock = beforeBuy.match(/\\$\\s*([0-9][\\d,]*(?:\\.\\d+)?)/);
+    const fromCreditsBlock = beforeBuy.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
+    const nodeValue = (node) => {
+      const attributes = ['aria-label', 'aria-valuetext', 'data-value', 'data-amount', 'data-balance', 'title']
+        .map((name) => node.getAttribute?.(name) || '');
+      const before = getComputedStyle(node, '::before').content || '';
+      const after = getComputedStyle(node, '::after').content || '';
+      return [node.innerText, node.textContent, node.value, ...attributes, before, after]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\\s+/g, ' ');
+    };
+    const totalAvailableLabel = [...document.querySelectorAll('main *, body *')]
+      .find((node) => /^TOTAL AVAILABLE$/i.test((node.innerText || node.textContent || '').trim()));
+    let totalAvailableCard = null;
+    for (let node = totalAvailableLabel; node && node !== document.body; node = node.parentElement) {
+      if (/Pay-as-you-go balance/i.test(nodeValue(node))) {
+        totalAvailableCard = node;
+        break;
+      }
+    }
+    const totalAvailableText = totalAvailableCard
+      ? [totalAvailableCard, ...totalAvailableCard.querySelectorAll('*')].map(nodeValue).join(' ')
+      : '';
+    const totalAvailableMatch = totalAvailableText.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -1749,28 +3817,31 @@ async function getCurrentCreditBalance(page) {
           fontSize: Number.parseFloat(style.fontSize || '0') || 0,
         };
       })
-      .filter((item) => /\\$\\s*[0-9]/.test(item.text) && !/Service\\s+fees|Total\\s+due|Sales\\s+Tax|VAT/i.test(item.text));
+      .filter((item) => /\\$\\s*[-+]?\\s*[0-9]/.test(item.text) && !/Service\\s+fees|Total\\s+due|Sales\\s+Tax|VAT/i.test(item.text));
     const elementCandidate = elements
       .map((item) => {
-        const match = item.text.match(/\\$\\s*([0-9][\\d,]*(?:\\.\\d+)?)/);
+        const match = item.text.match(/\\$\\s*([-+]?\\s*[0-9][\\d,]*(?:\\.\\d+)?)/);
         return match ? {...item, rawAmount: match[1]} : null;
       })
       .filter(Boolean)
       .sort((a, b) => b.fontSize - a.fontSize || a.rect.y - b.rect.y)[0] || null;
-    const raw = ariaMatch?.[1] || fromCreditsBlock?.[1] || elementCandidate?.rawAmount || '';
-    const balance = raw ? Number(raw.replace(/,/g, '')) : null;
+    const raw = ariaMatch?.[1] || totalAvailableMatch?.[1] || fromCreditsBlock?.[1] || elementCandidate?.rawAmount || '';
+    const balance = raw ? Number(raw.replace(/[\\s,]/g, '')) : null;
     return {
       balance: Number.isFinite(balance) ? balance : null,
       raw,
-      source: ariaMatch ? 'aria_remaining_credits' : (fromCreditsBlock ? 'credits_text_block' : (elementCandidate ? 'visible_element' : 'not_found')),
+      source: ariaMatch
+        ? 'aria_remaining_credits'
+        : (totalAvailableMatch ? 'total_available_card' : (fromCreditsBlock ? 'credits_text_block' : (elementCandidate ? 'visible_element' : 'not_found'))),
       account: (text.match(/Personal Account:\\s*([^\\n]+)/) || [])[1] || '',
       tail: text.slice(-1800),
     };
-  })()`);
-  if (!Number.isFinite(state.balance)) {
-    throw new Error(`Could not parse current OpenRouter credit balance: ${state.tail}`);
+    })()`);
+    lastState = state;
+    if (Number.isFinite(state.balance)) return state;
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-  return state;
+  throw new Error(`Could not parse current OpenRouter credit balance after ${timeoutMs}ms: ${lastState?.tail || ''}`);
 }
 
 async function resolvePurchasePlan(page, purchase) {
@@ -1778,9 +3849,9 @@ async function resolvePurchasePlan(page, purchase) {
   const balanceState = await getCurrentCreditBalance(page);
   if (purchase.rule?.enabled) {
     const threshold = normalizeMoneyForCompare(purchase.rule.threshold);
-    const belowAmount = normalizeMoneyValue(purchase.rule.belowAmount);
-    const atOrAboveAmount = normalizeMoneyValue(purchase.rule.atOrAboveAmount);
-    if (!Number.isFinite(threshold) || !belowAmount || !atOrAboveAmount) {
+    const belowAmount = normalizeOptionalMoneyValue(purchase.rule.belowAmount);
+    const atOrAboveAmount = normalizeOptionalMoneyValue(purchase.rule.atOrAboveAmount);
+    if (!Number.isFinite(threshold) || (!belowAmount && !purchase.rule.belowAmountConfigured)) {
       throw new Error(`Invalid purchase rule: ${JSON.stringify(purchase.rule)}`);
     }
     const branch = balanceState.balance < threshold ? 'below_threshold' : 'at_or_above_threshold';
@@ -1788,7 +3859,9 @@ async function resolvePurchasePlan(page, purchase) {
     return {
       ...purchase,
       amount,
+      skippedByRule: !amount,
       ruleDecision: {
+        mode: 'threshold_fixed_amounts',
         threshold: purchase.rule.threshold,
         belowAmount,
         atOrAboveAmount,
@@ -1797,6 +3870,7 @@ async function resolvePurchasePlan(page, purchase) {
         balanceSource: balanceState.source,
         branch,
         selectedAmount: amount,
+        skipped: !amount,
       },
       beforeBalance: {
         balance: balanceState.balance,
@@ -1819,9 +3893,8 @@ async function resolvePurchasePlan(page, purchase) {
 async function setPurchaseAmountInput(page, amount) {
   const value = normalizeMoneyValue(amount);
   if (!value) throw new Error('Purchase amount is required');
-  const result = await evaluate(page, `(() => {
+  const target = await evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const value = ${JSON.stringify(String(value))};
     const labelText = (input) => [
       input.name,
       input.id,
@@ -1845,47 +3918,76 @@ async function setPurchaseAmountInput(page, amount) {
       || inputs.find((item) => /\\bAmount\\b|Purchase\\s+Credits/i.test(item.text));
     if (!candidate) {
       return {
-        updated:false,
+        found:false,
         reason:'amount_input_not_found',
         inputs:inputs.map((item) => ({index:item.index, type:item.input.type || '', value:item.input.value || '', text:item.text.slice(0, 300)})),
-        tail:(document.body.innerText || '').slice(-1800),
+        tail:(document.body?.innerText || '').slice(-1800),
       };
     }
     const input = candidate.input;
     const before = input.value || '';
+    document.querySelectorAll('[data-or-purchase-amount-target]')
+      .forEach((node) => node.removeAttribute('data-or-purchase-amount-target'));
+    input.setAttribute('data-or-purchase-amount-target', 'true');
     input.scrollIntoView({block:'center', inline:'center'});
     input.focus();
-    if (input.select) input.select();
-    const nativeValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
-    if (nativeValue) nativeValue.call(input, value);
-    else input.value = value;
-    try {
-      input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value}));
-    } catch {
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    }
-    input.dispatchEvent(new Event('change', {bubbles:true}));
-    input.blur();
     return {
-      updated: input.value === value,
+      found:true,
+      focused:document.activeElement === input,
       index: candidate.index,
       before,
-      value: input.value || '',
       text: candidate.text.slice(0, 300),
       rect: {x:candidate.rect.x, y:candidate.rect.y, width:candidate.rect.width, height:candidate.rect.height},
     };
   })()`);
+  if (!target.found) {
+    throw new Error(`Purchase amount input not found: ${JSON.stringify(target)}`);
+  }
+
+  const selector = '[data-or-purchase-amount-target="true"]';
+  const focusState = target.focused ? {found: true, active: true} : await focusStripeFieldWithCdp(page, selector);
+  if (!focusState.found || !focusState.active) {
+    throw new Error(`Purchase amount input could not be focused: ${JSON.stringify({target, focusState})}`);
+  }
+  await clearFocusedFieldWithBackspaces(page, String(target.before || '').length);
+  await sleep(80);
+  const cleared = await evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    return {found:!!input, value:input?.value || '', active:document.activeElement === input};
+  })()`);
+  if (!cleared.found || cleared.value !== '' || !cleared.active) {
+    throw new Error(`Purchase amount input could not be cleared: ${JSON.stringify(cleared)}`);
+  }
+
+  await typeFocusedFieldWithKeyEvents(page, value);
+  await blurFocusedFieldWithTab(page);
+  await sleep(350);
+  const result = await evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    const actual = input?.value || '';
+    const expected = ${JSON.stringify(String(value))};
+    const response = {
+      updated: actual === expected && document.activeElement !== input,
+      value: actual,
+      blurred: document.activeElement !== input,
+      index: ${JSON.stringify(target.index)},
+      before: ${JSON.stringify(target.before)},
+      text: ${JSON.stringify(target.text)},
+      rect: ${JSON.stringify(target.rect)},
+      method: 'dispatch_key_events',
+    };
+    input?.removeAttribute('data-or-purchase-amount-target');
+    return response;
+  })()`);
   if (!result.updated) {
     throw new Error(`Purchase amount input did not retain ${value}: ${JSON.stringify(result)}`);
   }
-  await sleep(350);
   return result;
 }
 
 async function ensureOneTimePaymentMethodsOff(page) {
   const result = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Use one-time payment methods/i.test(text)) {
       return {found:false, checked:null, clicked:false};
     }
@@ -1930,7 +4032,7 @@ async function ensureOneTimePaymentMethodsOff(page) {
   })()`);
   await sleep(result.clicked ? 900 : 200);
   const verified = await evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Use one-time payment methods/i.test(text)) return {found:false, checked:null};
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
@@ -1967,7 +4069,7 @@ async function ensureOneTimePaymentMethodsOff(page) {
 async function ensurePurchaseInvoiceChecked(page) {
   const result = await evaluate(page, `(() => {
     ${PURCHASE_MODAL_DOM_HELPERS}
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     if (!/Send me invoices/i.test(text)) {
       return {found:false, checked:null, clicked:false};
     }
@@ -2002,7 +4104,7 @@ async function ensurePurchaseInvoiceChecked(page) {
   return {initial: result, state};
 }
 
-async function preparePurchase(page, purchase) {
+async function preparePurchase(page, purchase, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const amount = normalizeMoneyValue(purchase.amount);
   if (!amount) throw new Error('Purchase amount is required');
   if (purchase.debugPort) {
@@ -2014,7 +4116,8 @@ async function preparePurchase(page, purchase) {
 
   let state = null;
   const expectedAmount = normalizeMoneyForCompare(amount);
-  for (let i = 0; i < 20; i += 1) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     state = await getPurchaseModalState(page);
     if (state.sendInvoicesText && state.sendInvoicesSwitch?.ambiguous) {
       throw new Error(`Send me invoices switch is ambiguous; refusing purchase: ${JSON.stringify(state.sendInvoicesSwitch)}`);
@@ -2033,7 +4136,7 @@ async function preparePurchase(page, purchase) {
     }
     await sleep(500);
   }
-  throw new Error(`Purchase modal is not ready: ${state?.tail || ''}`);
+  throw new Error(`Purchase modal is not ready after ${timeoutMs}ms: ${state?.tail || ''}`);
 }
 
 async function clickPurchaseButton(page) {
@@ -2045,7 +4148,7 @@ async function clickPurchaseButton(page) {
     const button = [...document.querySelectorAll('button,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
       .find((node) => /^Purchase$/i.test((node.innerText || node.textContent || '').trim()));
-    if (!button) return {clicked:false, tail:(document.body.innerText || '').slice(-1600)};
+    if (!button) return {clicked:false, tail:(document.body?.innerText || '').slice(-1600)};
     button.scrollIntoView({block:'center', inline:'center'});
     button.click();
     return {clicked:true, label:(button.innerText || button.textContent || '').trim()};
@@ -2105,12 +4208,12 @@ async function clickPurchaseConfirmationIfPresent(page, debugPort = '', debugDir
   return {confirmed: false, method: 'native_dialog_not_present', state: nativeDialog};
 }
 
-async function waitForPurchaseResult(page, debugPort = '', timeoutMs = 30000, debugDir = '') {
+async function waitForPurchaseResult(page, debugPort = '', timeoutMs = DEFAULT_DOM_WAIT_MS, debugDir = '') {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
 	  while (Date.now() < deadline) {
 	    lastState = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -2151,7 +4254,7 @@ async function waitForPurchaseResult(page, debugPort = '', timeoutMs = 30000, de
       return {verified: false, declined: true, state: lastState};
     }
     if (lastState.submittedOrClosed || !lastState.stillPurchase) return {submitted: true, state: lastState};
-    await sleep(1000);
+    await sleep(500);
   }
   return {submitted: false, state: lastState};
 }
@@ -2188,7 +4291,7 @@ async function recoverPurchaseAfterAutomationTimeout(page, purchase, debugPort =
   return {recovered: false, confirmations};
 }
 
-async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutMs = 45000) {
+async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const expectedAmount = normalizeMoneyForCompare(amount);
   if (!Number.isFinite(beforeBalance) || !Number.isFinite(expectedAmount)) {
     return {verified: null, reason: 'missing_before_balance_or_amount'};
@@ -2203,6 +4306,7 @@ async function verifyPurchaseBalanceChange(page, beforeBalance, amount, timeoutM
         await navigatePage(page, OPENROUTER_CREDITS_URL);
         lastRefreshAt = Date.now();
         await sleep(PAGE_SETTLE_MS);
+        await dismissInterferingOverlays(page).catch(() => null);
       }
       const issue = await detectPaymentIssue(page).catch(() => null);
       if (issue?.found) {
@@ -2257,7 +4361,7 @@ async function findRecentTransactionAmount(page, expectedAmount) {
   const target = Number(expectedAmount);
   if (!Number.isFinite(target) || target <= 0) return {found: false, reason: 'missing_expected_amount'};
   return evaluate(page, `((expectedAmount) => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const recentIndex = text.search(/Recent Transactions|History/i);
     const scope = recentIndex >= 0 ? text.slice(recentIndex, recentIndex + 2500) : text.slice(0, 2500);
     const escaped = String(expectedAmount).replace(/\\./g, '\\\\.');
@@ -2271,9 +4375,9 @@ async function findRecentTransactionAmount(page, expectedAmount) {
   })(${JSON.stringify(target)})`);
 }
 
-async function detectPaymentIssue(page) {
-  return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+async function detectPaymentIssue(page, payment = null) {
+  const inspect = async (client) => evaluate(client, `(() => {
+    const text = document.body?.innerText || '';
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
@@ -2297,6 +4401,12 @@ async function detectPaymentIssue(page) {
       tail: text.slice(-1800),
     };
   })()`);
+  const mainPageIssue = await inspect(page).catch(() => ({found: false}));
+  if (mainPageIssue.found || !payment) return mainPageIssue;
+  const stripeFrameIssue = await inspect(payment).catch(() => ({found: false}));
+  return stripeFrameIssue.found
+    ? {...stripeFrameIssue, source: 'stripe_iframe'}
+    : mainPageIssue;
 }
 
 async function executeConfirmedPurchase(page, purchase, debugPort = '', debugDir = '') {
@@ -2305,51 +4415,79 @@ async function executeConfirmedPurchase(page, purchase, debugPort = '', debugDir
     ? purchase.beforeBalance
     : await getCurrentCreditBalance(page);
 
-  const prepared = await preparePurchase(page, purchaseWithDebugPort);
-  await captureDiagnosticScreenshot(page, debugDir, 'purchase-prepared-before-click', {
-    kind: 'purchase_prepared',
-    amount: prepared.amount,
-    beforeBalance,
-  }).catch(() => null);
-  const clicked = await clickPurchaseButton(page);
-  await captureDiagnosticScreenshot(page, debugDir, 'after-purchase-button-click', {
-    kind: 'purchase_clicked',
-    clicked,
-  }).catch(() => null);
-  const confirmation = await clickPurchaseConfirmationIfPresent(page, debugPort, debugDir);
-  writeDiagnostic(debugDir, 'purchase-confirmation-result', {
-    kind: 'purchase_confirmation_result',
-    confirmation,
-  });
-  const result = await waitForPurchaseResult(page, debugPort, 30000, debugDir);
-  if (result.declined) {
-    throw new Error(`payment_issue_card_declined: ${result.state?.paymentIssueText || 'Payment Issue'}`);
+  let autoTopupPendingRecovery = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+      await clickExactText(page, 'Add Credits', {required: false});
+      await sleep(PAGE_SETTLE_MS);
+    }
+    const prepared = await preparePurchase(page, purchaseWithDebugPort);
+    await captureDiagnosticScreenshot(page, debugDir, `purchase-prepared-before-click-attempt-${attempt + 1}`, {
+      kind: 'purchase_prepared',
+      attempt: attempt + 1,
+      amount: prepared.amount,
+      beforeBalance,
+    }).catch(() => null);
+    const clicked = await clickPurchaseButton(page);
+    await captureDiagnosticScreenshot(page, debugDir, `after-purchase-button-click-attempt-${attempt + 1}`, {
+      kind: 'purchase_clicked',
+      attempt: attempt + 1,
+      clicked,
+    }).catch(() => null);
+    const confirmation = await clickPurchaseConfirmationIfPresent(page, debugPort, debugDir);
+    writeDiagnostic(debugDir, `purchase-confirmation-result-attempt-${attempt + 1}`, {
+      kind: 'purchase_confirmation_result',
+      attempt: attempt + 1,
+      confirmation,
+    });
+    const result = await waitForPurchaseResult(page, debugPort, 30000, debugDir);
+    if (result.declined) {
+      const message = result.state?.paymentIssueText || 'Payment Issue';
+      if (attempt === 0 && /automatic top[- ]up might be pending/i.test(message)) {
+        autoTopupPendingRecovery = {
+          skipped: true,
+          reason: 'auto_topup_disable_recovery_removed',
+        };
+        writeDiagnostic(debugDir, 'purchase-auto-topup-pending-recovery', {
+          kind: 'purchase_auto_topup_pending_recovery',
+          message,
+          recovery: autoTopupPendingRecovery,
+        });
+        await sleep(2500);
+        continue;
+      }
+      throw new Error(`payment_issue_card_declined: ${message}`);
+    }
+    const balanceVerification = await verifyPurchaseBalanceChange(page, beforeBalance.balance, prepared.amount);
+    writeDiagnostic(debugDir, `purchase-balance-verification-attempt-${attempt + 1}`, {
+      kind: 'purchase_balance_verification',
+      attempt: attempt + 1,
+      balanceVerification,
+    });
+    if (balanceVerification.declined) {
+      throw new Error(`payment_issue_card_declined: ${balanceVerification.issue?.message || 'Payment Issue'}`);
+    }
+    if (!balanceVerification.verified) {
+      throw new Error(`purchase_unverified: balance did not increase; ${JSON.stringify(balanceVerification)}`);
+    }
+    return {
+      executed: true,
+      amount: prepared.amount,
+      totalDue: prepared.totalDue,
+      serviceFee: prepared.serviceFee,
+      sendInvoices: prepared.state.sendInvoicesText ? prepared.state.sendInvoicesChecked : null,
+      oneTimePaymentMethods: prepared.oneTimePaymentMethods.verified.found ? 'off' : 'not_visible',
+      ruleDecision: purchase.ruleDecision || null,
+      beforeBalance,
+      clicked,
+      confirmation,
+      result,
+      autoTopupPendingRecovery,
+      balanceVerification,
+    };
   }
-  const balanceVerification = await verifyPurchaseBalanceChange(page, beforeBalance.balance, prepared.amount);
-  writeDiagnostic(debugDir, 'purchase-balance-verification', {
-    kind: 'purchase_balance_verification',
-    balanceVerification,
-  });
-  if (balanceVerification.declined) {
-    throw new Error(`payment_issue_card_declined: ${balanceVerification.issue?.message || 'Payment Issue'}`);
-  }
-  if (!balanceVerification.verified) {
-    throw new Error(`purchase_unverified: balance did not increase; ${JSON.stringify(balanceVerification)}`);
-  }
-  return {
-    executed: true,
-    amount: prepared.amount,
-    totalDue: prepared.totalDue,
-    serviceFee: prepared.serviceFee,
-    sendInvoices: prepared.state.sendInvoicesText ? prepared.state.sendInvoicesChecked : null,
-    oneTimePaymentMethods: prepared.oneTimePaymentMethods.verified.found ? 'off' : 'not_visible',
-    ruleDecision: purchase.ruleDecision || null,
-    beforeBalance,
-    clicked,
-    confirmation,
-    result,
-    balanceVerification,
-  };
+  throw new Error('payment_issue_card_declined: automatic top-up might be pending after retry');
 }
 
 async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
@@ -2365,7 +4503,7 @@ async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
         && !node.disabled
         && node.getAttribute('aria-disabled') !== 'true';
     });
-    if (!el) return {clicked:false, tail:(document.body.innerText || '').slice(-1500)};
+    if (!el) return {clicked:false, tail:(document.body?.innerText || '').slice(-1500)};
     el.scrollIntoView({block:'center', inline:'center'});
     el.click();
     return {clicked:true, label:(el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ')};
@@ -2377,18 +4515,15 @@ async function clickSavedPaymentMethod(page, expectedLast4, expectedExpiry) {
 }
 
 async function removeSavedPaymentMethodsFromPicker(page) {
-  const removed = [];
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  await sleep(500);
 
-  await waitForExactText(page, 'Add Credits');
-  await sleep(1200);
-
-  for (let i = 0; i < 8; i += 1) {
-    const result = await evaluate(page, `(() => {
+  const result = await evaluate(page, `(() => {
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      const buttons = [...document.querySelectorAll('button,a,[role="button"],svg,[aria-label],[title]')]
+      const controls = [...document.querySelectorAll('button,a,[role="button"]')]
         .map((node, index) => {
           const rect = node.getBoundingClientRect();
           return {
@@ -2397,13 +4532,14 @@ async function removeSavedPaymentMethodsFromPicker(page) {
             text: (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' '),
             title: node.getAttribute('title') || '',
             aria: node.getAttribute('aria-label') || '',
+            className: String(node.getAttribute('class') || ''),
             disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
             rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
           };
         })
         .filter((item) => visible(item.node) && !item.disabled);
 
-      const card = buttons
+      const card = controls
         .filter((item) => (
           /\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER)\\b/i.test(item.text)
           && /\\(\\d{4}\\)/.test(item.text)
@@ -2414,53 +4550,36 @@ async function removeSavedPaymentMethodsFromPicker(page) {
         return {
           clicked: false,
           done: true,
-          hasSave: /Save payment method/.test(document.body.innerText || ''),
-          tail: (document.body.innerText || '').slice(-1800),
+          hasSave: /Save payment method/.test(document.body?.innerText || ''),
+          tail: (document.body?.innerText || '').slice(-1800),
         };
       }
 
-      const trash = buttons
+      // 只认卡片附近带删除语义或 Trash 图标的真实按钮，避免坐标点击误触并重复发送删除请求。
+      const hasTrashIcon = (node) => {
+        const svgText = [...node.querySelectorAll('svg')]
+          .map((svg) => [svg.getAttribute('class') || '', svg.getAttribute('data-lucide') || '', svg.innerHTML || ''].join(' '))
+          .join(' ');
+        return /trash|M3\\s*6h18|M19\\s*6v14/i.test(svgText);
+      };
+      const trash = controls
         .filter((item) => (
           item.index !== card.index
-          && !item.text
-          && item.rect.width >= 18
-          && item.rect.width <= 42
-          && item.rect.height >= 18
-          && item.rect.height <= 42
-          && item.rect.y >= card.rect.y - 8
-          && item.rect.y <= card.rect.y + card.rect.height - 8
-          && item.rect.x >= card.rect.x + card.rect.width - 110
+          && (/delete|remove/i.test([item.aria, item.title].join(' ')) || hasTrashIcon(item.node))
+          && item.rect.y >= card.rect.y - 20
+          && item.rect.y <= card.rect.y + card.rect.height + 20
+          && item.rect.x >= card.rect.x
           && item.rect.x <= card.rect.x + card.rect.width + 20
         ))
-        .sort((a, b) => a.rect.y - b.rect.y)[0];
+        .sort((a, b) => Math.abs(a.rect.y - card.rect.y) - Math.abs(b.rect.y - card.rect.y))[0];
 
       if (!trash) {
-        const points = [
-          {x: card.rect.x + card.rect.width - 32, y: card.rect.y + 18},
-          {x: card.rect.x + card.rect.width - 30, y: card.rect.y + card.rect.height / 2},
-          {x: card.rect.x + card.rect.width - 62, y: card.rect.y + 18},
-        ];
-        for (const point of points) {
-          const target = document.elementFromPoint(point.x, point.y);
-          if (!target) continue;
-          target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, clientX:point.x, clientY:point.y}));
-          return {
-            clicked: true,
-            done: false,
-            card: card.text,
-            trashRect: {x: point.x, y: point.y, width: 0, height: 0},
-            fallback: 'elementFromPoint',
-            target: target.tagName,
-          };
-        }
         return {
           clicked: false,
           done: false,
           card: {text: card.text, rect: card.rect},
-          buttons: buttons.map(({node, ...item}) => item).slice(-35),
-          tail: (document.body.innerText || '').slice(-1800),
+          buttons: controls.map(({node, ...item}) => item).slice(-35),
+          tail: (document.body?.innerText || '').slice(-1800),
         };
       }
 
@@ -2474,67 +4593,102 @@ async function removeSavedPaymentMethodsFromPicker(page) {
       };
     })()`);
 
-    if (result.done) {
-      return {
-        attempted: true,
-        removedSavedPaymentMethods: removed,
-        hasSavePaymentForm: !!result.hasSave,
-      };
-    }
-    if (!result.clicked) {
-      throw new Error(`Saved payment-method delete button not found: ${JSON.stringify(result).slice(0, 2000)}`);
-    }
-    removed.push(result.card);
-    await sleep(800);
+  if (result.done) {
+    return {
+      attempted: true,
+      removedSavedPaymentMethods: [],
+      hasSavePaymentForm: !!result.hasSave,
+    };
+  }
+  if (!result.clicked) {
+    throw new Error(`Saved payment-method delete button not found: ${JSON.stringify(result).slice(0, 2000)}`);
+  }
+  await sleep(500);
 
-    const confirmed = await evaluate(page, `(() => {
-      const confirm = [...document.querySelectorAll('button,[role="button"]')]
-        .find((node) => /Remove|Delete|Confirm/i.test((node.innerText || node.textContent || '').trim()) && !node.disabled);
-      if (confirm) confirm.click();
-      return !!confirm;
-    })()`);
-    for (let wait = 0; wait < 10; wait += 1) {
-      const state = await evaluate(page, `(() => {
-        const text = document.body.innerText || '';
+  const confirmed = await evaluate(page, `(() => {
+    const confirm = [...document.querySelectorAll('button,[role="button"]')]
+      .find((node) => /^(Remove|Delete|Confirm)$/i.test((node.innerText || node.textContent || '').trim()) && !node.disabled);
+    if (confirm) confirm.click();
+    return !!confirm;
+  })()`);
+  for (let wait = 0; wait < 10; wait += 1) {
+    const state = await evaluate(page, `(() => {
+        const text = document.body?.innerText || '';
         const removedCard = ${JSON.stringify(result.card)};
+        // 卡片按钮文本会被浏览器按行展示，统一空白后再判断，避免点击删除后立即误报“旧卡已消失”。
+        const normalizedText = text.replace(/\\s+/g, ' ').trim();
+        const normalizedRemovedCard = String(removedCard || '').replace(/\\s+/g, ' ').trim();
         return {
-          cardStillVisible: removedCard ? text.includes(removedCard) : false,
+          cardStillVisible: normalizedRemovedCard ? normalizedText.includes(normalizedRemovedCard) : false,
           hasSave: /Save payment method/.test(text),
           tail: text.slice(-1500),
         };
       })()`);
-      if (!state.cardStillVisible || state.hasSave) break;
-      await sleep(500);
-      if (wait === 9) {
-        throw new Error(`Saved payment-method removal did not take effect: ${state.tail}`);
-      }
+    if (!state.cardStillVisible || state.hasSave) {
+      return {
+        attempted: true,
+        removedSavedPaymentMethods: [result.card],
+        hasSavePaymentForm: !!state.hasSave,
+        confirmed,
+      };
     }
-    if (confirmed) await sleep(800);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
-
-  throw new Error('Saved payment-method removal did not converge');
+  throw new Error('Saved payment-method removal did not take effect after 10000ms');
 }
 
 async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
-  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
-  for (let i = 0; i < 30; i += 1) {
+  await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS, {refreshOnTimeout: true});
+  const deadline = Date.now() + DEFAULT_DOM_WAIT_MS;
+  while (Date.now() < deadline) {
     const state = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const last4 = ${JSON.stringify(expectedLast4)};
       const expiry = ${JSON.stringify(expectedExpiry)};
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
+      const interactive = [...document.querySelectorAll('button,a,[role="button"]')]
         .map((node) => ({
+          node,
           text: (node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' '),
           visible: visible(node),
           disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true',
+          rect: (() => {
+            const rect = node.getBoundingClientRect();
+            return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+          })(),
+          hasSvg: !!node.querySelector?.('svg'),
+          plusIcon: (() => {
+            const pathD = [...node.querySelectorAll?.('svg path') || []].map((path) => path.getAttribute('d') || '').join(' ');
+            const className = String(node.getAttribute('class') || '');
+            return /M12\\s*4\\.5v15m7\\.5-7\\.5h-15/i.test(pathD)
+              || (/\\bw-10\\b/.test(className) && /\\bh-full\\b/.test(className) && !!node.querySelector?.('svg'));
+          })(),
         }))
+        .filter((item) => item.visible);
+      const buttons = interactive
         .filter((item) => item.visible && item.text);
       const clickable = buttons.filter((item) => !item.disabled).map((item) => item.text);
       const hasClickable = (rx) => clickable.some((label) => rx.test(label));
+      const modal = [...document.querySelectorAll('body *')]
+        .filter((node) => visible(node))
+        .map((node) => ({text: (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' '), rect: node.getBoundingClientRect()}))
+        .filter((item) => /Purchase Credits/i.test(item.text) && /Total due/i.test(item.text))
+        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0];
+      const modalRect = modal?.rect;
+      const hasIconAddPaymentMethod = !!modalRect && interactive
+        .filter((item) => !item.disabled)
+        .some((item) => {
+          const rect = item.rect;
+          const inTopCardArea = rect.x > modalRect.x + modalRect.width * 0.62
+            && rect.x < modalRect.x + modalRect.width - 35
+            && rect.y > modalRect.y + 55
+            && rect.y < modalRect.y + modalRect.height * 0.35;
+          const plusLike = item.plusIcon || item.text === '+' || item.text === '' || item.hasSvg;
+          return inTopCardArea && plusLike && !/close|purchase/i.test(item.text) && rect.width >= 35 && rect.width <= 140 && rect.height >= 45 && rect.height <= 180;
+        });
       const brandAndLast4 = new RegExp('\\\\b(VISA|MASTERCARD|AMEX|AMERICAN EXPRESS|DISCOVER|DINERS|JCB|UNIONPAY)\\\\b[\\\\s\\\\S]*' + last4, 'i');
       return {
         purchase: /Purchase Credits/.test(text),
@@ -2543,7 +4697,8 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
           || (!!expiry && new RegExp(last4 + '[\\\\s\\\\S]*' + expiry.replace('/', '\\\\/') + '|' + expiry.replace('/', '\\\\/') + '[\\\\s\\\\S]*' + last4, 'i').test(text))
         ),
         hasAddPaymentMethod: /Add a Payment Method|Add Payment Method/i.test(text),
-        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i),
+        canAddPaymentMethod: hasClickable(/^Add a Payment Method$|^Add Payment Method$/i) || hasIconAddPaymentMethod,
+        hasIconAddPaymentMethod,
         hasSave: /Save payment method/.test(text),
         disabledEntryButtons: buttons
           .filter((item) => item.disabled && /Add Credits|Add a Payment Method|Add Payment Method/i.test(item.text))
@@ -2554,7 +4709,7 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
     if (state.purchase && state.targetCardVisible) return {alreadyBound: true, state};
     if (!state.purchase && state.targetCardVisible) {
       const selected = await clickSavedPaymentMethod(page, expectedLast4, expectedExpiry);
-      const verified = await waitForPurchaseCard(page, expectedLast4, expectedExpiry);
+      const verified = await waitForPurchaseCard(page, expectedLast4, expectedExpiry, DEFAULT_DOM_WAIT_MS, {refreshOnTimeout: true});
       return {alreadyBound: true, reboundExisting: true, selected, state: verified};
     }
     if (state.purchase && state.hasSave) break;
@@ -2566,7 +4721,7 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
       await sleep(PAGE_SETTLE_MS);
       break;
     }
-    await sleep(1000);
+    await sleep(SLOW_DOM_POLL_MS);
   }
 
   const clicked = await clickAddPaymentMethod(page, {required: false});
@@ -2574,43 +4729,107 @@ async function openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry) {
   return {alreadyBound: false, clicked};
 }
 
-async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_PAYMENT_ENTRY_WAIT_MS) {
+function isPaymentEntryStateReady(state, expectedLast4 = '') {
+  return !!(
+    state?.canAddPaymentMethod
+    || state?.hasAddPaymentMethod
+    || state?.canAddCredits
+    || state?.hasAddCredits
+    || state?.hasAddBillingAddress
+    || state?.hasAddressForm
+    || state?.hasSavePaymentMethod
+    || state?.hasCardFormText
+    || (expectedLast4 && state?.purchase && state?.targetCardVisible)
+  );
+}
+
+async function waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs = DEFAULT_PAYMENT_ENTRY_WAIT_MS, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   while (Date.now() < deadline) {
+    const blockerRecovery = await recoverNewAccountBlockerIfPresent(page, 'payment_entry_wait');
+    if (blockerRecovery.recovered) {
+      lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+      if (isPaymentEntryStateReady(lastState, expectedLast4)) {
+        return {...lastState, blockerRecovery};
+      }
+    }
     lastState = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
-    if (
-      lastState.canAddPaymentMethod
-      || lastState.hasAddBillingAddress
-      || lastState.hasAddressForm
-      || lastState.hasSavePaymentMethod
-      || lastState.hasCardFormText
-      || (expectedLast4 && lastState.purchase && lastState.targetCardVisible)
-    ) {
+    if (isPaymentEntryStateReady(lastState, expectedLast4)) {
       return lastState;
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
+  }
+  if (options.refreshOnTimeout) {
+    await refreshCreditsPageForRetry(page);
+    const retry = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, timeoutMs, {...options, refreshOnTimeout: false});
+    return {...retry, refreshedOnce: true};
   }
   return lastState || await getPaymentEntryState(page, expectedLast4, expectedExpiry);
 }
 
-async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, options = {}) {
-  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS);
-  if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
-    return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
+async function waitForPaymentMethodSurfaceAfterClick(page, expectedLast4, expectedExpiry, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  let reClickCount = 0;
+  while (Date.now() < deadline) {
+    const blockerRecovery = await recoverNewAccountBlockerIfPresent(page, 'payment_surface_wait');
+    if (blockerRecovery.recovered) {
+      state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+      if ((state.canAddPaymentMethod || state.hasAddPaymentMethod) && !state.hasCardFormText && !state.hasSavePaymentMethod && !state.hasAddBillingAddress && !state.hasAddressForm && reClickCount < 2) {
+        // 强刷回 Credits 主页面后，需要重新点击入口，否则会一直等一个已经被刷新掉的弹窗。
+        const clicked = await clickAddPaymentMethod(page, {required: false});
+        reClickCount += 1;
+        await sleep(PAGE_SETTLE_MS);
+        state = {...state, blockerRecovery, reClickedAfterRecovery: clicked};
+      }
+    }
+    state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+    if (
+      state.hasAddBillingAddress
+      || state.hasAddressForm
+      || state.hasCardFormText
+      || state.hasSavePaymentMethod
+      || (expectedLast4 && state.purchase && state.targetCardVisible)
+    ) {
+      return state;
+    }
+    await sleep(SLOW_DOM_POLL_MS);
   }
+  throw new Error(`Add a Payment Method modal did not become ready after ${timeoutMs}ms; tail=${state?.tail || ''}`);
+}
+
+async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, options = {}) {
+  const initial = await waitForPaymentEntryState(page, expectedLast4, expectedExpiry, options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS, {
+    refreshOnTimeout: options.refreshOnTimeout !== false,
+  });
+  if (!isPaymentEntryStateReady(initial, expectedLast4) && !initial.canAddCredits && !initial.hasAddCredits) {
+    throw new Error(`Payment method entry not ready after ${options.timeoutMs || DEFAULT_PAYMENT_ENTRY_WAIT_MS}ms, refreshed once and retried; tail=${initial.tail || ''}`);
+  }
+  // 删除旧卡后页面背景可能短暂残留旧卡文字；当前绑卡表单优先，确保重试会重新填写银行卡。
   if (initial.hasSavePaymentMethod || initial.hasCardFormText || initial.hasAddBillingAddress || initial.hasAddressForm) {
     return {alreadyBound: false, entry: 'already_open', state: initial};
   }
+  if (expectedLast4 && initial.purchase && initial.targetCardVisible) {
+    return {alreadyBound: true, entry: 'purchase_modal_already_open', state: initial};
+  }
 
-  if (initial.canAddPaymentMethod) {
+  if (initial.canAddPaymentMethod || initial.hasAddPaymentMethod) {
     const clicked = await clickAddPaymentMethod(page, {required: false});
     await sleep(PAGE_SETTLE_MS);
+    if (!clicked.clicked) {
+      if (!options.requireAddPaymentMethod && (initial.canAddCredits || initial.hasAddCredits)) {
+        const result = await openAddCreditsPaymentPath(page, expectedLast4, expectedExpiry);
+        const state = await getPaymentEntryState(page, expectedLast4, expectedExpiry);
+        return {...result, entry: 'add_credits_after_payment_method_click_miss', state};
+      }
+      throw new Error(`Add a Payment Method is visible but could not be clicked; tail=${clicked.tail || initial.tail || ''}`);
+    }
     return {
       alreadyBound: false,
       entry: 'add_payment_method',
       clicked,
-      state: await getPaymentEntryState(page, expectedLast4, expectedExpiry),
+      state: await waitForPaymentMethodSurfaceAfterClick(page, expectedLast4, expectedExpiry, options.surfaceReadyTimeoutMs || 30000),
     };
   }
 
@@ -2627,7 +4846,24 @@ async function openPaymentMethodEntryPath(page, expectedLast4, expectedExpiry, o
   throw new Error(`Payment method entry not found; tail=${initial.tail}`);
 }
 
-async function waitForCardFormReady(page, debugPort, timeoutMs = 25000) {
+function isRetryablePageLoadError(error) {
+  return /not ready|not found|Missing Stripe field|iframe|did not expose Save payment method|Saved card was not visible|Payment method entry|Add a Payment Method|Add Credits|Button not found|CDP command timeout/i.test(error?.message || '')
+    && !/payment_issue_card_declined|Payment Issue|Your card was declined|Security challenge|3D Secure|hCaptcha|captcha|bank verification|passkey|manual_security_blocker/i.test(error?.message || '');
+}
+
+async function refreshCreditsPageForRetry(page) {
+  await waitForVisibleSecurityChallengeToClear(page);
+  await dismissInterferingOverlays(page).catch(() => null);
+  await navigatePage(page, OPENROUTER_CREDITS_URL, {
+    commandTimeoutMs: DEFAULT_NAVIGATION_COMMAND_TIMEOUT_MS,
+    readyTimeoutMs: DEFAULT_NAVIGATION_READY_TIMEOUT_MS,
+  });
+  await sleep(PAGE_SETTLE_MS);
+  await dismissInterferingOverlays(page).catch(() => null);
+  return getPaymentEntryState(page);
+}
+
+async function waitForCardFormReady(page, debugPort, timeoutMs = DEFAULT_STRIPE_IFRAME_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let lastState = null;
   let lastTargetError = '';
@@ -2638,23 +4874,49 @@ async function waitForCardFormReady(page, debugPort, timeoutMs = 25000) {
     }
     if (debugPort) {
       try {
-        const target = getTargets(debugPort).find((item) => (
-          item.type === 'iframe'
-          && /stripe\.com/.test(item.url)
-          && /elements-inner/.test(item.url)
-          && /componentName=payment/.test(item.url)
-        ));
-        if (target) return {ready: true, source: 'stripe_iframe', targetUrl: target.url.split('#')[0]};
+        const targetWs = await waitForPaymentTarget(debugPort, 3000);
+        if (targetWs) return {ready: true, source: 'stripe_card_iframe'};
       } catch (error) {
         lastTargetError = error.message;
       }
     }
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   return {
     ready: false,
     state: lastState,
     targetError: lastTargetError,
+  };
+}
+
+async function detectCompletedCreditsMainPage(page, purchasePlan, autoTopup) {
+  const state = await getPaymentEntryState(page).catch(() => null);
+  const hasPaymentSurface = !!(
+    state?.hasSavePaymentMethod
+    || state?.hasCardFormText
+    || state?.hasAddBillingAddress
+    || state?.hasAddressForm
+  );
+  if (hasPaymentSurface) return null;
+
+  const autoTopupState = autoTopup?.enabled
+    ? await waitForAutoTopupOverview(page, 5000).catch((error) => ({enabled: false, error: error.message}))
+    : {skipped: true, reason: 'auto_topup_not_requested'};
+  const balanceVerification = purchasePlan?.confirmed && Number.isFinite(purchasePlan.beforeBalance?.balance) && purchasePlan.amount
+    ? await verifyPurchaseBalanceChange(page, purchasePlan.beforeBalance.balance, purchasePlan.amount, 5000).catch((error) => ({verified: false, error: error.message}))
+    : {verified: true, skipped: true, reason: 'purchase_not_requested'};
+
+  const autoTopupOk = !autoTopup?.enabled || autoTopupState?.enabled;
+  const purchaseOk = !purchasePlan?.confirmed || balanceVerification?.verified;
+  if (!autoTopupOk || !purchaseOk) {
+    return null;
+  }
+  return {
+    recovered: true,
+    reason: 'credits_main_page_already_completed',
+    state,
+    autoTopup: autoTopupState,
+    balanceVerification,
   };
 }
 
@@ -2685,7 +4947,7 @@ function normalizeMoneyForCompare(value) {
 
 async function getAutoTopupState(page) {
   return evaluate(page, `(() => {
-    const text = document.body.innerText || '';
+    const text = document.body?.innerText || '';
     const enabledMatch = text.match(/Auto\\s*top[- ]?up\\s+is\\s+enabled\\s+and\\s+will\\s+add\\s+\\$?([\\d,.]+)\\s+credits\\s+automatically\\s+when\\s+your\\s+balance\\s+drops\\s+below\\s+\\$?([\\d,.]+)/i);
     const enabled = !!enabledMatch
       || /Auto\\s*Top[- ]?Up\\s+is\\s+enabled/i.test(text)
@@ -2696,20 +4958,30 @@ async function getAutoTopupState(page) {
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
-    const autoContainer = [...document.querySelectorAll('section,article,div,main,body')]
-      .filter((node) => visible(node) && /Auto\\s*Top[- ]?Up/i.test(textOf(node)))
-      .sort((a, b) => {
-        const ar = a.getBoundingClientRect();
-        const br = b.getBoundingClientRect();
-        const abody = a === document.body ? 1 : 0;
-        const bbody = b === document.body ? 1 : 0;
-        return abody - bbody || (ar.width * ar.height) - (br.width * br.height);
-      })[0] || document.body;
-    const actions = [...autoContainer.querySelectorAll('button,a,[role="button"]')]
+    const labelOf = (node) => [
+      textOf(node),
+      node.getAttribute?.('aria-label') || '',
+      node.getAttribute?.('title') || '',
+    ].filter(Boolean).join(' ').trim().replace(/\\s+/g, ' ');
+    const actions = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
-      .map((node) => textOf(node));
-    const hasEnable = actions.some((label) => /^Enable$/i.test(label) || /^Enable Auto Top[- ]?Up$/i.test(label));
-    const hasManage = actions.some((label) => /^Manage$/i.test(label));
+      .map((node) => {
+        let container = node.parentElement;
+        let containerText = '';
+        for (let depth = 0; container && depth < 8; depth += 1, container = container.parentElement) {
+          if (!visible(container)) continue;
+          const candidateText = textOf(container);
+          if (/Auto\\s*Top[- ]?Up/i.test(candidateText)) {
+            containerText = candidateText;
+            break;
+          }
+        }
+        return {label: labelOf(node), containerText};
+      })
+      .filter((item) => /Auto\\s*Top[- ]?Up/i.test(item.containerText))
+      .map((item) => item.label);
+    const hasEnable = actions.some((label) => /\\bEnable\\b/i.test(label) || /Enable Auto Top[- ]?Up/i.test(label));
+    const hasManage = actions.some((label) => /\\bManage\\b/i.test(label));
     return {
       enabled,
       amount: enabledMatch ? enabledMatch[1] : '',
@@ -2722,7 +4994,7 @@ async function getAutoTopupState(page) {
   })()`);
 }
 
-async function waitForAutoTopupOverview(page, timeoutMs = 8000) {
+async function waitForAutoTopupOverview(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
   let firstManageAt = 0;
@@ -2742,6 +5014,7 @@ async function waitForAutoTopupOverview(page, timeoutMs = 8000) {
 async function findAndClickAutoTopupAction(page, action) {
   let result = null;
   for (let attempt = 0; attempt < 10; attempt += 1) {
+    await dismissBrowserChromeBubbles(page).catch(() => null);
     result = await evaluate(page, `(() => {
       const action = ${JSON.stringify(action)};
       const visible = (node) => {
@@ -2749,13 +5022,19 @@ async function findAndClickAutoTopupAction(page, action) {
         return rect.width > 0 && rect.height > 0;
       };
       const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
+      const labelOf = (node) => [
+        textOf(node),
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('title') || '',
+      ].filter(Boolean).join(' ').trim().replace(/\\s+/g, ' ');
       const hasAutoTopup = (node) => /Auto\\s*Top[- ]?Up/i.test(textOf(node));
+      const actionPattern = new RegExp('(^|\\\\b)' + action + '(\\\\b|$)', 'i');
       const pageAnchors = [...document.querySelectorAll('h1,h2,h3,h4,p,span,div')]
         .filter((node) => visible(node) && hasAutoTopup(node))
         .map((node) => node.getBoundingClientRect());
       const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
-        .map((node) => ({node, rect: node.getBoundingClientRect(), text: textOf(node), disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true'}))
-        .filter((item) => visible(item.node) && !item.disabled && new RegExp('^' + action + '$', 'i').test(item.text));
+        .map((node) => ({node, rect: node.getBoundingClientRect(), text: textOf(node), label: labelOf(node), disabled: !!node.disabled || node.getAttribute('aria-disabled') === 'true'}))
+        .filter((item) => visible(item.node) && !item.disabled && actionPattern.test(item.label));
 
       const scored = buttons.map((button) => {
         let node = button.node.parentElement;
@@ -2791,16 +5070,21 @@ async function findAndClickAutoTopupAction(page, action) {
       if (!target || (!/Auto\\s*Top[- ]?Up/i.test(target.containerText || '') && target.nearestAnchorDistance > 350)) {
         return {
           clicked:false,
-          buttonTexts:buttons.map((button) => button.text),
-          scored: scored.map((item) => ({text:item.text, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
-          tail:(document.body.innerText || '').slice(-2500),
+          buttonTexts:buttons.map((button) => button.label),
+          scored: scored.map((item) => ({text:item.text, label:item.label, score:item.score, nearestAnchorDistance:item.nearestAnchorDistance, containerText:item.containerText})).slice(0, 5),
+          tail:(document.body?.innerText || '').slice(-2500),
         };
       }
       target.node.scrollIntoView({block:'center', inline:'center'});
-      target.node.click();
-      return {clicked:true, label:target.text, score:target.score};
+      const rect = target.node.getBoundingClientRect();
+      return {clicked:true, label:target.label || target.text, score:target.score, rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height}};
     })()`);
     if (result.clicked) {
+      const x = result.rect.x + result.rect.width / 2;
+      const y = result.rect.y + result.rect.height / 2;
+      await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
+      await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
+      await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
       await sleep(1200);
       return result;
     }
@@ -2809,12 +5093,12 @@ async function findAndClickAutoTopupAction(page, action) {
   throw new Error(`Auto top-up ${action} button not found: ${JSON.stringify(result)}`);
 }
 
-async function waitForAutoTopupForm(page, timeoutMs = 10000) {
+async function waitForAutoTopupForm(page, timeoutMs = DEFAULT_DOM_WAIT_MS) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     last = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const fieldText = (input) => [
         input.name,
         input.id,
@@ -2857,7 +5141,7 @@ async function waitForAutoTopupForm(page, timeoutMs = 10000) {
       };
     })()`);
     if (last.ready) return last;
-    await sleep(500);
+    await sleep(DEFAULT_DOM_POLL_MS);
   }
   throw new Error(`Auto top-up form not found: ${last?.tail || ''}`);
 }
@@ -2869,19 +5153,34 @@ async function getAutoTopupEditorSwitchState(page) {
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim();
+    const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
+      || node?.getAttribute('data-state') === 'checked'
+      || node?.hasAttribute('data-checked');
     const labelText = (node) => [
       node.getAttribute?.('aria-label'),
       node.labels?.[0]?.innerText,
       node.closest?.('label')?.innerText,
       node.parentElement?.innerText,
     ].filter(Boolean).join(' ');
+    const direct = document.querySelector('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    if (direct && visible(direct)) {
+      const rect = direct.getBoundingClientRect();
+      return {
+        found: true,
+        wasEnabled: readChecked(direct),
+        selector: direct.id === 'auto-buy' ? '#auto-buy' : '',
+        method: 'auto-buy-switch',
+        rect: {x:rect.x, y:rect.y, width:rect.width, height:rect.height},
+        tail: (document.body?.innerText || '').slice(-1800),
+      };
+    }
     const controls = [...document.querySelectorAll('[role="switch"],button[aria-checked],button[data-state],input[type="checkbox"]')]
       .map((node) => ({
         node,
         rect: node.getBoundingClientRect(),
         text: textOf(node),
         label: labelText(node),
-        checked: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
         role: node.getAttribute('role') || '',
         type: node.getAttribute('type') || '',
       }))
@@ -2890,19 +5189,19 @@ async function getAutoTopupEditorSwitchState(page) {
         if (item.type !== 'checkbox' && !visible(item.node)) return false;
         const text = (item.text || '') + ' ' + (item.label || '');
         return /Enable\\s+auto\\s+top\\s+up/i.test(text)
-          || /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(document.body.innerText || '');
+          || /Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(document.body?.innerText || '');
       });
     const target = controls[0] || null;
     return {
       found: !!target,
       wasEnabled: target ? target.checked : null,
-      tail: (document.body.innerText || '').slice(-1800),
+      tail: (document.body?.innerText || '').slice(-1800),
     };
   })()`);
 }
 
-async function openAutoTopupEditor(page, state) {
-  const action = state.enabled || state.hasManage ? 'Manage' : 'Enable';
+async function openAutoTopupEditor(page, state, forcedAction = '') {
+  const action = forcedAction || (state.enabled || state.hasManage ? 'Manage' : 'Enable');
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await findAndClickAutoTopupAction(page, action);
@@ -2915,192 +5214,107 @@ async function openAutoTopupEditor(page, state) {
       if (editorSwitch?.found) {
         return {opened: true, action, formReady: false, editorSwitch};
       }
-      await sleep(500);
+      await sleep(DEFAULT_DOM_POLL_MS);
     }
   }
   throw new Error(`Auto top-up ${action} did not open the settings form: ${lastError?.message || 'unknown error'}`);
 }
 
-async function replaceInputByRect(page, rect, value) {
-  const x = rect.x + rect.width / 2;
-  const y = rect.y + rect.height / 2;
-  await page.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x, y}).catch(() => {});
-  await page.send('Input.dispatchMouseEvent', {type: 'mousePressed', x, y, button: 'left', clickCount: 1});
-  await page.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x, y, button: 'left', clickCount: 1});
-  await sleep(120);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 4});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 4});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91, nativeVirtualKeyCode: 91});
-  await sleep(80);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8});
-  await sleep(80);
-  await evaluate(page, `(() => {
-    const targetRect = ${JSON.stringify(rect)};
-    const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => {
-        const item = input.getBoundingClientRect();
-        return item.width > 0 && item.height > 0 && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden';
-      })
-      .map((input) => {
-        const item = input.getBoundingClientRect();
-        const distance = Math.abs((item.x + item.width / 2) - (targetRect.x + targetRect.width / 2))
-          + Math.abs((item.y + item.height / 2) - (targetRect.y + targetRect.height / 2));
-        return {input, distance};
-      })
-      .sort((a, b) => a.distance - b.distance);
-    const input = inputs[0]?.input;
-    if (!input || inputs[0].distance > 120) return false;
-    input.focus();
-    const nativeValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
-    if (nativeValue) nativeValue.call(input, '');
-    else input.value = '';
-    try {
-      input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'deleteContentBackward', data:null}));
-    } catch {
-      input.dispatchEvent(new Event('input', {bubbles:true}));
-    }
-    input.dispatchEvent(new Event('change', {bubbles:true}));
-    return true;
-  })()`).catch(() => false);
-  await sleep(120);
-  await page.send('Input.insertText', {text: String(value)});
-  await sleep(180);
+async function replaceAutoTopupInputById(page, selector, value) {
+  const target = await evaluate(page, `(() => {
+    const visible = (node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const input = document.querySelector(${JSON.stringify(selector)});
+    if (!visible(input)) return {found:false, selector:${JSON.stringify(selector)}};
+    // 不直接改 value。先聚焦精确输入框，再用 CDP 键盘事件清空和输入，确保 React 收到人工事件序列。
+    input.scrollIntoView({block:'center', inline:'center'});
+    input.focus({preventScroll:true});
+    return {
+      found:true,
+      before: input.value || '',
+      focused: document.activeElement === input,
+    };
+  })()`);
+  if (!target?.found) return {updated: false, reason: 'auto_topup_input_not_found', selector};
+  if (!target.focused) return {updated: false, reason: 'auto_topup_input_not_focused', selector};
+
+  // type=number 不支持 select()/setSelectionRange；End + 足量 Backspace 是跨平台更稳定的真实清空方式。
+  await clearFocusedFieldWithBackspaces(page, String(target.before || '').length);
+  await typeFocusedFieldWithKeyEvents(page, value);
+  // blur/change 是 OpenRouter 表单把 DOM 值同步到提交状态的关键；仅回读 input.value 会产生假成功。
+  await blurFocusedFieldWithTab(page);
+  await sleep(400);
+  return evaluate(page, `(() => {
+    const input = document.querySelector(${JSON.stringify(selector)});
+    const expected = Number(${JSON.stringify(String(value))});
+    const actual = Number(String(input?.value || '').replace(/[$,\\s]/g, ''));
+    const blurred = document.activeElement !== input;
+    return {
+      updated: Number.isFinite(actual) && actual === expected && blurred,
+      selector:${JSON.stringify(selector)},
+      before:${JSON.stringify(target.before || '')},
+      value: input?.value || '',
+      blurred,
+    };
+  })()`);
 }
 
-async function fillAutoTopupForm(page, threshold, amount) {
-  const fields = await evaluate(page, `(() => {
-    const visible = (node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const labelText = (input) => [
-      input.name,
-      input.id,
-      input.placeholder,
-      input.getAttribute('aria-label'),
-      input.labels?.[0]?.innerText,
-      input.closest('label')?.innerText,
-      input.parentElement?.innerText,
-      input.closest('[role="group"]')?.innerText,
-    ].filter(Boolean).join(' ');
-      const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => visible(input) && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test((input.placeholder || '') + ' ' + labelText(input)))
-      .map((input, index) => ({input, index, text: labelText(input), rect: input.getBoundingClientRect()}));
-    const sortedAmountInputs = inputs
-      .filter((item) => item.input.type === 'number' || /\\$/.test(item.text))
-      .sort((a, b) => a.rect.y - b.rect.y);
-    const thresholdInput = inputs.find((item) => /when credits are below|balance drops below|below|threshold/i.test(item.text)) || sortedAmountInputs[0];
-    const amountInput = inputs.find((item) => item.input !== thresholdInput?.input && /purchase this amount|add.*credits|amount|purchase/i.test(item.text)) || sortedAmountInputs.find((item) => item.input !== thresholdInput?.input) || inputs.find((item) => item.input !== thresholdInput?.input);
-    if (!thresholdInput || !amountInput) {
-      return {
-        inputCount: inputs.length,
-        inputs: inputs.map((item) => ({index:item.index, text:item.text, value:item.input.value})),
-      };
-    }
-    const plain = (item) => ({
-      index: item.index,
-      text: item.text,
-      value: item.input.value,
-      rect: {x:item.rect.x, y:item.rect.y, width:item.rect.width, height:item.rect.height},
-    });
+async function readAutoTopupFormValues(page, threshold, amount) {
+  return evaluate(page, `(() => {
+    const thresholdInput = document.querySelector('input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold');
+    const amountInput = document.querySelector('input#auto-topup-amount[name="amount"], input#auto-topup-amount');
+    const normalize = (input) => Number(String(input?.value || '').replace(/[$,\\s]/g, ''));
+    const expectedThreshold = Number(${JSON.stringify(String(threshold))});
+    const expectedAmount = Number(${JSON.stringify(String(amount))});
+    const currentThreshold = normalize(thresholdInput);
+    const currentAmount = normalize(amountInput);
+    const thresholdBlurred = document.activeElement !== thresholdInput;
+    const amountBlurred = document.activeElement !== amountInput;
     return {
-      threshold: plain(thresholdInput),
-      amount: plain(amountInput),
-      inputCount: inputs.length,
+      updated: Number.isFinite(currentThreshold)
+        && Number.isFinite(currentAmount)
+        && currentThreshold === expectedThreshold
+        && currentAmount === expectedAmount
+        && thresholdBlurred
+        && amountBlurred,
+      threshold: thresholdInput?.value || '',
+      amount: amountInput?.value || '',
+      thresholdBlurred,
+      amountBlurred,
     };
   })()`);
-  if (!fields.threshold || !fields.amount) {
-    throw new Error(`Could not locate Auto top-up fields: ${JSON.stringify(fields)}`);
-  }
+}
 
-  const replaceInput = async (field, value) => {
-    await replaceInputByRect(page, field.rect, String(value));
-    const result = await evaluate(page, `(() => {
-      const field = ${JSON.stringify(field)};
-      const value = ${JSON.stringify(String(value))};
-      const normalizeMoney = (item) => {
-        const number = Number(String(item || '').replace(/[$,\\s]/g, ''));
-        return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
-      };
-      const expected = normalizeMoney(value);
-      const inputs = [...document.querySelectorAll('input')]
-        .filter((input) => {
-          const rect = input.getBoundingClientRect();
-          const label = [input.placeholder, input.labels?.[0]?.innerText, input.parentElement?.innerText].filter(Boolean).join(' ');
-          return rect.width > 0 && rect.height > 0 && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(label);
-        })
-        .map((input, index) => {
-          const rect = input.getBoundingClientRect();
-          const centerX = rect.x + rect.width / 2;
-          const centerY = rect.y + rect.height / 2;
-          const fieldCenterX = field.rect.x + field.rect.width / 2;
-          const fieldCenterY = field.rect.y + field.rect.height / 2;
-          const distance = Math.abs(centerX - fieldCenterX) + Math.abs(centerY - fieldCenterY);
-          return {input, index, rect, distance};
-        })
-        .sort((a, b) => a.distance - b.distance);
-      const target = inputs[0] || null;
-      if (!target || target.distance > 120) {
-        return {
-          updated:false,
-          reason:'target_not_found',
-          inputs:inputs.slice(0, 5).map((item) => ({index:item.index, distance:item.distance, value:item.input.value})),
-        };
-      }
-      const input = target.input;
-      input.blur();
-      return {
-        updated: input.value === value || normalizeMoney(input.value) === expected,
-        index: target.index,
-        distance: target.distance,
-        value: input.value,
-      };
-    })()`);
-    if (!result.updated) {
-      throw new Error(`Auto top-up input did not retain ${value}: ${JSON.stringify(result)}`);
+async function fillAutoTopupForm(page, threshold, amount, options = {}) {
+  let last = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const thresholdInput = await replaceAutoTopupInputById(page, 'input#auto-topup-threshold[name="threshold"], input#auto-topup-threshold', threshold);
+    const amountInput = thresholdInput.updated
+      ? await replaceAutoTopupInputById(page, 'input#auto-topup-amount[name="amount"], input#auto-topup-amount', amount)
+      : {updated: false, reason: 'threshold_not_ready'};
+    const settled = thresholdInput.updated && amountInput.updated
+      ? await readAutoTopupFormValues(page, threshold, amount)
+      : {updated: false};
+    last = {
+      updated: thresholdInput.updated && amountInput.updated && settled.updated,
+      thresholdSet: thresholdInput.updated,
+      amountSet: amountInput.updated,
+      thresholdInput,
+      amountInput,
+      settled,
+      source: 'auto_topup_cdp_key_events_with_blur',
+      clearFirst: options.clearFirst === true,
+      attempt: attempt + 1,
+    };
+    if (last.updated) {
+      return last;
     }
-    await sleep(350);
-    return result;
-  };
-
-  const thresholdInput = await replaceInput(fields.threshold, threshold);
-  const amountInput = await replaceInput(fields.amount, amount);
-  await page.send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9}).catch(() => {});
-  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9}).catch(() => {});
-  await sleep(400);
-  const result = await evaluate(page, `(() => {
-    const visible = (node) => {
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const normalizeMoney = (value) => {
-      const number = Number(String(value || '').replace(/[$,\\s]/g, ''));
-      return Number.isFinite(number) ? Math.round(number * 100) / 100 : null;
-    };
-    const expectedThreshold = normalizeMoney(${JSON.stringify(threshold)});
-    const expectedAmount = normalizeMoney(${JSON.stringify(amount)});
-    const inputs = [...document.querySelectorAll('input')]
-      .filter((input) => visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || ''))
-      .map((input) => ({type:input.type, value:input.value}));
-    const save = [...document.querySelectorAll('button,[role="button"]')]
-      .find((node) => visible(node) && /^Save$/i.test((node.innerText || node.textContent || '').trim()));
-    return {
-      thresholdSet: inputs.some((input) => normalizeMoney(input.value) === expectedThreshold),
-      amountSet: inputs.some((input) => normalizeMoney(input.value) === expectedAmount),
-      saveDisabled: save ? (!!save.disabled || save.getAttribute('aria-disabled') === 'true') : null,
-      inputs,
-    };
-  })()`);
-  if (!result.thresholdSet || !result.amountSet) {
-    throw new Error(`Auto top-up fields did not retain requested values: ${JSON.stringify(result)}`);
+    await sleep(250);
   }
-  if (result.saveDisabled) {
-    return {...result, unchanged: true, fields, thresholdInput, amountInput, dirtyNudge: true};
-  }
-  return {...result, fields, thresholdInput, amountInput, dirtyNudge: true};
+  throw new Error(`Auto top-up form inputs not ready: ${JSON.stringify(last)}`);
 }
 
 async function toggleAutoTopupTo(page, desiredEnabled) {
@@ -3109,6 +5323,24 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
+    const readChecked = (node) => node?.getAttribute('aria-checked') === 'true'
+      || node?.getAttribute('data-state') === 'checked'
+      || node?.hasAttribute('data-checked');
+    const direct = document.querySelector('button#auto-buy[role="switch"],button#auto-buy,[role="switch"][title*="Automatically buy credits" i],button[aria-checked][title*="Automatically buy credits" i]');
+    if (direct && visible(direct)) {
+      const rect = direct.getBoundingClientRect();
+      return {
+        found:true,
+        wasEnabled: readChecked(direct),
+        method:'auto-buy-switch',
+        inputCount:[...document.querySelectorAll('input')].filter((input) => {
+          const item = input.getBoundingClientRect();
+          return item.width > 0 && item.height > 0 && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || '');
+        }).length,
+        rect:{x:rect.x, y:rect.y, width:rect.width, height:rect.height},
+        score:5000,
+      };
+    }
     const textOf = (node) => (node.innerText || node.textContent || '').trim();
     const labelText = (node) => [
       node.getAttribute?.('aria-label'),
@@ -3127,7 +5359,7 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
         label: labelText(node),
         labelNode: checkboxLabel(node),
         rect: node.getBoundingClientRect(),
-        checked: node.getAttribute('aria-checked') === 'true' || node.getAttribute('data-state') === 'checked' || node.checked === true,
+        checked: readChecked(node) || (node.tagName === 'INPUT' && node.checked === true),
         role: node.getAttribute('role') || '',
         type: node.getAttribute('type') || '',
       }))
@@ -3167,7 +5399,7 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
         return rect.width > 0 && rect.height > 0 && !input.disabled && input.type !== 'checkbox' && input.type !== 'radio' && input.type !== 'hidden' && !/search/i.test(input.placeholder || '');
       });
     if (!target || target.score < -1000) {
-      return {found:false, inputCount:visibleInputs.length, tail:(document.body.innerText || '').slice(-1800)};
+      return {found:false, inputCount:visibleInputs.length, tail:(document.body?.innerText || '').slice(-1800)};
     }
     const clickRect = visible(target.node)
       ? target.rect
@@ -3197,6 +5429,20 @@ async function toggleAutoTopupTo(page, desiredEnabled) {
     if (state.found && state.wasEnabled === desiredEnabled) {
       return {...result, verified: state};
     }
+    if (i === 3 && result.method === 'auto-buy-switch') {
+      await evaluate(page, `(() => {
+        const target = document.querySelector('button#auto-buy[role="switch"],button#auto-buy');
+        if (!target) return false;
+        target.scrollIntoView?.({block:'center', inline:'center'});
+        const PointerLikeEvent = window.PointerEvent || MouseEvent;
+        target.dispatchEvent(new PointerLikeEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+        target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+        target.click?.();
+        target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+        return true;
+      })()`).catch(() => false);
+    }
   }
   throw new Error(`Auto top-up switch did not reach ${desiredEnabled ? 'on' : 'off'}: ${JSON.stringify(result)}`);
 }
@@ -3206,47 +5452,84 @@ async function toggleAutoTopupIfNeeded(page) {
 }
 
 async function saveAutoTopup(page) {
-  const result = await evaluate(page, `(() => {
+  const readAndClickSave = () => evaluate(page, `(() => {
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
     const textOf = (node) => (node.innerText || node.textContent || '').trim().replace(/\\s+/g, ' ');
-    const candidates = [...document.querySelectorAll('button,a,[role="button"]')]
+    const submitButtons = [...document.querySelectorAll('form button[type="submit"], button[type="submit"]')]
+      .filter((node) => visible(node) && /^Save$/i.test(textOf(node)));
+    const submitSave = submitButtons.find((node) => !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+    if (submitSave) {
+      submitSave.scrollIntoView({block:'center', inline:'center'});
+      submitSave.click();
+      return {clicked:true, label:textOf(submitSave), method:'submit-save-button'};
+    }
+    const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
       .filter((node) => visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true')
       .map((node) => {
         const text = textOf(node);
-        let container = node.parentElement;
-        let score = /^(Save|Update|Enable Auto Top[- ]?Up|Confirm|Apply)$/i.test(text) ? 1000 : (/Save|Update|Enable Auto Top[- ]?Up|Apply/i.test(text) ? 500 : -1000);
-        let containerText = '';
+        const isSave = /^(Save|Update|Enable Auto Top[- ]?Up|Confirm|Apply)$/i.test(text);
+        let container = node;
+        let containerText = text;
+        let inAutoTopupForm = false;
         for (let depth = 0; container && depth < 10; depth += 1, container = container.parentElement) {
           if (!visible(container)) continue;
           const candidateText = textOf(container);
-          const hasForm = /Auto\\s*Top[- ]?Up|When credits are below|Purchase this amount|Payment Methods/i.test(candidateText);
-          if (!hasForm) continue;
-          const rect = container.getBoundingClientRect();
-          const area = rect.width * rect.height;
-          const isBody = container === document.body;
-          score += 1000 - (isBody ? 500 : 0) - area / 2000;
           containerText = candidateText.slice(0, 800);
-          break;
+          if (/When credits are below|Purchase this amount|Payment Methods/i.test(candidateText)) {
+            inAutoTopupForm = true;
+            break;
+          }
+          if (/Auto\\s*Top\\s*Up|Auto\\s*Top[- ]?Up/i.test(candidateText)) {
+            inAutoTopupForm = true;
+          }
+          if (container === document.body) break;
         }
-        return {node, text, score, containerText};
-      })
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score);
-    const button = candidates[0] || null;
-    if (!button) return {clicked:false, buttons:[...document.querySelectorAll('button,a,[role="button"]')].filter(visible).map((node) => textOf(node)).slice(-30), tail:(document.body.innerText || '').slice(-2500)};
+        return {node, text, isSave, inAutoTopupForm, containerText};
+      });
+    // Auto Top-Up 弹窗里的 Save 是唯一要点的目标；不要再用面积/层级打分，避免页面结构轻微变化时误过滤。
+    const scoped = buttons.filter((item) => item.isSave && item.inAutoTopupForm);
+    const plainSave = buttons.filter((item) => item.isSave && /^Save$/i.test(item.text));
+    const button = scoped[0] || (plainSave.length === 1 ? plainSave[0] : null);
+    if (!button) {
+      const disabledSaves = submitButtons.map((node) => ({
+        text: textOf(node),
+        disabled: !!node.disabled,
+        ariaDisabled: node.getAttribute('aria-disabled') || '',
+      }));
+      return {
+        clicked:false,
+        buttons:buttons.map((item) => item.text).slice(-30),
+        disabledSaves,
+        scopedSaveCount: scoped.length,
+        plainSaveCount: plainSave.length,
+        tail:(document.body?.innerText || '').slice(-2500),
+      };
+    }
     button.node.scrollIntoView({block:'center', inline:'center'});
     button.node.click();
-    return {clicked:true, label:button.text, score:button.score, containerText:button.containerText};
+    return {
+      clicked:true,
+      label:button.text,
+      scoped:button.inAutoTopupForm,
+      containerText:button.containerText,
+    };
   })()`);
+  let result = null;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    result = await readAndClickSave();
+    if (result.clicked) break;
+    // OpenRouter 表单写值后 Save 可能短暂 disabled；等它真正可点再提交，避免把“保存中/解锁中”误判成失败。
+    await sleep(100);
+  }
   if (!result.clicked) throw new Error(`Auto top-up save button not found: ${JSON.stringify(result)}`);
-  await sleep(1800);
+  await sleep(900);
   return result;
 }
 
-async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = 15000) {
+async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = 6000) {
   const expectedThreshold = normalizeMoneyForCompare(threshold);
   const expectedAmount = normalizeMoneyForCompare(amount);
   const deadline = Date.now() + timeoutMs;
@@ -3263,7 +5546,57 @@ async function waitForAutoTopupConfigured(page, threshold, amount, timeoutMs = 1
   throw new Error(`Auto top-up did not reach requested values: ${JSON.stringify(state)}`);
 }
 
-async function configureAutoTopup(page, autoTopup, debugPort = '') {
+async function readAutoTopupConfiguredNow(page, threshold, amount) {
+  const state = await getAutoTopupState(page);
+  const currentThreshold = normalizeMoneyForCompare(state.threshold);
+  const currentAmount = normalizeMoneyForCompare(state.amount);
+  const expectedThreshold = normalizeMoneyForCompare(threshold);
+  const expectedAmount = normalizeMoneyForCompare(amount);
+  return {
+    configured: state.enabled && currentThreshold === expectedThreshold && currentAmount === expectedAmount,
+    state,
+  };
+}
+
+async function retryAutoTopupSaveAfterOverviewMismatch(page, requested, firstError) {
+  const current = await readAutoTopupConfiguredNow(page, requested.threshold, requested.amount).catch(() => null);
+  if (current?.configured) {
+    return {
+      attempted: false,
+      skipped: true,
+      reason: 'overview_already_matched_before_retry',
+      firstError: firstError?.message || String(firstError || ''),
+      state: current.state,
+    };
+  }
+  const stateBeforeRetry = await waitForAutoTopupOverview(page, 2000).catch((error) => ({enabled: true, hasManage: true, error: error.message}));
+  const opened = await openAutoTopupEditor(page, {...stateBeforeRetry, enabled: true, hasManage: true}, 'Manage');
+  const formAfterToggle = opened.formReady
+    ? opened.form
+    : await waitForAutoTopupForm(page, 3000);
+  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
+  const saved = await saveAutoTopup(page);
+  return {
+    attempted: true,
+    reason: 'overview_text_mismatch_after_first_save',
+    firstError: firstError?.message || String(firstError || ''),
+    stateBeforeRetry,
+    opened,
+    formAfterToggle,
+    fields,
+    saved,
+  };
+}
+
+function isAutoTopupSaveButtonUnavailable(error) {
+  return /Auto top-up save button not found:/.test(error?.message || String(error || ''));
+}
+
+function isAutoTopupActionUnavailable(error) {
+  return /Auto top-up (?:Enable|Manage) button not found:/.test(error?.message || String(error || ''));
+}
+
+async function configureAutoTopupAttempt(page, autoTopup, debugPort = '') {
   if (!autoTopup?.enabled) return {configured: false, skipped: true};
   const navigation = await ensureCreditsPage(page);
   const dismissedOverlays = await dismissSaveCardOverlays(page, debugPort);
@@ -3271,7 +5604,18 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
     threshold: autoTopup.threshold,
     amount: autoTopup.amount,
   };
-  let state = await waitForAutoTopupOverview(page);
+  let state = await waitForAutoTopupOverview(page, 5000);
+  if (autoTopup.preserveRules) {
+    if (state.enabled) {
+      return {configured: true, changed: false, requested, preserveRules: true, navigation, dismissedOverlays, state};
+    }
+    const dismissedBeforeEditor = await dismissSaveCardOverlays(page, debugPort);
+    const opened = await openAutoTopupEditor(page, state);
+    const toggled = await toggleAutoTopupIfNeeded(page);
+    state = await waitForAutoTopupOverview(page, 5000);
+    if (!state.enabled) throw new Error('Auto top-up switch did not stay enabled');
+    return {configured: true, changed: true, requested, preserveRules: true, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, state};
+  }
   const currentThreshold = normalizeMoneyForCompare(state.threshold);
   const currentAmount = normalizeMoneyForCompare(state.amount);
   const requestedThreshold = normalizeMoneyForCompare(requested.threshold);
@@ -3279,12 +5623,147 @@ async function configureAutoTopup(page, autoTopup, debugPort = '') {
   if (state.enabled && currentThreshold === requestedThreshold && currentAmount === requestedAmount) {
     return {configured: true, changed: false, requested, navigation, dismissedOverlays, state};
   }
-  await openAutoTopupEditor(page, state);
-  await toggleAutoTopupIfNeeded(page);
-  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount);
-  const saved = fields.unchanged ? {clicked: false, skipped: true, reason: 'values_already_set'} : await saveAutoTopup(page);
-  state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
-  return {configured: true, changed: !fields.unchanged, requested, navigation, dismissedOverlays, fields, saved, state};
+  const dismissedBeforeEditor = await dismissSaveCardOverlays(page, debugPort);
+  const opened = await openAutoTopupEditor(page, state);
+  const toggled = await toggleAutoTopupIfNeeded(page);
+  const formAfterToggle = opened.formReady
+    ? opened.form
+    : await waitForAutoTopupForm(page, 3000);
+  const fields = await fillAutoTopupForm(page, requested.threshold, requested.amount, {clearFirst: true});
+  const saved = await saveAutoTopup(page);
+  let retryAfterOverviewMismatch = {attempted: false};
+  try {
+    state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
+  } catch (error) {
+    retryAfterOverviewMismatch = await retryAutoTopupSaveAfterOverviewMismatch(page, requested, error);
+    state = await waitForAutoTopupConfigured(page, requested.threshold, requested.amount);
+  }
+  return {configured: true, changed: true, requested, navigation, dismissedOverlays, dismissedBeforeEditor, opened, toggled, formAfterToggle, fields, saved, retryAfterOverviewMismatch, state};
+}
+
+async function configureAutoTopup(page, autoTopup, debugPort = '') {
+  const attempts = [];
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await configureAutoTopupAttempt(page, autoTopup, debugPort);
+      return {
+        ...result,
+        saveButtonRecovery: {
+          attempted: attempts.length > 0,
+          attempts,
+        },
+      };
+    } catch (error) {
+      const actionUnavailable = isAutoTopupActionUnavailable(error);
+      const saveButtonUnavailable = isAutoTopupSaveButtonUnavailable(error);
+      // A successful save can close the editor just before our click/readback path
+      // observes it. Treat the requested overview values as authoritative instead
+      // of retrying an already-configured rule or returning a false failure.
+      const recoveredState = await waitForAutoTopupConfigured(
+        page,
+        autoTopup.threshold,
+        autoTopup.amount,
+        4000,
+      ).catch(() => null);
+      if (recoveredState?.configured) {
+        return {
+          configured: true,
+          changed: true,
+          requested: {
+            threshold: autoTopup.threshold,
+            amount: autoTopup.amount,
+          },
+          state: recoveredState,
+          recoveredAfterError: {
+            attempt,
+            reason: 'overview_matched_after_recovery_error',
+            error: error.message || String(error),
+          },
+          saveButtonRecovery: {
+            attempted: attempts.length > 0,
+            attempts,
+          },
+        };
+      }
+      if ((!actionUnavailable && !saveButtonUnavailable) || attempt === maxAttempts) {
+        if (attempts.length > 0) {
+          error.message = `Auto top-up configuration stayed unavailable after ${attempt} attempts: ${error.message}`;
+        }
+        throw error;
+      }
+
+      // The overview can remain in a skeleton state after purchase even though a
+      // later manual visit works. Wait briefly for a late render, then refresh
+      // only the Credits page before retrying Auto Top-Up. The purchase path is
+      // outside this retry loop and must never be replayed here.
+      const delayedState = actionUnavailable
+        ? await waitForAutoTopupOverview(page, 15000).catch(() => null)
+        : null;
+      const loadedAfterWait = !!(delayedState?.enabled || delayedState?.hasEnable || delayedState?.hasManage);
+      const refresh = loadedAfterWait
+        ? {refreshed: false, reason: 'auto_topup_action_loaded_after_wait'}
+        : await commandRefreshCreditsPage(page);
+      attempts.push({
+        attempt,
+        reason: actionUnavailable
+          ? 'auto_topup_action_unavailable'
+          : 'auto_topup_save_button_unavailable',
+        error: error.message || String(error),
+        delayedState,
+        refresh,
+      });
+    }
+  }
+  throw new Error('Auto top-up retry loop ended unexpectedly');
+}
+
+function purchaseVerifiedForOpomCardBinding(purchaseResult) {
+  return !!purchaseResult
+    && purchaseResult.submitted !== false
+    && purchaseResult.balanceVerification?.verified === true
+    && !purchaseResult.skippedByRule;
+}
+
+async function writeOpomCardBindingAfterPurchase(input, purchaseResult, cardSummary, debugDir) {
+  if (!input.opom?.enabled || !purchaseVerifiedForOpomCardBinding(purchaseResult)) {
+    return {cardStatus: 'skipped', resultStatus: 'skipped', reason: input.opom?.enabled ? 'purchase_not_verified' : 'opom_writeback_disabled'};
+  }
+  // 不换卡充值没有新的卡资料，不能调用绑卡接口。完整流程成功后由 server worker
+  // 使用 writeCompletedRow(scopePaymentMethod=false) 写充值结果，避免提前阻断 Auto Top-Up。
+  if (input.purchaseOnly) {
+    return {cardStatus: 'skipped', resultStatus: 'skipped', reason: 'card_binding_out_of_scope'};
+  }
+  if (cardSummary?.paymentMethodAction === 'existing_preserved') {
+    return {
+      cardStatus: 'skipped',
+      resultStatus: 'skipped',
+      reason: 'existing_payment_method_preserved',
+    };
+  }
+  const {row: opomRow = {}, ...opomArgs} = input.opom;
+  const row = {
+    ...opomRow,
+    card_no: opomRow.card_no || input.card?.number || '',
+    card_number: opomRow.card_no || input.card?.number || '',
+    cvv_present: opomRow.cvv_present === true || !!input.card?.cvc,
+  };
+  const details = {
+    cardLast4: cardSummary?.last4 || maskCard(row.card_no || row.card_number).last4 || '',
+    adsPowerUserId: row.ads_power_user_id || input.profileId || '',
+    adsPowerSerialNumber: row.ads_power_serial_number || input.profileNo || '',
+    purchaseAmount: purchaseResult.amount || purchaseResult.ruleDecision?.selectedAmount || '',
+    balanceBefore: purchaseResult.balanceVerification?.beforeBalance ?? purchaseResult.beforeBalance?.balance ?? '',
+    balanceAfter: purchaseResult.balanceVerification?.afterBalance ?? '',
+  };
+  // 业务时机：OpenRouter 充值验证成功后立即写 OPOM 绑卡，不能再等 Auto Top-Up 设置完成。
+  return runLoggedStep('opom-card-binding-after-purchase', debugDir, () => writeCardBinding({
+    ...opomArgs,
+    opomWriteback: true,
+    cardProvider: row.card_provider,
+  }, row, details, {
+    runId: opomArgs.runId,
+  }));
 }
 
 async function waitForAccountState(page, options = {}) {
@@ -3294,7 +5773,7 @@ async function waitForAccountState(page, options = {}) {
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await evaluate(page, `(() => {
-      const text = document.body.innerText || '';
+      const text = document.body?.innerText || '';
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -3332,9 +5811,33 @@ async function waitForAccountState(page, options = {}) {
 
 async function run() {
   const startedAt = Date.now();
-  const input = await startProfileIfNeeded(normalizeInput(parseArgs(process.argv)));
+  const rawInput = normalizeInput(parseArgs(process.argv));
+  const debugDir = rawInput.confirmationDebugDir || '';
+  writeStepDiagnostic(debugDir, 'input-normalized', 'success', {
+    profileNo: rawInput.profileNo,
+    profileId: rawInput.profileId,
+    expectedAccount: rawInput.expectedAccount,
+    startupUrl: rawInput.startupUrl,
+    scopes: {
+      billingAddressOnly: rawInput.billingAddressOnly,
+      autoTopupOnly: rawInput.autoTopupOnly,
+      creditsStatusOnly: rawInput.creditsStatusOnly,
+      purchaseOnly: rawInput.purchaseOnly,
+      zdrOnly: rawInput.zdrOnly,
+      preparePurchaseOnly: rawInput.preparePurchaseOnly,
+      purchaseConfirmed: rawInput.purchase?.confirmed,
+      autoTopupEnabled: rawInput.autoTopup?.enabled,
+      disableZdr: rawInput.disableZdr,
+      enableZdr: rawInput.enableZdr,
+      dataTrainingOnly: rawInput.dataTrainingOnly,
+      enableDataTraining: rawInput.enableDataTraining,
+      disableDataTraining: rawInput.disableDataTraining,
+      refundOnly: rawInput.refundOnly,
+    },
+  });
+  const input = await runLoggedStep('adspower-start-profile', debugDir, () => startProfileIfNeeded(rawInput));
   input.debugPort ||= debugPortFromWs(input.browserWs);
-  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly;
+  const bindsCard = !input.autoTopupOnly && !input.billingAddressOnly && !input.creditsStatusOnly && !input.purchaseOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly;
   const {last4, masked} = bindsCard ? maskCard(input.card.number) : {last4: '', masked: ''};
   const expectedExpiry = bindsCard ? displayExpiry(input.card.expiry) : '';
   if (bindsCard && !last4) throw new Error('Could not determine card last4');
@@ -3342,31 +5845,115 @@ async function run() {
 
   const pageWs = await ensureOpenRouterPage(input);
   const page = await cdp(pageWs);
+  const pageNetworkDiagnostics = await installNetworkDiagnostics(page);
   let payment;
   let accountForRecovery = '';
   let purchasePlanForRecovery = null;
+  let purchaseSideEffectStarted = false;
+  let recoveryCard = {last4, masked, expiry: expectedExpiry};
+  let recoveryPaymentMethodAction = 'uploaded_card_added';
+  let preAddCreditsAutoTopup = {skipped: true, reason: 'auto_topup_pre_disable_removed'};
+  let zdrResult = initialZdrResult(input.disableZdr || input.enableZdr, input.enableZdr);
+  const dataTrainingRequested = input.enableDataTraining || input.disableDataTraining;
+  let dataTrainingResult = initialDataTrainingResult(dataTrainingRequested, input.enableDataTraining);
 
   try {
     await page.send('Runtime.enable');
     await page.send('Page.enable').catch(() => {});
-	    await navigatePage(page, OPENROUTER_CREDITS_URL);
-	    const accountState = await waitForAccountState(page, {
-      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
-    });
+    const dialogAutoAccept = await installJavaScriptDialogAutoAccept(page);
+    writeDiagnostic(debugDir, 'network-diagnostics', {kind: 'network_diagnostics', page: pageNetworkDiagnostics});
+    writeDiagnostic(debugDir, 'dialog-auto-accept', {kind: 'dialog_auto_accept', dialogAutoAccept});
+	    await runLoggedStep('navigate-credits-page', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+	    let accountState = await runLoggedStep('wait-account-state', debugDir, () => waitForAccountState(page, {
+      requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly && !input.zdrOnly && !input.dataTrainingOnly && !input.refundOnly,
+    }), page);
 	    if (accountState.signin || !accountState.account) {
 	      throw new Error(`login_required: OpenRouter credits page is not logged in; tail=${accountState.tail || ''}`);
 	    }
 	    if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
 	      throw new Error(`OpenRouter account mismatch: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
-	    }
+    }
     accountForRecovery = accountState.account;
+
+    if (input.refundOnly) {
+      const refund = await runLoggedStep('refund-openrouter-transactions', debugDir, () => refundOpenRouterTransactions(page), page);
+      return {
+        ok: true,
+        status: refund.refundedCount ? 'refund_completed' : 'refund_unchanged',
+        account: accountState.account,
+        launch: input.launch,
+        refund,
+        paymentMethodAction: refund.refundedCount ? `refunded_${refund.refundedCount}_transactions` : 'no_refundable_transactions',
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
+
+    if (dataTrainingRequested) {
+      const dataTrainingStepName = input.disableDataTraining ? 'disable-openrouter-data-training' : 'enable-openrouter-data-training';
+      dataTrainingResult = await runLoggedStep(
+        dataTrainingStepName,
+        debugDir,
+        () => configureOpenRouterDataTraining(page, input.enableDataTraining),
+        page,
+      );
+      if (input.dataTrainingOnly) {
+        return {
+          ok: true,
+          status: dataTrainingResult.changed
+            ? (input.disableDataTraining ? 'data_training_disabled' : 'data_training_enabled')
+            : 'data_training_unchanged',
+          account: accountState.account,
+          launch: input.launch,
+          zdr: zdrResult,
+          dataTraining: dataTrainingResult,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      await runLoggedStep('navigate-credits-page-after-data-training', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+      accountState = await runLoggedStep('wait-account-state-after-data-training', debugDir, () => waitForAccountState(page, {
+        requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+      }), page);
+      if (accountState.signin || !accountState.account) {
+        throw new Error(`login_required: OpenRouter credits page is not logged in after Data Training configuration; tail=${accountState.tail || ''}`);
+      }
+      if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
+        throw new Error(`OpenRouter account mismatch after Data Training configuration: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
+      }
+      accountForRecovery = accountState.account;
+    }
+
+    if (input.disableZdr || input.enableZdr) {
+      const zdrStepName = input.enableZdr ? 'enable-openrouter-zdr' : 'disable-openrouter-zdr';
+      zdrResult = await runLoggedStep(zdrStepName, debugDir, () => configureOpenRouterZdr(page, input.enableZdr), page);
+      if (input.zdrOnly) {
+        return {
+          ok: true,
+          status: zdrResult.changed ? 'zdr_configured' : 'zdr_unchanged',
+          account: accountState.account,
+          launch: input.launch,
+          zdr: zdrResult,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      await runLoggedStep('navigate-credits-page-after-zdr', debugDir, () => navigatePage(page, OPENROUTER_CREDITS_URL), page);
+      accountState = await runLoggedStep('wait-account-state-after-zdr', debugDir, () => waitForAccountState(page, {
+        requirePaymentEntry: !input.creditsStatusOnly && !input.autoTopupOnly,
+      }), page);
+      if (accountState.signin || !accountState.account) {
+        throw new Error(`login_required: OpenRouter credits page is not logged in after ZDR configuration; tail=${accountState.tail || ''}`);
+      }
+      if (accountState.account.toLowerCase() !== input.expectedAccount.toLowerCase()) {
+        throw new Error(`OpenRouter account mismatch after ZDR configuration: expected ${input.expectedAccount}, got ${accountState.account || '(not found)'}`);
+      }
+      accountForRecovery = accountState.account;
+    }
 
     if (!input.creditsStatusOnly && !input.autoTopupOnly && !accountState.canAddCredits && !accountState.canAddPaymentMethod) {
       throw new Error(`Payment entry not ready after waiting: neither Add Credits nor Add a Payment Method is clickable; disabled=${(accountState.disabledEntryButtons || []).join(',')}; tail=${accountState.tail}`);
     }
     if (input.creditsStatusOnly) {
-      const balance = await getCurrentCreditBalance(page);
-      const autoTopup = await waitForAutoTopupOverview(page).catch((error) => ({
+      const balance = await runLoggedStep('read-credit-balance', debugDir, () => getCurrentCreditBalance(page), page);
+      const autoTopup = await runLoggedStep('read-auto-topup-overview', debugDir, () => waitForAutoTopupOverview(page), page).catch((error) => ({
         configured: false,
         error: error.message,
       }));
@@ -3375,40 +5962,71 @@ async function run() {
         status: 'credits_status',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         balance,
         autoTopup,
         elapsedMs: Date.now() - startedAt,
       };
     }
     const purchasePlan = (input.purchase.confirmed || input.preparePurchaseOnly)
-      ? await resolvePurchasePlan(page, input.preparePurchaseOnly ? {...input.purchase, confirmed: true} : input.purchase)
+      ? await runLoggedStep('resolve-purchase-plan', debugDir, () => resolvePurchasePlan(page, input.preparePurchaseOnly ? {...input.purchase, confirmed: true} : input.purchase), page)
       : input.purchase;
+    const purchaseSkippedByRule = !!purchasePlan.skippedByRule;
+    const skippedPurchaseResult = purchaseSkippedByRule
+      ? {
+        skippedByRule: true,
+        amount: '',
+        ruleDecision: purchasePlan.ruleDecision || null,
+        beforeBalance: purchasePlan.beforeBalance || null,
+        balanceVerification: {
+          verified: true,
+          skipped: true,
+          beforeBalance: purchasePlan.beforeBalance?.balance ?? null,
+          afterBalance: purchasePlan.beforeBalance?.balance ?? null,
+        },
+      }
+      : null;
     purchasePlan.confirmed = input.purchase.confirmed;
     purchasePlanForRecovery = purchasePlan;
+    if (purchaseSkippedByRule) {
+      input.purchase.confirmed = false;
+      input.preparePurchaseOnly = false;
+    }
     if (input.autoTopupOnly) {
-      const paymentMethod = await verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      await runLoggedStep('open-add-credits-auto-topup-only', debugDir, () => openPurchaseCreditsModal(page), page);
+      await sleep(PAGE_SETTLE_MS);
+      const paymentMethod = await runLoggedStep('verify-saved-payment-method-auto-topup', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
+      await runLoggedStep('close-purchase-modal-auto-topup-only', debugDir, () => closePurchaseModal(page), page);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentMethod,
         autoTopup: autoTopupResult,
         elapsedMs: Date.now() - startedAt,
       };
     }
     if (input.purchaseOnly) {
-      const paymentMethod = await verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount);
-      await waitForExactText(page, 'Add Credits', DEFAULT_CREDITS_ENTRY_WAIT_MS);
+      await runLoggedStep('open-add-credits-purchase-only', debugDir, () => openPurchaseCreditsModal(page), page);
       await sleep(PAGE_SETTLE_MS);
-      const purchaseResult = input.purchase.confirmed
-        ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-        : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+      const paymentMethod = await runLoggedStep('verify-saved-payment-method-purchase-only', debugDir, () => verifySavedPaymentMethodForAutoTopup(page, input.expectedAccount), page);
+      let purchaseResult;
+      if (input.purchase.confirmed) {
+        purchaseSideEffectStarted = true;
+        purchaseResult = await runLoggedStep('execute-confirmed-purchase-purchase-only', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+      } else {
+        purchaseResult = input.preparePurchaseOnly
+          ? await runLoggedStep('prepare-purchase-purchase-only', debugDir, () => preparePurchase(page, purchasePlan), page)
+          : skippedPurchaseResult;
+      }
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {}, debugDir);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup-after-purchase-only', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: input.purchase.confirmed
@@ -3416,38 +6034,103 @@ async function run() {
           : (input.preparePurchaseOnly ? 'prepared_purchase_existing' : (autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged')),
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentMethod,
+        preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
+        opomCardWriteback,
         verified: true,
         purchaseModalOpened: input.purchase.confirmed || input.preparePurchaseOnly,
         elapsedMs: Date.now() - startedAt,
       };
     }
-    const removal = input.removeExistingPaymentMethod
-      ? await clearDefaultPaymentMethod(page)
-      : {clearedDefault: false, existingPaymentMethodCount: null, existingPaymentMethods: []};
-    if (input.removeExistingPaymentMethod && removal.existingPaymentMethodCount > 0) {
-      removal.savedCardPickerRemoval = await removeSavedPaymentMethodsFromPicker(page);
-    } else if (input.removeExistingPaymentMethod) {
-      removal.savedCardPickerRemoval = {
-        attempted: false,
-        skipped: true,
-        reason: removal.reason || 'no_existing_payment_methods',
-      };
+    if (input.preserveExistingPaymentMethod) {
+      const paymentMethod = await runLoggedStep(
+        'inspect-saved-payment-method-preserve-mode',
+        debugDir,
+        () => inspectSavedPaymentMethod(page, input.expectedAccount),
+        page,
+      );
+      if (paymentMethod.verified) {
+        await runLoggedStep('open-add-credits-preserved-card', debugDir, () => openPurchaseCreditsModal(page), page);
+        await sleep(PAGE_SETTLE_MS);
+        const existingCard = paymentMethod.paymentMethods[0] || {};
+        const paymentMethodAction = 'existing_preserved';
+        recoveryCard = existingCard;
+        recoveryPaymentMethodAction = paymentMethodAction;
+        let purchaseResult;
+        if (input.purchase.confirmed) {
+          purchaseSideEffectStarted = true;
+          purchaseResult = await runLoggedStep('execute-confirmed-purchase-preserved-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+        } else {
+          purchaseResult = input.preparePurchaseOnly
+            ? await runLoggedStep('prepare-purchase-preserved-card', debugDir, () => preparePurchase(page, purchasePlan), page)
+            : skippedPurchaseResult;
+        }
+        if (input.preparePurchaseOnly) purchaseResult.submitted = false;
+        if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
+        if (!input.purchase.confirmed) await closePurchaseModal(page);
+        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {
+          last4: existingCard.last4 || '',
+          paymentMethodAction,
+        }, debugDir);
+        const autoTopupResult = await runLoggedStep('configure-auto-topup-preserved-card', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
+        return {
+          ok: true,
+          status: input.purchase.confirmed
+            ? 'purchased_existing_preserved'
+            : (input.preparePurchaseOnly ? 'prepared_purchase_existing_preserved' : (autoTopupResult.changed ? 'auto_topup_updated' : 'auto_topup_unchanged')),
+          account: accountState.account,
+          card: existingCard,
+          launch: input.launch,
+          zdr: zdrResult,
+          paymentMethod,
+          paymentMethodAction,
+          preAddCreditsAutoTopup,
+          autoTopup: autoTopupResult,
+          purchase: purchaseResult,
+          opomCardWriteback,
+          verified: true,
+          purchaseModalOpened: input.purchase.confirmed || input.preparePurchaseOnly,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
     }
-    const paymentPath = await openPaymentMethodEntryPath(page, last4, expectedExpiry, {
-      requireAddPaymentMethod: input.billingAddressOnly,
-      timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
-    });
+    const removal = input.removeExistingPaymentMethod
+      ? await runLoggedStep('remove-saved-payment-method', debugDir, () => removeSavedPaymentMethodsFromPicker(page), page)
+      : {attempted: false, skipped: true, reason: 'preserve_existing_payment_method'};
+    let paymentPath;
+    try {
+      paymentPath = await runLoggedStep('open-payment-method-entry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+      }), page);
+    } catch (error) {
+      if (/refreshed once/i.test(error.message || '')) throw error;
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-payment-entry-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-retry', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+    }
     if (paymentPath.alreadyBound) {
-      const purchaseResult = input.purchase.confirmed
-        ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-        : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+      let purchaseResult;
+      if (input.purchase.confirmed) {
+        purchaseSideEffectStarted = true;
+        purchaseResult = await runLoggedStep('execute-confirmed-purchase-existing-card', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+      } else {
+        purchaseResult = input.preparePurchaseOnly
+          ? await runLoggedStep('prepare-purchase-existing-card', debugDir, () => preparePurchase(page, purchasePlan), page)
+          : skippedPurchaseResult;
+      }
       if (input.preparePurchaseOnly) purchaseResult.submitted = false;
       if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
       if (!input.purchase.confirmed) await closePurchaseModal(page);
-      const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+      const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {last4}, debugDir);
+      const autoTopupResult = await runLoggedStep('configure-auto-topup-existing-card', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
       return {
         ok: true,
         status: input.purchase.confirmed
@@ -3458,18 +6141,46 @@ async function run() {
         account: accountState.account,
         card: {last4, masked, expiry: expectedExpiry},
         launch: input.launch,
+        zdr: zdrResult,
         removal,
+        preAddCreditsAutoTopup,
         autoTopup: autoTopupResult,
         purchase: purchaseResult,
+        opomCardWriteback,
         verified: true,
         purchaseModalOpened: true,
         elapsedMs: Date.now() - startedAt,
       };
     }
-    const billingEntry = await openBillingAddressFormIfNeeded(page);
-    const billingAddress = await maybeFillBillingAddress(page, input.billing, input.debugPort);
+    let billingEntry;
+    try {
+      billingEntry = await runLoggedStep('open-billing-address-form', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-billing-entry-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-billing-entry-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+    }
+    let billingAddress;
+    try {
+      billingAddress = await runLoggedStep('fill-billing-address', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      await runLoggedStep('refresh-after-billing-address-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-billing-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: input.billingAddressOnly,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-retry', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    }
     if (input.billingAddressOnly) {
-      const cardForm = await waitForCardFormReady(page, input.debugPort);
+      const cardForm = await runLoggedStep('wait-card-form-ready', debugDir, () => waitForCardFormReady(page, input.debugPort), page);
       if (!cardForm.ready) {
         throw new Error(`Billing address was submitted but card form is not ready; tail=${cardForm.state?.tail || ''}; targetError=${cardForm.targetError || ''}`);
       }
@@ -3478,6 +6189,7 @@ async function run() {
         status: 'billing_address_ready_for_card',
         account: accountState.account,
         launch: input.launch,
+        zdr: zdrResult,
         paymentPath: {
           entry: paymentPath.entry,
           clicked: paymentPath.clicked?.label || '',
@@ -3495,33 +6207,150 @@ async function run() {
       };
     }
 
-    const paymentWs = await waitForPaymentTarget(input.debugPort);
+    const preCardForm = await runLoggedStep('wait-card-form-ready-before-fill', debugDir, () => waitForCardFormReady(page, input.debugPort, 10000), page);
+    if (!preCardForm.ready) {
+      const completedMainPage = await runLoggedStep('detect-completed-main-page-before-card-fill', debugDir, () => detectCompletedCreditsMainPage(page, purchasePlan, input.autoTopup), page);
+      if (completedMainPage?.recovered) {
+        return {
+          ok: true,
+          status: input.purchase.confirmed ? 'purchased_existing' : 'already_bound',
+          account: accountState.account,
+          card: {last4, masked, expiry: expectedExpiry},
+          launch: input.launch,
+          zdr: zdrResult,
+          removal,
+          paymentPath,
+          billingEntry,
+          billingAddress,
+          purchase: input.purchase.confirmed
+            ? {
+                executed: true,
+                recovered: true,
+                recoveryReason: completedMainPage.reason,
+                amount: purchasePlan.amount,
+                ruleDecision: purchasePlan.ruleDecision || null,
+                beforeBalance: purchasePlan.beforeBalance || null,
+                balanceVerification: completedMainPage.balanceVerification,
+              }
+            : skippedPurchaseResult,
+          autoTopup: completedMainPage.autoTopup,
+          verified: true,
+          recovered: completedMainPage,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+      paymentPath = await runLoggedStep('reopen-payment-method-entry-before-card-fill', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-before-card-fill-retry', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-before-card-fill-retry', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+    }
+
+    let paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
     payment = await cdp(paymentWs);
+    await installNetworkDiagnostics(payment);
     await payment.send('Runtime.enable');
     let stripeState;
     try {
-      stripeState = await fillStripeCard(payment, input.card);
+      stripeState = await runLoggedStep('fill-stripe-card', debugDir, () => fillStripeCard(payment, input.card), payment);
     } catch (error) {
-      throw error;
+      if (!isRetryablePageLoadError(error)) throw error;
+      payment.close();
+      payment = null;
+      await runLoggedStep('refresh-after-card-form-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-card-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-after-card-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-after-card-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+      paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
+      payment = await cdp(paymentWs);
+      await installNetworkDiagnostics(payment);
+      await payment.send('Runtime.enable');
+      stripeState = await runLoggedStep('fill-stripe-card-retry', debugDir, () => fillStripeCard(payment, input.card), payment);
     }
 
-    const saveClick = await clickByText(page, 'Save payment method', {required: false});
+    let saveClick;
+    try {
+      stripeState.preSubmit = await runLoggedStep('verify-stripe-card-before-save', debugDir, () => ensureStripeCardReadyForSubmit(payment, input.card), payment);
+      saveClick = await runLoggedStep('click-save-payment-method', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
+    } catch (error) {
+      if (!isRetryablePageLoadError(error)) throw error;
+      if (payment) {
+        payment.close();
+        payment = null;
+      }
+      await runLoggedStep('refresh-after-save-payment-method-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+      paymentPath = await runLoggedStep('open-payment-method-entry-after-save-refresh', debugDir, () => openPaymentMethodEntryPath(page, last4, expectedExpiry, {
+        requireAddPaymentMethod: false,
+        timeoutMs: DEFAULT_PAYMENT_ENTRY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      billingEntry = await runLoggedStep('open-billing-address-form-after-save-refresh', debugDir, () => openBillingAddressFormIfNeeded(page), page);
+      billingAddress = await runLoggedStep('fill-billing-address-after-save-refresh', debugDir, () => maybeFillBillingAddress(page, input.billing, input.debugPort), page);
+      paymentWs = await waitForPaymentTarget(input.debugPort, PAYMENT_TARGET_WAIT_MS);
+      payment = await cdp(paymentWs);
+      await installNetworkDiagnostics(payment);
+      await payment.send('Runtime.enable');
+      stripeState = await runLoggedStep('fill-stripe-card-after-save-refresh', debugDir, () => fillStripeCard(payment, input.card), payment);
+      stripeState.preSubmit = await runLoggedStep('verify-stripe-card-before-save-retry', debugDir, () => ensureStripeCardReadyForSubmit(payment, input.card), payment);
+      saveClick = await runLoggedStep('click-save-payment-method-retry', debugDir, () => waitForClickableText(page, 'Save payment method', DEFAULT_DOM_WAIT_MS, {pollMs: SLOW_DOM_POLL_MS}), page);
+    }
     if (!saveClick.clicked) {
       throw new Error('Add Credits payment path did not expose Save payment method; refusing to click Purchase');
     }
     await sleep(2000);
     await declineStripeLinkPrompts(input.debugPort);
-    const postSave = await waitUntilSaveModalCloses(page);
-    const verified = input.openPurchaseForVerification
-      ? await verifyByPurchaseModal(page, last4, expectedExpiry)
-      : {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
-    const purchaseResult = input.purchase.confirmed
-      ? await executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir)
-      : (input.preparePurchaseOnly ? await preparePurchase(page, purchasePlan) : null);
+    let postSave;
+    let savedCardAfterStalledSave = null;
+    try {
+      postSave = await runLoggedStep('wait-save-modal-closes', debugDir, () => waitUntilSaveModalCloses(page, payment), page);
+    } catch (error) {
+      if (!/Save modal did not close after/i.test(error.message || '') || !input.openPurchaseForVerification) throw error;
+
+      // 某些账号保存卡后 UI 会长期停在 Saving。此处不重填、不重复点击保存，只刷新后核验该卡是否已落库。
+      await runLoggedStep('refresh-after-stalled-card-save', debugDir, () => refreshCreditsPageForRetry(page), page);
+      savedCardAfterStalledSave = await runLoggedStep('verify-saved-card-after-stalled-save', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry, {
+        timeoutMs: SAVE_PAYMENT_METHOD_RECOVERY_WAIT_MS,
+        refreshOnTimeout: false,
+      }), page);
+      postSave = {hasAddCredits: true, recoveredAfterStalledSave: true};
+    }
+    let verified;
+    if (input.openPurchaseForVerification) {
+      if (savedCardAfterStalledSave) {
+        verified = savedCardAfterStalledSave;
+      } else {
+        try {
+          verified = await runLoggedStep('verify-by-purchase-modal', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+        } catch (error) {
+          if (/refreshed once/i.test(error.message || '')) throw error;
+          if (!isRetryablePageLoadError(error)) throw error;
+          await runLoggedStep('refresh-after-purchase-modal-timeout', debugDir, () => refreshCreditsPageForRetry(page), page);
+          verified = await runLoggedStep('verify-by-purchase-modal-retry', debugDir, () => verifyByPurchaseModal(page, last4, expectedExpiry), page);
+        }
+      }
+    } else {
+      verified = {purchase: false, verified: postSave.hasAddCredits, tail: postSave.tail};
+    }
+    let purchaseResult;
+    if (input.purchase.confirmed) {
+      purchaseSideEffectStarted = true;
+      purchaseResult = await runLoggedStep('execute-confirmed-purchase', debugDir, () => executeConfirmedPurchase(page, purchasePlan, input.debugPort, input.confirmationDebugDir), page);
+    } else {
+      purchaseResult = input.preparePurchaseOnly
+        ? await runLoggedStep('prepare-purchase', debugDir, () => preparePurchase(page, purchasePlan), page)
+        : skippedPurchaseResult;
+    }
     if (input.preparePurchaseOnly) purchaseResult.submitted = false;
     if (input.preparePurchaseOnly) purchaseResult.mode = 'prepared_without_submission';
     if (input.openPurchaseForVerification && !input.purchase.confirmed) await closePurchaseModal(page);
-    const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
+    const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, purchaseResult, {last4}, debugDir);
+    const autoTopupResult = await runLoggedStep('configure-auto-topup-final', debugDir, () => configureAutoTopup(page, input.autoTopup, input.debugPort), page);
 
     return {
       ok: true,
@@ -3529,39 +6358,52 @@ async function run() {
       account: accountState.account,
       card: {last4, masked, expiry: expectedExpiry},
       launch: input.launch,
+      zdr: zdrResult,
       removal,
       autoTopup: autoTopupResult,
       purchase: purchaseResult,
+      opomCardWriteback,
+      paymentMethodAction: 'uploaded_card_added',
       linkCheckedAfterUncheck: stripeState.linkChecked,
       postSave: {hasAddCredits: postSave.hasAddCredits},
+      preAddCreditsAutoTopup,
       verified: verified.verified,
       purchaseModalOpened: input.openPurchaseForVerification,
       elapsedMs: Date.now() - startedAt,
       ...(input.verbose ? {stripeValues: stripeState.values} : {}),
     };
   } catch (error) {
-    if (input.purchase.confirmed && /CDP command timeout|Runtime\.evaluate|Runtime\.enable/i.test(error.message || '') && input.debugPort) {
+    if (purchaseSideEffectStarted && input.purchase.confirmed && /CDP command timeout|Runtime\.evaluate|Runtime\.enable/i.test(error.message || '') && input.debugPort) {
       const recovery = await recoverPurchaseAfterAutomationTimeout(page, purchasePlanForRecovery, input.debugPort, input.confirmationDebugDir).catch((recoveryError) => {
         throw recoveryError;
       });
       if (recovery?.recovered) {
+        const recoveredPurchase = {
+          executed: true,
+          amount: purchasePlanForRecovery?.amount || purchasePlanForRecovery?.ruleDecision?.selectedAmount || '',
+          ruleDecision: purchasePlanForRecovery?.ruleDecision || null,
+          beforeBalance: purchasePlanForRecovery?.beforeBalance || null,
+          confirmation: {method: 'timeout_recovery', confirmations: recovery.confirmations},
+          result: {submitted: true, state: {timeoutRecovery: true}},
+          balanceVerification: recovery.balanceVerification,
+        };
+        const opomCardWriteback = await writeOpomCardBindingAfterPurchase(input, recoveredPurchase, {
+          last4: recoveryCard.last4 || '',
+          paymentMethodAction: recoveryPaymentMethodAction,
+        }, debugDir);
         const autoTopupResult = await configureAutoTopup(page, input.autoTopup, input.debugPort);
         return {
           ok: true,
           status: 'purchased_after_timeout_recovery',
           account: accountForRecovery || input.expectedAccount,
-          card: {last4, masked, expiry: expectedExpiry},
+          card: recoveryCard,
           launch: input.launch,
+          zdr: zdrResult,
+          paymentMethodAction: recoveryPaymentMethodAction,
+          preAddCreditsAutoTopup,
           autoTopup: autoTopupResult,
-          purchase: {
-            executed: true,
-            amount: purchasePlanForRecovery?.amount || purchasePlanForRecovery?.ruleDecision?.selectedAmount || '',
-            ruleDecision: purchasePlanForRecovery?.ruleDecision || null,
-            beforeBalance: purchasePlanForRecovery?.beforeBalance || null,
-            confirmation: {method: 'timeout_recovery', confirmations: recovery.confirmations},
-            result: {submitted: true, state: {timeoutRecovery: true}},
-            balanceVerification: recovery.balanceVerification,
-          },
+          purchase: recoveredPurchase,
+          opomCardWriteback,
           verified: true,
           purchaseModalOpened: true,
           elapsedMs: Date.now() - startedAt,

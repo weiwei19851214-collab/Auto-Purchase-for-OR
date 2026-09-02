@@ -43,9 +43,12 @@ export function sendText(res, status, text, contentType = 'text/plain; charset=u
   res.end(text);
 }
 
-export async function sendFile(res, filePath) {
+export async function sendFile(res, filePath, headers = {}) {
   const data = await readFile(filePath);
-  res.writeHead(200, {'Content-Type': MIME[extname(filePath)] || 'application/octet-stream'});
+  res.writeHead(200, {
+    'Content-Type': MIME[extname(filePath)] || 'application/octet-stream',
+    ...headers,
+  });
   res.end(data);
 }
 

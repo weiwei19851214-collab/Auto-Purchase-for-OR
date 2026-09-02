@@ -6,6 +6,41 @@ import {executeRow, runnerArgs, writeResultCsv} from './automation-adapter.mjs';
 import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
+
+const ERROR_ROW_STATUSES = new Set([
+  'failed',
+  'missing_fields',
+  'login_required',
+  'identity_mismatch',
+  'payment_issue_card_declined',
+  'manual_security_blocker',
+  'purchase_unverified',
+]);
+
+function normalizeResultError(result = {}) {
+  if (!ERROR_ROW_STATUSES.has(result.status)) {
+    return {
+      ...result,
+      errorCode: '',
+      errorDetail: '',
+    };
+  }
+  const normalized = simplifyError(result.errorDetail || result.message || result.status, {
+    status: result.status,
+    stage: result.stage,
+  });
+  return {
+    ...result,
+    errorCode: result.errorCode || normalized.errorCode,
+    message: normalized.message,
+    errorDetail: result.errorDetail || normalized.detail,
+    details: {
+      ...(result.details || {}),
+      errorCode: result.errorCode || normalized.errorCode,
+    },
+  };
+}
 
 export class JobWorker {
   constructor(db, options = {}) {
@@ -97,6 +132,7 @@ export class JobWorker {
     if (!rows.length) return;
     const options = JSON.parse(getJob(this.db, jobId)?.options_json || '{}');
     const args = runnerArgs(options);
+    // 本批按创建任务时保存的并发数执行；恢复任务不读取页面临时状态。
     const concurrency = Math.min(rows.length, args.concurrency || 1);
     addEvent(this.db, jobId, 'job.concurrency', `worker concurrency ${concurrency}/${args.concurrency}`, {
       requested: args.concurrency,
@@ -145,17 +181,31 @@ export class JobWorker {
     const options = JSON.parse(job.options_json || '{}');
     const heartbeat = this.startRowHeartbeat(job, row);
     let result;
+    let unexpectedError = false;
     try {
-      result = await this.executeRowFn(csvText, row.raw_index, options);
+      result = await this.executeRowFn(csvText, row.raw_index, {
+        ...options,
+        runtimeLog: {
+          jobId: job.id,
+          rowId: row.id,
+          rowNumber: row.row_number,
+        },
+      });
     } catch (error) {
+      unexpectedError = true;
       result = this.resultFromUnexpectedRowError(error, row);
+    } finally {
+      clearInterval(heartbeat);
+    }
+    result = normalizeResultError(result);
+    if (unexpectedError) {
       await this.writeUnexpectedRowOpomResult(row, result, options);
       addEvent(this.db, job.id, 'row.error', `row ${row.row_number}: ${result.message}`, {
         status: result.status,
         stage: result.stage,
+        errorCode: result.errorCode,
+        errorDetail: result.errorDetail,
       }, row.id);
-    } finally {
-      clearInterval(heartbeat);
     }
     try {
       const finishedAt = nowIso();
@@ -170,10 +220,19 @@ export class JobWorker {
       };
       this.db.prepare(`
         UPDATE job_rows
-        SET status = ?, stage = ?, message = ?, purchase_status = ?, purchase_amount = ?,
+        SET status = ?, stage = ?, error_code = ?, message = ?, error_detail = ?,
+          purchase_status = ?, purchase_amount = ?,
           balance_before = ?, balance_after = ?,
+          ads_power_user_id = COALESCE(NULLIF(?, ''), ads_power_user_id),
+          ads_power_serial_number = COALESCE(NULLIF(?, ''), ads_power_serial_number),
           card_no = COALESCE(NULLIF(?, ''), card_no),
           card_last4 = COALESCE(NULLIF(?, ''), card_last4),
+          payment_method_action = COALESCE(NULLIF(?, ''), payment_method_action),
+          card_provider = COALESCE(NULLIF(?, ''), card_provider),
+          card_type = COALESCE(NULLIF(?, ''), card_type),
+          expires_at = COALESCE(NULLIF(?, ''), expires_at),
+          zdr_status = ?, zdr_changed = ?,
+          data_training_status = ?, data_training_changed = ?,
           auto_topup_status = ?, auto_topup_threshold = ?, auto_topup_amount = ?,
           opom_card_writeback_status = COALESCE(NULLIF(?, ''), opom_card_writeback_status),
           opom_result_writeback_status = COALESCE(NULLIF(?, ''), opom_result_writeback_status),
@@ -186,13 +245,25 @@ export class JobWorker {
       `).run(
         result.status,
         result.stage || '',
+        result.errorCode || '',
         result.message || '',
+        result.errorDetail || '',
         result.details?.purchaseStatus || '',
         result.details?.purchaseAmount || '',
         String(result.details?.balanceBefore ?? ''),
         String(result.details?.balanceAfter ?? ''),
+        result.details?.adsPowerUserId || row.ads_power_user_id || '',
+        result.details?.adsPowerSerialNumber || row.ads_power_serial_number || '',
         result.details?.cardNo || '',
         result.details?.cardLast4 || '',
+        result.details?.paymentMethodAction || '',
+        row.card_provider || result.details?.cardProvider || '',
+        result.details?.cardType || row.card_type || '',
+        result.details?.cardExpiresAt || row.expires_at || '',
+        result.details?.zdrStatus || '',
+        result.details?.zdrChanged || '',
+        result.details?.dataTrainingStatus || '',
+        result.details?.dataTrainingChanged || '',
         result.details?.autoTopupStatus || '',
         result.details?.autoTopupThreshold || '',
         result.details?.autoTopupAmount || '',
@@ -206,9 +277,23 @@ export class JobWorker {
         finishedAt,
         row.id,
       );
+      if (result.details?.paymentMethodAction === 'existing_preserved') {
+        this.db.prepare(`
+          UPDATE job_rows
+          SET ejh_order_no = '',
+            card_no = '',
+            card_provider = '',
+            card_type = '',
+            expires_at = ''
+          WHERE id = ?
+        `).run(row.id);
+      }
       addEvent(this.db, job.id, 'row.finished', `row ${row.row_number}: ${result.status}`, {
         status: result.status,
         stage: result.stage,
+        errorCode: result.errorCode || '',
+        errorDetail: result.errorDetail || '',
+        logDir: result.details?.automationLogDir || '',
         profileStop: result.profileStop,
         adsPowerStatus,
       }, row.id);
@@ -316,6 +401,7 @@ export class JobWorker {
       details: {
         cardLast4: row.card_last4 || '',
         cardNo: row.card_no || '',
+        paymentMethodAction: row.payment_method_action || '',
         opomAccountId: row.opom_account_id || '',
         username: row.username_masked || row.login_email_masked || '',
         loginEmail: row.login_email_masked || row.username_masked || '',
@@ -350,7 +436,7 @@ export class JobWorker {
         status: result.status,
         stage: 'worker.exception',
         message: result.message,
-        errorCode: result.status,
+        errorCode: result.errorCode || result.status,
       });
       result.details = {...(result.details || {}), opomResultWritebackStatus: 'written'};
     } catch {
@@ -365,18 +451,26 @@ export class JobWorker {
       WHERE job_id = ? AND status = 'running'
     `).all(jobId);
     if (!rows.length) return;
-    const safeMessage = redact(message || 'worker failed during row execution');
+    const error = simplifyError(message || 'worker failed during row execution', {
+      status: 'failed',
+      stage: 'worker.error',
+    });
     this.db.prepare(`
       UPDATE job_rows
       SET status = 'failed',
         stage = 'worker.error',
+        error_code = ?,
         message = ?,
+        error_detail = ?,
         finished_at = COALESCE(finished_at, ?),
         updated_at = ?
       WHERE job_id = ? AND status = 'running'
-    `).run(safeMessage, now, now, jobId);
+    `).run(error.errorCode, error.message, error.detail, now, now, jobId);
     for (const row of rows) {
-      addEvent(this.db, jobId, 'row.error', `row ${row.row_number}: ${safeMessage}`, {}, row.id);
+      addEvent(this.db, jobId, 'row.error', `row ${row.row_number}: ${error.message}`, {
+        errorCode: error.errorCode,
+        errorDetail: error.detail,
+      }, row.id);
     }
     updateJobCounts(this.db, jobId);
   }
@@ -389,14 +483,22 @@ export class JobWorker {
       .map((row) => ({
         rawIndex: row.raw_index,
         status: row.status,
+        errorCode: row.error_code || '',
+        errorDetail: row.error_detail || '',
         message: row.message,
         details: {
+          errorCode: row.error_code || '',
           purchaseStatus: row.purchase_status,
           purchaseAmount: row.purchase_amount,
           balanceBefore: row.balance_before,
           balanceAfter: row.balance_after,
           cardLast4: row.card_last4,
           cardNo: row.card_no,
+          paymentMethodAction: row.payment_method_action || '',
+          zdrStatus: row.zdr_status || '',
+          zdrChanged: row.zdr_changed || '',
+          dataTrainingStatus: row.data_training_status || '',
+          dataTrainingChanged: row.data_training_changed || '',
           autoTopupStatus: row.auto_topup_status,
           autoTopupThreshold: row.auto_topup_threshold,
           autoTopupAmount: row.auto_topup_amount,

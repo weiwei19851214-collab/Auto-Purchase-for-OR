@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
-import {chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, join} from 'node:path';
-import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, DEFAULT_ROW_TIMEOUT_MS} from './config.mjs';
+import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
 import {newId, nowIso} from './ids.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import * as childRunner from '../automation/lib/child-runner.mjs';
@@ -9,9 +9,11 @@ import * as common from '../automation/lib/common.mjs';
 import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import * as status from '../automation/lib/status-contract.mjs';
+import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import * as opom from './opom-client.mjs';
 
 const CHILD_OUTPUT_LIMIT = 10 * 1024 * 1024;
+let lastAutomationLogCleanupAt = 0;
 
 const BASE_INPUT_COLUMNS = [
   'status',
@@ -25,11 +27,16 @@ const OPTIONAL_COLUMNS = [
   'ads_power_user_id',
   'ads_power_serial_number',
   'ads_power_group_name',
+  'opom_account_status',
   'opom_health_status',
   'opom_health_reason',
+  'opom_card_status',
   'order_no',
   'ejh_order_no',
   'card_no',
+  'card_provider',
+  'card_type',
+  'expires_at',
   'holder_name',
   'country',
   'address_line1',
@@ -47,12 +54,22 @@ export function safeFileName(name) {
   return safe.endsWith('.csv') ? safe : `${safe}.csv`;
 }
 
+const CARD_PROVIDERS = new Set(['EJH', 'PINGPONG', 'LEGACY']);
+
+function normalizeCardProvider(value) {
+  const normalized = String(value || 'EJH').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return CARD_PROVIDERS.has(normalized) ? normalized : 'EJH';
+}
+
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
-  const concurrency = Math.min(5, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
+  const concurrency = Math.min(10, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
+  const preserveExistingPaymentMethod = !!options.preserveExistingPaymentMethod;
   return {
-    removeExisting: options.removeExisting !== false,
+    removeExisting: !preserveExistingPaymentMethod && options.removeExisting !== false,
+    preserveExistingPaymentMethod,
     stopProfiles: options.stopProfiles !== false,
+    skipAdsPowerMatch: !!options.skipAdsPowerMatch,
     concurrency,
     confirmPurchase: scopePurchase && options.confirmPurchase !== false,
     preparePurchaseOnly: scopePurchase && options.preparePurchaseOnly !== false,
@@ -60,15 +77,29 @@ export function runnerArgs(options = {}) {
     scopePaymentMethod: options.scopePaymentMethod !== false,
     scopePurchase,
     scopeAutoTopup: options.scopeAutoTopup !== false,
+    disableZdr: !!options.disableZdr,
+    enableZdr: !!options.enableZdr,
+    enableDataTraining: !!options.enableDataTraining,
+    disableDataTraining: !!options.disableDataTraining,
+    refundOnly: !!options.refundOnly,
+    autoTopupEnableOnly: !!options.autoTopupEnableOnly,
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
-    rowTimeoutMs: Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS),
+    cardProvider: normalizeCardProvider(options.cardProvider),
+    rowTimeoutMs: Math.min(MAX_ROW_TIMEOUT_MS, Math.max(1000, Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS))),
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',
     adspowerApiKey: options.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',
+    adspowerStartTimeoutMs: options.adspowerStartTimeoutMs || process.env.ADSPOWER_START_TIMEOUT_MS || '',
     opomWriteback: !!options.opomWriteback,
     opomBaseUrl: options.opomBaseUrl || process.env.OPOM_BASE_URL || process.env.OPOM_API_BASE || '',
-    opomRechargeToken: options.opomRechargeToken || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomRechargeToken: options.opomRechargeToken || process.env.RECHARGE_API_TOKEN || process.env.OPOM_RECHARGE_TOKEN || '',
+    opomSecondaryBaseUrl: options.opomSecondaryBaseUrl || process.env.OPOM_SECONDARY_BASE_URL || process.env.OPOM_WRITEBACK_SECONDARY_BASE_URL || '',
+    opomSecondaryRechargeToken: options.opomSecondaryRechargeToken || process.env.OPOM_SECONDARY_RECHARGE_TOKEN || process.env.OPOM_WRITEBACK_SECONDARY_TOKEN || '',
+    opomRequestTimeoutMs: options.opomRequestTimeoutMs || process.env.OPOM_REQUEST_TIMEOUT_MS || '',
+    opomRequestRetries: options.opomRequestRetries || process.env.OPOM_REQUEST_RETRIES || '',
+    opomWritebackRetries: options.opomWritebackRetries || process.env.OPOM_WRITEBACK_RETRIES || '',
+    opomRetryDelayMs: options.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || '',
     runId: options.runId || '',
     adspowerStatusMode: options.adspowerStatusMode || process.env.ADSPOWER_STATUS_MODE || 'disabled',
     adspowerSuccessGroupId: options.adspowerSuccessGroupId || process.env.ADSPOWER_SUCCESS_GROUP_ID || '',
@@ -84,7 +115,7 @@ function requiredInputColumns(args) {
   const scope = plan.executionScope(args);
   const required = [...BASE_INPUT_COLUMNS];
   if (scope.paymentMethod) required.push('exp_month', 'exp_year', 'cvv', 'postal_code');
-  if (scope.autoTopup) required.push('auto_topup_threshold', 'auto_topup_amount');
+  if (scope.autoTopup && !args.autoTopupEnableOnly) required.push('auto_topup_threshold', 'auto_topup_amount');
   if (scope.billingAddress && !scope.paymentMethod) {
     required.push('holder_name', 'country', 'postal_code', 'address_line1', 'city', 'state');
   }
@@ -151,6 +182,9 @@ export async function makeJobFiles(jobId, fileName, csvText) {
 }
 
 export function rowInsertFromDryRun(jobId, row) {
+  const error = row.status === 'missing_fields'
+    ? simplifyError(row.message || (row.missing || []).join(','), {status: row.status, stage: 'input.missing_fields'})
+    : {errorCode: '', message: row.message || '', detail: ''};
   return {
     id: newId('row'),
     jobId,
@@ -166,11 +200,16 @@ export function rowInsertFromDryRun(jobId, row) {
     ejhOrderNo: row.ejhOrderNo || '',
     cardNo: row.cardNo || '',
     cardLast4: row.cardLast4 || '',
+    cardProvider: row.cardProvider || '',
+    cardType: row.cardType || '',
+    cardExpiresAt: row.cardExpiresAt || '',
     purchasePlan: row.purchasePlan || '',
     amount: row.amount || '',
     status: row.status === 'ready' ? 'queued' : row.status,
     stage: row.status === 'ready' ? 'queued' : 'input.missing_fields',
-    message: row.message || '',
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     missingJson: JSON.stringify(row.missing || []),
     updatedAt: nowIso(),
   };
@@ -188,20 +227,33 @@ export function publicJob(row) {
     resultCsvReady: existsSync(row.result_csv_path),
     options: {
       removeExisting: args.removeExisting,
+      preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
       stopProfiles: args.stopProfiles,
       concurrency: args.concurrency,
       confirmPurchase: args.confirmPurchase,
       preparePurchaseOnly: args.preparePurchaseOnly,
       rowTimeoutMs: args.rowTimeoutMs,
+      adspowerStartTimeoutMs: args.adspowerStartTimeoutMs,
       hasAdspowerApiKey: !!args.adspowerApiKey,
       executionScope: plan.scopeSummary(args),
+      disableZdr: args.disableZdr,
+      enableZdr: args.enableZdr,
+      enableDataTraining: args.enableDataTraining,
+      disableDataTraining: args.disableDataTraining,
+      refundOnly: args.refundOnly,
       scopeBillingAddress: args.scopeBillingAddress,
       scopePaymentMethod: args.scopePaymentMethod,
       scopePurchase: args.scopePurchase,
       scopeAutoTopup: args.scopeAutoTopup,
       opomWriteback: args.opomWriteback,
+      cardProvider: args.cardProvider,
       hasOpomRechargeToken: !!args.opomRechargeToken,
       opomBaseUrl: args.opomBaseUrl,
+      opomSecondaryBaseUrl: args.opomSecondaryBaseUrl,
+      opomRequestTimeoutMs: args.opomRequestTimeoutMs,
+      opomRequestRetries: args.opomRequestRetries,
+      opomWritebackRetries: args.opomWritebackRetries,
+      opomRetryDelayMs: args.opomRetryDelayMs,
       runId: args.runId,
       adspowerStatusMode: args.adspowerStatusMode,
       hasAdspowerSuccessGroupTarget: !!(args.adspowerSuccessGroupId || args.adspowerSuccessGroupName),
@@ -238,16 +290,26 @@ export function publicRow(row) {
     ejhOrderNo: row.ejh_order_no,
     cardNo: row.card_no,
     cardLast4: row.card_last4,
+    paymentMethodAction: row.payment_method_action || '',
+    cardProvider: row.card_provider,
+    cardType: row.card_type,
+    cardExpiresAt: row.expires_at,
     purchasePlan: row.purchase_plan,
     amount: row.amount,
     status: row.status,
     stage: row.stage,
+    errorCode: row.error_code || '',
     message: row.message,
+    errorDetail: row.error_detail || '',
     missing: JSON.parse(row.missing_json || '[]'),
     purchaseStatus: row.purchase_status,
     purchaseAmount: row.purchase_amount,
     balanceBefore: row.balance_before,
     balanceAfter: row.balance_after,
+    zdrStatus: row.zdr_status || '',
+    zdrChanged: row.zdr_changed || '',
+    dataTrainingStatus: row.data_training_status || '',
+    dataTrainingChanged: row.data_training_changed || '',
     autoTopupStatus: row.auto_topup_status,
     autoTopupThreshold: row.auto_topup_threshold,
     autoTopupAmount: row.auto_topup_amount,
@@ -285,8 +347,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
     'ads_power_serial_number',
     'username',
     'login_email',
+    'opom_account_status',
     'opom_health_status',
     'opom_health_reason',
+    'opom_card_status',
     'ejh_order_no',
     'cardno',
     'purchase_plan',
@@ -311,8 +375,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
       metadata.adsPowerSerialNumber,
       metadata.username,
       metadata.loginEmail,
+      metadata.opomAccountStatus,
       metadata.opomHealthStatus,
       metadata.opomHealthReason,
+      metadata.opomCardStatus,
       metadata.ejhOrderNo,
       metadata.cardNo,
       plan.safePurchasePlan(source).mode || '',
@@ -326,7 +392,10 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
     const outcome = outcomeByRawIndex.get(index);
     if (outcome) {
       const normalized = normalizeCsvOutcome(outcome);
-      const details = outcome.details || {};
+      const details = {
+        ...(outcome.details || {}),
+        errorCode: outcome.errorCode || outcome.details?.errorCode || '',
+      };
       plan.writeOutcome(outputHeader, output, normalized.status, normalized.message, outcomeDetailsWithMetadata(details, metadata, runId));
     }
     return output;
@@ -352,6 +421,7 @@ function uniqueColumns(columns) {
 }
 
 function outcomeDetailsWithMetadata(details, metadata, runId) {
+  const existingPreserved = details.paymentMethodAction === 'existing_preserved';
   return {
     ...details,
     runId: firstPresent(details.runId, runId),
@@ -361,11 +431,13 @@ function outcomeDetailsWithMetadata(details, metadata, runId) {
     loginEmailMasked: firstPresent(details.loginEmailMasked, metadata.loginEmailMasked),
     adsPowerUserId: firstPresent(details.adsPowerUserId, metadata.adsPowerUserId),
     adsPowerSerialNumber: firstPresent(details.adsPowerSerialNumber, metadata.adsPowerSerialNumber),
+    opomAccountStatus: firstPresent(details.opomAccountStatus, metadata.opomAccountStatus),
     opomHealthStatus: firstPresent(details.opomHealthStatus, metadata.opomHealthStatus),
     opomHealthReason: firstPresent(details.opomHealthReason, metadata.opomHealthReason),
+    opomCardStatus: firstPresent(details.opomCardStatus, metadata.opomCardStatus),
     adsMatchStatus: firstPresent(details.adsMatchStatus, metadata.adsMatchStatus),
-    ejhOrderNo: firstPresent(details.ejhOrderNo, metadata.ejhOrderNo),
-    cardNo: firstPresent(details.cardNo, metadata.cardNo),
+    ejhOrderNo: existingPreserved ? '' : firstPresent(details.ejhOrderNo, metadata.ejhOrderNo),
+    cardNo: existingPreserved ? '' : firstPresent(details.cardNo, metadata.cardNo),
     opomCardWritebackStatus: firstPresent(details.opomCardWritebackStatus, metadata.opomCardWritebackStatus),
     opomResultWritebackStatus: firstPresent(details.opomResultWritebackStatus, metadata.opomResultWritebackStatus),
     adspowerTagStatus: firstPresent(details.adspowerTagStatus, metadata.adspowerTagStatus),
@@ -417,19 +489,55 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   });
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
+  const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
+  const inactiveCardStatus = plan.inactiveOpomCardStatus(row);
+  const scope = plan.executionScope(args);
+  const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  const dataTrainingOnly = scope.dataTraining && !scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  const refundOnly = scope.refund && !scope.zdr && !scope.dataTraining && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
+  if (inactiveCardStatus && !zdrOnly && !dataTrainingOnly && !refundOnly) {
+    const message = `OPOM card status ${inactiveCardStatus} is not ACTIVE; skipped recharge`;
+    const details = {
+      ...plan.rowMetadata(row, {automationLogDir}),
+      automationLogDir,
+      cardLast4: commonAdapter.cardLast4(plan.cardNumber(row)),
+    };
+    await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
+      rowNumber: rawIndex + 2,
+      status: status.STATUSES.FAILED,
+      stage: 'opom.card_status',
+      message,
+      errorCode: 'opom_card_not_active',
+    });
+    return {
+      status: 'skipped',
+      stage: 'opom.card_status',
+      message,
+      details,
+      safeToContinue: true,
+      stopProfile: false,
+    };
+  }
   const missing = plan.validateRow(row, args);
   if (missing.length) {
-    const details = {...plan.rowMetadata(row), cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+    const error = simplifyError(missing.join(','), {
+      status: status.STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+    });
+    const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
     await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
       rowNumber: rawIndex + 2,
       status: status.STATUSES.MISSING_FIELDS,
-      message: missing.join(','),
-      errorCode: status.STATUSES.MISSING_FIELDS,
+      stage: 'input.missing_fields',
+      message: error.message,
+      errorCode: error.errorCode,
     });
     return {
       status: status.STATUSES.MISSING_FIELDS,
       stage: 'input.missing_fields',
-      message: missing.join(','),
+      errorCode: error.errorCode,
+      message: error.message,
+      errorDetail: error.detail,
       details,
       safeToContinue: true,
       stopProfile: true,
@@ -437,6 +545,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
 
   const task = plan.buildClosedLoopTask(row, args);
+  task.adspowerApiBase = args.adspowerApiBase;
+  task.adspowerApiKey = args.adspowerApiKey;
+  task.adspowerStartTimeoutMs = args.adspowerStartTimeoutMs;
+  task.confirmationDebugDir ||= automationLogDir;
   if (!args.scopePurchase || !args.confirmPurchase) {
     task.purchase.confirmed = false;
     task.preparePurchaseOnly = args.scopePurchase && args.preparePurchaseOnly;
@@ -449,16 +561,31 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     const details = args.confirmPurchase
       ? plan.successDetails(row, outcome.result, args)
       : testModeSuccessDetails(row, outcome.result, args, plan, commonAdapter);
+    details.automationLogDir = automationLogDir;
     const purchaseOk = !args.scopePurchase
-      || (args.confirmPurchase ? details.purchaseStatus === 'verified' : details.purchaseStatus === 'prepared_without_submission');
+      || (args.confirmPurchase ? /^(verified|skipped_by_balance_rule)$/.test(details.purchaseStatus) : details.purchaseStatus === 'prepared_without_submission');
     const autoTopupOk = !args.scopeAutoTopup || /^(updated|unchanged)$/.test(details.autoTopupStatus);
-    let completed = purchaseOk && autoTopupOk;
-    if (completed && args.opomWriteback && args.confirmPurchase) {
+    const zdrRequested = args.disableZdr || args.enableZdr;
+    const zdrOk = !zdrRequested || (args.enableZdr
+      ? /^(enabled|already_enabled)$/.test(details.zdrStatus)
+      : /^(disabled|already_disabled)$/.test(details.zdrStatus));
+    const dataTrainingRequested = args.enableDataTraining || args.disableDataTraining;
+    const dataTrainingOk = !dataTrainingRequested || (args.disableDataTraining
+      ? /^(disabled|already_disabled)$/.test(details.dataTrainingStatus)
+      : /^(enabled|already_enabled)$/.test(details.dataTrainingStatus));
+    const refundOk = !args.refundOnly || outcome.result.refund?.verified === true;
+    let completed = purchaseOk && autoTopupOk && zdrOk && dataTrainingOk && refundOk;
+    const opomWritebackComplete = details.opomResultWritebackStatus === 'written';
+    if (completed && args.opomWriteback && args.confirmPurchase && !opomWritebackComplete) {
       try {
         const writeback = await opomAdapter.writeCompletedRow(args, row, details, {rowNumber: rawIndex + 2});
         details.opomCardWritebackStatus = writeback.cardStatus;
         details.opomResultWritebackStatus = writeback.resultStatus;
       } catch (error) {
+        const simplified = simplifyError(error.message || 'OPOM writeback failed after verified purchase', {
+          status: status.STATUSES.FAILED,
+          stage: 'opom.writeback',
+        });
         completed = false;
         details.opomCardWritebackStatus = error.opomCardWritebackStatus || details.opomCardWritebackStatus || 'failed';
         details.opomResultWritebackStatus = error.opomResultWritebackStatus || details.opomResultWritebackStatus || 'failed';
@@ -466,14 +593,16 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           rowNumber: rawIndex + 2,
           status: status.STATUSES.FAILED,
           stage: 'opom.writeback',
-          message: commonAdapter.redact(error.message || 'OPOM writeback failed after verified purchase'),
-          errorCode: 'opom_writeback_failed',
+          message: simplified.message,
+          errorCode: simplified.errorCode,
         });
-        if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+        if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
         return {
           status: status.STATUSES.FAILED,
           stage: 'opom.writeback',
-          message: commonAdapter.redact(error.message || 'OPOM writeback failed after verified purchase'),
+          errorCode: simplified.errorCode,
+          message: simplified.message,
+          errorDetail: simplified.detail,
           details,
           safeToContinue: true,
           stopProfile: true,
@@ -481,7 +610,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         };
       }
     }
-    if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+    if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
     return {
       status: completed ? status.STATUSES.COMPLETED : status.STATUSES.PURCHASE_UNVERIFIED,
       stage: completed ? 'closed_loop.complete' : 'scope.verify',
@@ -496,20 +625,30 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   }
 
   const contract = status.classifyError(outcome.error);
-  const failureDetails = {...plan.rowMetadata(row), cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+  const error = simplifyError(outcome.error, {
+    status: contract.status,
+    stage: contract.stage,
+  });
+  const failureDetails = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+  if (isOpomCardBindingFailure(outcome.error)) {
+    failureDetails.opomCardWritebackStatus = 'failed';
+  }
   await writeNonCompletedOpomResult(opomAdapter, args, row, failureDetails, {
     rowNumber: rawIndex + 2,
     status: contract.status,
-    message: commonAdapter.redact(outcome.error),
-    errorCode: contract.status,
+    stage: contract.stage,
+    message: error.message,
+    errorCode: error.errorCode,
   });
   if (args.stopProfiles && contract.stopProfile) {
-    profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerSerialNumber(row) || plan.adsPowerUserId(row));
+    profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }
   return {
     status: contract.status,
     stage: contract.stage,
-    message: commonAdapter.redact(outcome.error),
+    errorCode: error.errorCode,
+    message: error.message,
+    errorDetail: error.detail,
     details: failureDetails,
     safeToContinue: contract.safeToContinueBatch,
     stopProfile: contract.stopProfile,
@@ -524,6 +663,40 @@ async function writeNonCompletedOpomResult(opomAdapter, args, row, details, cont
     details.opomResultWritebackStatus = 'written';
   } catch {
     details.opomResultWritebackStatus = 'failed';
+  }
+}
+
+function isOpomCardBindingFailure(error) {
+  return /OPOM .*card-binding|\/api\/v1\/recharge\/accounts\/[^/\s]+\/card-binding/i.test(String(error || ''));
+}
+
+function ensureAutomationLogDir(runtimeLog = {}, rawIndex = 0) {
+  cleanupOldAutomationLogs();
+  const jobId = String(runtimeLog.jobId || 'manual').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const rowNumber = String(runtimeLog.rowNumber || rawIndex + 2).replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const rowId = String(runtimeLog.rowId || '').replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const dir = join(LOG_DIR, jobId, `row-${rowNumber}${rowId ? `-${rowId}` : ''}`);
+  mkdirSync(dir, {recursive: true});
+  return dir;
+}
+
+function cleanupOldAutomationLogs() {
+  const retentionHours = Number.isFinite(AUTOMATION_LOG_RETENTION_HOURS) ? AUTOMATION_LOG_RETENTION_HOURS : 48;
+  if (retentionHours <= 0) return;
+  const now = Date.now();
+  if (now - lastAutomationLogCleanupAt < 60 * 60 * 1000) return;
+  lastAutomationLogCleanupAt = now;
+  if (!existsSync(LOG_DIR)) return;
+  const cutoff = now - retentionHours * 60 * 60 * 1000;
+  for (const entry of readdirSync(LOG_DIR, {withFileTypes: true})) {
+    if (!entry.isDirectory()) continue;
+    const path = join(LOG_DIR, entry.name);
+    try {
+      const stat = statSync(path);
+      if (stat.mtimeMs < cutoff) rmSync(path, {recursive: true, force: true});
+    } catch {
+      // Log cleanup is best effort; never block a recharge row.
+    }
   }
 }
 
@@ -552,6 +725,7 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
     : {threshold: '', amount: ''};
   return {
     ...planModule.rowMetadata(row),
+    adsMatchWaived: String(Boolean(args.skipAdsPowerMatch)),
     purchaseStatus: !args.scopePurchase
       ? 'skipped'
       : result.purchase?.mode === 'prepared_without_submission'
@@ -561,6 +735,15 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
     balanceBefore: result.purchase?.beforeBalance?.balance ?? '',
     balanceAfter: '',
     cardLast4: result.card?.last4 || commonModule.cardLast4(planModule.cardNumber(row)),
+    paymentMethodAction: result.paymentMethodAction || '',
+    zdrStatus: (args.disableZdr || args.enableZdr)
+      ? (result.zdr?.status || (result.zdr?.configured ? (args.enableZdr ? 'enabled' : 'disabled') : 'not_configured'))
+      : 'skipped',
+    zdrChanged: (args.disableZdr || args.enableZdr) ? String(Boolean(result.zdr?.changed)) : 'false',
+    dataTrainingStatus: (args.enableDataTraining || args.disableDataTraining)
+      ? (result.dataTraining?.status || (result.dataTraining?.configured ? (args.disableDataTraining ? 'disabled' : 'enabled') : 'not_configured'))
+      : 'skipped',
+    dataTrainingChanged: (args.enableDataTraining || args.disableDataTraining) ? String(Boolean(result.dataTraining?.changed)) : 'false',
     autoTopupStatus: !args.scopeAutoTopup
       ? 'skipped'
       : result.autoTopup?.configured
@@ -572,6 +755,7 @@ function testModeSuccessDetails(row, result, args, planModule, commonModule = co
 }
 
 function completionMessage(args) {
+  if (args.refundOnly) return 'completed selected scope: refund';
   if (!args.scopePurchase) return `completed selected scope: ${plan.scopeSummary(args)}`;
   if (!args.confirmPurchase) return 'completed without purchase submission (test mode)';
   return 'completed';
@@ -591,6 +775,12 @@ async function runClosedLoopChildAsync(bindScript, task, args, childRunner, comm
     let killTimer = null;
     const child = spawn(process.execPath, childArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ADSPOWER_API_BASE: args.adspowerApiBase || process.env.ADSPOWER_API_BASE || '',
+        ADSPOWER_API_KEY: args.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',
+        ADSPOWER_START_TIMEOUT_MS: args.adspowerStartTimeoutMs || process.env.ADSPOWER_START_TIMEOUT_MS || '',
+      },
     });
     const timeout = setTimeout(() => {
       timedOut = true;

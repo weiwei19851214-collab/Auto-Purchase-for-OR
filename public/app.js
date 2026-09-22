@@ -235,12 +235,29 @@
       if (el[key]) el[key].value = saved[key] ?? defaults[key] ?? '';
     }
     el.settingsState.textContent = exists ? '已读取当前浏览器保存的配置。' : '尚未保存本地配置。';
+    renderOpomTokenPreview();
     renderConnectionSummary();
+  }
+
+  function renderOpomTokenPreview() {
+    const preview = el.opomRechargeTokenPreview;
+    if (!preview) return;
+    const token = String(el.opomRechargeToken?.value || '').trim();
+    if (!token) {
+      preview.textContent = '未设置主 Token';
+      return;
+    }
+    if (token.length <= 8) {
+      preview.textContent = `主 Token 已设置（共 ${token.length} 位）`;
+      return;
+    }
+    preview.textContent = `主 Token：${token.slice(0, 4)}…${token.slice(-4)}（共 ${token.length} 位）`;
   }
 
   function saveRuntimeConfig() {
     localStorage.setItem(RUNTIME_CONFIG_KEY, JSON.stringify(runtimeConfig()));
     el.settingsState.textContent = '已保存到当前浏览器。';
+    renderOpomTokenPreview();
     renderConnectionSummary();
     invalidatePreparation();
   }
@@ -1482,6 +1499,7 @@
 
     for (const key of CONFIG_FIELDS) {
       el[key].addEventListener('input', () => {
+        if (key === 'opomRechargeToken') renderOpomTokenPreview();
         el.settingsState.textContent = '配置有未保存的修改。';
         renderConnectionSummary();
         renderSchedulerState(state.scheduler);

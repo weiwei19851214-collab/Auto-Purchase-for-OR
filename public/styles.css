@@ -954,6 +954,7 @@ summary { min-height: 44px; padding: 12px 2px; cursor: pointer; font-weight: 720
 }
 
 .settings-grid .wide { grid-column: 1 / -1; }
+.token-preview { grid-column: 1 / -1; margin-top: -5px; color: var(--secondary); font-size: 12px; }
 .settings-state { min-height: 20px; color: var(--secondary); font-size: 12px; }
 .text-button { margin-right: auto; background: transparent; }
 .destructive { color: var(--red); }

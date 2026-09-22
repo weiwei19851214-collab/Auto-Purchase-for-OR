@@ -18,7 +18,7 @@ const ERROR_ROW_STATUSES = new Set([
   'purchase_unverified',
 ]);
 
-function normalizeResultError(result = {}) {
+export function normalizeResultError(result = {}) {
   if (!ERROR_ROW_STATUSES.has(result.status)) {
     return {
       ...result,
@@ -30,10 +30,12 @@ function normalizeResultError(result = {}) {
     status: result.status,
     stage: result.stage,
   });
+  const preserveBusinessMessage = result.errorCode === 'crypto_insufficient_funds';
   return {
     ...result,
     errorCode: result.errorCode || normalized.errorCode,
-    message: normalized.message,
+    // 虚拟币余额不足要在“阻塞原因”直接展示币种和所需金额，不能被通用错误文案覆盖。
+    message: preserveBusinessMessage ? redact(result.message) : normalized.message,
     errorDetail: result.errorDetail || normalized.detail,
     details: {
       ...(result.details || {}),

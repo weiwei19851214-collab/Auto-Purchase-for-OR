@@ -48,7 +48,12 @@ async function handle(req, res) {
   assertLocalRequest(req);
 
   if (pathname === '/api/health') {
-    sendJson(res, 200, {ok: true, worker: worker.status(), scheduler: autoRechargeScheduler.getState()});
+    sendJson(res, 200, {
+      ok: true,
+      worker: worker.status(),
+      scheduler: autoRechargeScheduler.getState('bank_card'),
+      schedulers: autoRechargeScheduler.getStates(),
+    });
     return;
   }
 
@@ -126,7 +131,7 @@ async function handle(req, res) {
   if (pathname === '/api/scheduler') {
     requireSession(req);
     if (req.method === 'GET') {
-      sendJson(res, 200, autoRechargeScheduler.getState());
+      sendJson(res, 200, autoRechargeScheduler.getState('bank_card'));
       return;
     }
     if (req.method === 'POST') {
@@ -136,9 +141,21 @@ async function handle(req, res) {
     }
   }
 
+  if (req.method === 'POST' && pathname === '/api/scheduler/prepare-now') {
+    requireSession(req);
+    sendJson(res, 200, await autoRechargeScheduler.prepareNow());
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/api/jobs') {
     requireSession(req);
-    sendJson(res, 200, {ok: true, jobs: jobsList(db), worker: worker.status(), scheduler: autoRechargeScheduler.getState()});
+    sendJson(res, 200, {
+      ok: true,
+      jobs: jobsList(db),
+      worker: worker.status(),
+      scheduler: autoRechargeScheduler.getState('bank_card'),
+      schedulers: autoRechargeScheduler.getStates(),
+    });
     return;
   }
 

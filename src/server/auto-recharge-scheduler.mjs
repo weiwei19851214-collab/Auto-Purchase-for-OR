@@ -6,7 +6,8 @@ import {nowIso} from './ids.mjs';
 import {redact} from './redact.mjs';
 import {httpError} from './http-utils.mjs';
 
-const SCHEDULER_ID = 'auto-recharge';
+const LEGACY_SCHEDULER_ID = 'auto-recharge';
+const RECHARGE_MODES = ['bank_card', 'crypto'];
 const DEFAULT_INTERVAL_MS = 30 * 1000;
 const RECHARGE_STATUS = 'needs_recharge';
 
@@ -16,6 +17,7 @@ export class AutoRechargeScheduler {
     this.intervalMs = options.intervalMs || DEFAULT_INTERVAL_MS;
     this.timer = null;
     this.running = false;
+    this.runningModes = new Set();
   }
 
   start() {
@@ -33,24 +35,60 @@ export class AutoRechargeScheduler {
     this.timer = null;
   }
 
-  getState() {
-    return publicState(readSchedulerState(this.db));
+  getState(rechargeMode = 'bank_card') {
+    return publicState(readSchedulerState(this.db, rechargeMode), rechargeMode);
+  }
+
+  getStates() {
+    return Object.fromEntries(RECHARGE_MODES.map((mode) => [mode, this.getState(mode)]));
+  }
+
+  async prepareNow() {
+    const state = readSchedulerState(this.db, 'crypto');
+    const settings = JSON.parse(state.settingsJson || '{}');
+    if (!state.enabled || settings.rechargeMode !== 'crypto') {
+      throw httpError(409, '只有已启用的虚拟币自动充值计划可以立即准备账号');
+    }
+    if (this.runningModes.has('crypto')) throw httpError(409, '虚拟币自动充值计划正在执行，请稍后再试');
+    this.runningModes.add('crypto');
+    this.running = true;
+    updateSchedulerStatus(this.db, 'crypto', {
+      status: 'running',
+      message: '正在从监控系统读取低余额账号并匹配 AdsPower。',
+    });
+    try {
+      await this.runOnce('manual-' + Date.now(), 'crypto');
+    } catch (error) {
+      updateSchedulerStatus(this.db, 'crypto', {
+        status: 'failed',
+        message: redact(error.message || 'auto recharge preparation failed'),
+        lastRunAt: nowIso(),
+      });
+      throw error;
+    } finally {
+      this.runningModes.delete('crypto');
+      this.running = this.runningModes.size > 0;
+    }
+    return this.getState('crypto');
   }
 
   update(payload = {}) {
     if (payload.enabled) {
       const settings = normalizeSettings(payload);
       validateEnabledSettings(settings, payload);
-      writeSchedulerState(this.db, {
+      writeSchedulerState(this.db, settings.rechargeMode, {
         enabled: 1,
         settingsJson: JSON.stringify(settings),
         status: 'enabled',
-        message: '自动充值已启用；将在每小时 15 和 45 分检查 OPOM needs_recharge。',
+        message: settings.rechargeMode === 'crypto'
+          ? '虚拟币自动充值计划已启用；将在每小时 15 和 45 分准备低余额账号。'
+          : '银行卡自动充值已启用；将在每小时 15 和 45 分检查 OPOM needs_recharge。',
         nextRunAt: nextScheduledDate(new Date()).toISOString(),
       });
     } else {
-      const current = readSchedulerState(this.db);
-      writeSchedulerState(this.db, {
+      const rechargeMode = payload.rechargeMode === 'crypto' ? 'crypto' : 'bank_card';
+      const current = readSchedulerState(this.db, rechargeMode);
+      writeSchedulerState(this.db, rechargeMode, {
         enabled: 0,
         settingsJson: current.settingsJson || '{}',
         status: 'disabled',
@@ -58,43 +96,49 @@ export class AutoRechargeScheduler {
         nextRunAt: '',
       });
     }
-    return this.getState();
+    return this.getState(payload.rechargeMode === 'crypto' ? 'crypto' : 'bank_card');
   }
 
   async tick(date = new Date()) {
-    if (this.running) return;
-    const state = readSchedulerState(this.db);
+    await Promise.all(RECHARGE_MODES.map((mode) => this.tickMode(mode, date)));
+  }
+
+  async tickMode(rechargeMode, date = new Date()) {
+    if (this.runningModes.has(rechargeMode)) return;
+    const state = readSchedulerState(this.db, rechargeMode);
     if (!state.enabled) return;
     const slot = scheduleSlot(date);
     if (!slot) {
-      updateSchedulerStatus(this.db, {
+      updateSchedulerStatus(this.db, rechargeMode, {
         nextRunAt: nextScheduledDate(date).toISOString(),
       });
       return;
     }
     if (state.lastSlot === slot) return;
-    updateSchedulerStatus(this.db, {
+    updateSchedulerStatus(this.db, rechargeMode, {
       lastSlot: slot,
       status: 'running',
       message: `自动充值检查中：${slot}`,
       nextRunAt: nextScheduledDate(date).toISOString(),
     });
+    this.runningModes.add(rechargeMode);
     this.running = true;
     try {
-      await this.runOnce(slot);
+      await this.runOnce(slot, rechargeMode);
     } catch (error) {
-      updateSchedulerStatus(this.db, {
+      updateSchedulerStatus(this.db, rechargeMode, {
         status: 'failed',
         message: redact(error.message || 'auto recharge failed'),
         lastRunAt: nowIso(),
       });
     } finally {
-      this.running = false;
+      this.runningModes.delete(rechargeMode);
+      this.running = this.runningModes.size > 0;
     }
   }
 
-  async runOnce(slot) {
-    const state = readSchedulerState(this.db);
+  async runOnce(slot, rechargeMode = 'bank_card') {
+    const state = readSchedulerState(this.db, rechargeMode);
     const settings = JSON.parse(state.settingsJson || '{}');
     const activeJob = this.db.prepare(`
       SELECT id FROM jobs
@@ -103,7 +147,7 @@ export class AutoRechargeScheduler {
       LIMIT 1
     `).get();
     if (activeJob) {
-      updateSchedulerStatus(this.db, {
+      updateSchedulerStatus(this.db, rechargeMode, {
         status: 'skipped_busy',
         message: `已有任务 ${activeJob.id} 在排队或执行，本轮自动充值跳过。`,
         lastRunAt: nowIso(),
@@ -112,6 +156,7 @@ export class AutoRechargeScheduler {
     }
 
     const configuredOptions = settings.options || {};
+    rechargeMode = settings.rechargeMode === 'crypto' ? 'crypto' : 'bank_card';
     const zdrOnly = (!!configuredOptions.disableZdr || !!configuredOptions.enableZdr)
       && configuredOptions.scopeBillingAddress === false
       && configuredOptions.scopePaymentMethod === false
@@ -125,10 +170,14 @@ export class AutoRechargeScheduler {
     const configurationOnly = zdrOnly || dataTrainingOnly;
     const options = {
       ...configuredOptions,
-      opomWriteback: configurationOnly ? false : true,
-      confirmPurchase: configurationOnly ? false : true,
+      rechargeMode,
+      opomWriteback: rechargeMode === 'crypto' || configurationOnly ? false : true,
+      confirmPurchase: rechargeMode === 'crypto' || configurationOnly ? false : true,
       preparePurchaseOnly: false,
-      scopePurchase: configurationOnly ? false : true,
+      scopeBillingAddress: rechargeMode === 'crypto' ? false : configuredOptions.scopeBillingAddress,
+      scopePaymentMethod: rechargeMode === 'crypto' ? false : configuredOptions.scopePaymentMethod,
+      scopePurchase: rechargeMode === 'crypto' ? true : !configurationOnly,
+      scopeAutoTopup: rechargeMode === 'crypto' ? false : configuredOptions.scopeAutoTopup,
     };
     const readyPayload = await readyToRechargePayload({
       ...options,
@@ -136,10 +185,11 @@ export class AutoRechargeScheduler {
       status: RECHARGE_STATUS,
       limit: settings.limit || 100,
       defaults: settings.defaults || {},
+      ignoreCardBinding: rechargeMode === 'crypto',
     });
     let rows = readyPayload.rows || [];
     if (!rows.length) {
-      updateSchedulerStatus(this.db, {
+      updateSchedulerStatus(this.db, rechargeMode, {
         status: 'idle_no_rows',
         message: `OPOM needs_recharge 没有返回可检查账号。`,
         lastRunAt: nowIso(),
@@ -159,11 +209,22 @@ export class AutoRechargeScheduler {
       rows = mergeAdsPowerMatch(rows, matched.results || []);
     }
 
+    if (rechargeMode === 'crypto') {
+      const preparedRows = rows.map(cryptoPreparationRow);
+      writeSchedulerState(this.db, rechargeMode, {
+        settingsJson: JSON.stringify({...settings, preparedRows}),
+        status: 'prepared',
+        message: '已准备 ' + preparedRows.length + ' 个低余额账号并完成 AdsPower 匹配，正在创建虚拟币充值任务。',
+        lastRunAt: nowIso(),
+      });
+    }
+
     const csvText = canonicalCsvFromRows(rows);
-    const fileName = `auto-opom-${settings.group || 'VIP'}-${slot.replace(/[^0-9]/g, '')}.csv`;
+    const modePrefix = rechargeMode === 'crypto' ? 'auto-crypto-opom' : 'auto-opom';
+    const fileName = `${modePrefix}-${settings.group || 'VIP'}-${slot.replace(/[^0-9]/g, '')}.csv`;
     const dryRun = await dryRunPayload({fileName, csvText, options});
     if (!dryRun.ready || !dryRun.liveConfirmationToken) {
-      updateSchedulerStatus(this.db, {
+      updateSchedulerStatus(this.db, rechargeMode, {
         status: 'idle_no_ready_rows',
         message: `自动预检未发现 ready 行：ready=${dryRun.ready || 0} blocked=${dryRun.blocked || 0} skipped=${dryRun.skipped || 0}。`,
         lastRunAt: nowIso(),
@@ -176,11 +237,11 @@ export class AutoRechargeScheduler {
       csvText,
       options,
       liveConfirmationToken: dryRun.liveConfirmationToken,
-      jobName: `auto-${slot.replace(/[:T+-]/g, '')}-${dryRun.ready}`,
+      jobName: `${rechargeMode === 'crypto' ? 'auto-crypto' : 'auto'}-${slot.replace(/[:T+-]/g, '')}-${dryRun.ready}`,
     });
-    updateSchedulerStatus(this.db, {
+    updateSchedulerStatus(this.db, rechargeMode, {
       status: 'queued',
-      message: `自动充值已创建任务 ${created.job.id}，ready=${dryRun.ready}。`,
+      message: `${rechargeMode === 'crypto' ? '虚拟币' : '银行卡'}自动充值已创建任务 ${created.job.id}，ready=${dryRun.ready}。`,
       lastRunAt: nowIso(),
     });
     return created;
@@ -190,6 +251,7 @@ export class AutoRechargeScheduler {
 function normalizeSettings(payload = {}) {
   const options = payload.options || {};
   return {
+    rechargeMode: payload.rechargeMode === 'crypto' ? 'crypto' : 'bank_card',
     group: String(payload.group || 'VIP').trim() || 'VIP',
     status: RECHARGE_STATUS,
     limit: Math.min(200, Math.max(1, Math.floor(Number(payload.limit || 100) || 100))),
@@ -199,7 +261,10 @@ function normalizeSettings(payload = {}) {
 }
 
 function validateEnabledSettings(settings, payload = {}) {
-  if (payload.confirmAutomaticPurchase !== true) {
+  if (settings.rechargeMode === 'crypto' && payload.confirmAutomaticPreparation !== true) {
+    throw httpError(409, '启用虚拟币自动充值计划需要明确确认自动准备低余额账号');
+  }
+  if (settings.rechargeMode !== 'crypto' && payload.confirmAutomaticPurchase !== true) {
     throw httpError(409, '启用自动充值需要明确确认允许按 15/45 分自动创建真实充值任务');
   }
   if (settings.options?.refundOnly) {
@@ -218,12 +283,30 @@ function validateEnabledSettings(settings, payload = {}) {
   if (!args.adspowerApiBase || !args.adspowerApiKey) {
     throw httpError(409, '自动充值需要 AdsPower API 地址和 API key');
   }
+  if (settings.rechargeMode === 'crypto') return;
   if (!args.scopePurchase || !args.confirmPurchase || args.preparePurchaseOnly) {
     throw httpError(409, '自动充值必须启用真实充值范围，不能使用 no-purchase 模式');
   }
   if (!args.opomWriteback) {
     throw httpError(409, '自动充值必须启用 OPOM 结果回写');
   }
+}
+
+function cryptoPreparationRow(row) {
+  return {
+    status: '',
+    recharge_mode: 'crypto',
+    opom_account_id: row.opom_account_id || '',
+    login_email: row.login_email || '',
+    ads_power_user_id: row.ads_power_user_id || '',
+    ads_power_serial_number: row.ads_power_serial_number || '',
+    ads_power_group_name: row.ads_power_group_name || '',
+    opom_account_status: row.opom_account_status || '',
+    opom_health_status: row.opom_health_status || '',
+    opom_health_reason: row.opom_health_reason || '',
+    ads_match_status: row.ads_match_status || 'not_verified',
+    idempotency_key: row.idempotency_key || '',
+  };
 }
 
 function mergeAdsPowerMatch(rows, results) {
@@ -240,8 +323,17 @@ function mergeAdsPowerMatch(rows, results) {
   });
 }
 
-function readSchedulerState(db) {
-  const row = db.prepare('SELECT * FROM scheduler_state WHERE id = ?').get(SCHEDULER_ID);
+function schedulerStateId(rechargeMode) {
+  return 'auto-recharge:' + (rechargeMode === 'crypto' ? 'crypto' : 'bank_card');
+}
+
+function readSchedulerState(db, rechargeMode = 'bank_card') {
+  const id = schedulerStateId(rechargeMode);
+  let row = db.prepare('SELECT * FROM scheduler_state WHERE id = ?').get(id);
+  // 兼容升级前唯一的银行卡计划记录；写入后会迁移到独立 ID。
+  if (!row && rechargeMode === 'bank_card') {
+    row = db.prepare('SELECT * FROM scheduler_state WHERE id = ?').get(LEGACY_SCHEDULER_ID);
+  }
   if (!row) {
     return {
       enabled: 0,
@@ -266,8 +358,8 @@ function readSchedulerState(db) {
   };
 }
 
-function writeSchedulerState(db, values = {}) {
-  const current = readSchedulerState(db);
+function writeSchedulerState(db, rechargeMode, values = {}) {
+  const current = readSchedulerState(db, rechargeMode);
   const now = nowIso();
   db.prepare(`
     INSERT INTO scheduler_state (
@@ -283,7 +375,7 @@ function writeSchedulerState(db, values = {}) {
       message = excluded.message,
       updated_at = excluded.updated_at
   `).run(
-    SCHEDULER_ID,
+    schedulerStateId(rechargeMode),
     values.enabled ?? current.enabled,
     values.settingsJson ?? current.settingsJson,
     values.lastSlot ?? current.lastSlot,
@@ -295,11 +387,11 @@ function writeSchedulerState(db, values = {}) {
   );
 }
 
-function updateSchedulerStatus(db, values = {}) {
-  writeSchedulerState(db, values);
+function updateSchedulerStatus(db, rechargeMode, values = {}) {
+  writeSchedulerState(db, rechargeMode, values);
 }
 
-function publicState(state) {
+function publicState(state, rechargeMode = 'bank_card') {
   let settings = {};
   try {
     settings = JSON.parse(state.settingsJson || '{}');
@@ -317,7 +409,9 @@ function publicState(state) {
     nextRunAt: state.nextRunAt,
     updatedAt: state.updatedAt,
     schedule: '每小时 15 和 45 分',
+    preparedRows: Array.isArray(settings.preparedRows) ? settings.preparedRows : [],
     settings: {
+      rechargeMode: settings.rechargeMode || rechargeMode,
       group: settings.group || 'VIP',
       status: RECHARGE_STATUS,
       limit: settings.limit || 100,

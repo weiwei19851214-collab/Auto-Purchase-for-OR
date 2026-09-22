@@ -45,6 +45,7 @@ export async function dryRunPayload(payload) {
     ? createLiveConfirmation({csvText, options, ready})
     : null;
   return {
+    rechargeMode: plan.args.rechargeMode,
     ok: true,
     fileName: payload.fileName || 'account.csv',
     planned: plan.rows.filter((row) => row.eligible).length,

@@ -36,6 +36,7 @@
     'amount_at_or_above_threshold',
     'auto_topup_threshold',
     'auto_topup_amount',
+    'recharge_mode',
     'idempotency_key',
   ];
 
@@ -60,6 +61,7 @@
 
   const state = {
     source: 'csv',
+    rechargeMode: 'bank_card',
     rows: [],
     fileName: '',
     sessionToken: '',
@@ -67,6 +69,7 @@
     jobs: [],
     worker: {},
     scheduler: {},
+    schedulers: {},
     refreshTimer: 0,
     opomConfirmed: false,
     lastDryRun: null,
@@ -76,6 +79,11 @@
     pendingWindowBlocked: false,
     creatingJob: false,
     cardAllocationSignature: '',
+    schedulerRowsUpdatedAt: '',
+    modeDrafts: {
+      bank_card: null,
+      crypto: null,
+    },
   };
 
   function escapeHtml(value) {
@@ -504,11 +512,12 @@
     const topupAmount = String(numericValue(el.autoTopupAmount, 70));
     return rows.map((row) => ({
       ...row,
+      recharge_mode: state.rechargeMode,
       amount: '',
       balance_threshold: String(rule.threshold),
       amount_below_threshold: String(rule.below),
       amount_at_or_above_threshold: String(rule.atOrAbove),
-      ...(!onlyEnable ? {
+      ...(state.rechargeMode !== 'crypto' && !onlyEnable ? {
         auto_topup_threshold: topupThreshold,
         auto_topup_amount: topupAmount,
       } : {}),
@@ -599,11 +608,15 @@
 
   function rowBlockReason(row) {
     const reasons = [];
+    const errorCode = String(row.error_code || row.errorCode || row.task_error_code || '').trim();
+    if (state.rechargeMode === 'crypto' && errorCode === 'crypto_insufficient_funds') {
+      reasons.push(row.message || row.task_message || '余额不足');
+    }
     if (!row.login_email) reasons.push('缺少账号');
     if (!row.ads_power_user_id && !row.ads_power_serial_number) reasons.push('缺少 AdsPower');
     if (!healthOk(row)) reasons.push(row.opom_health_reason || row.opom_health_status || 'OPOM 异常');
     if (!el.skipMatch.checked && row.ads_match_status !== 'matched') reasons.push('Ads 匹配未完成');
-    if (!isConfigurationOnlyMode() && !el.cardFile.files?.length && row.opom_card_status && !/^(active|激活|1)$/i.test(row.opom_card_status)) {
+    if (state.rechargeMode === 'bank_card' && !isConfigurationOnlyMode() && !el.cardFile.files?.length && row.opom_card_status && !/^(active|激活|1)$/i.test(row.opom_card_status)) {
       reasons.push(`卡状态 ${row.opom_card_status}，执行时跳过`);
     }
     return reasons.join(' · ');
@@ -691,6 +704,7 @@
     el.selectedCount.textContent = String(selected);
     el.blockedCount.textContent = String(blocked);
     el.startButton.disabled = !canStart();
+    el.startButton.textContent = '开始执行';
     el.matchButton.disabled = !state.rows.length || el.skipMatch.checked;
     el.matchButton.textContent = el.skipMatch.checked ? '已跳过匹配' : '匹配 AdsPower';
   }
@@ -705,25 +719,35 @@
 
   function renderControls() {
     const opom = state.source === 'opom';
+    const crypto = state.rechargeMode === 'crypto';
     const configurationOnly = isConfigurationOnlyMode();
     const cardFile = el.cardFile.files?.[0];
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
+    el.rechargeModeHint.textContent = crypto
+      ? '虚拟币充值页面已切换；链上充值规则待定义，当前不会启动银行卡执行器。'
+      : '当前使用银行卡充值流程：支付卡、Billing 和 OpenRouter 购买。';
+    document.body.classList.toggle('recharge-mode-crypto', crypto);
+    for (const button of document.querySelectorAll('[data-recharge-mode]')) {
+      const selected = button.dataset.rechargeMode === state.rechargeMode;
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-checked', String(selected));
+    }
     el.ruleSummary.textContent = ruleText();
     el.autoTopupSummary.textContent = autoTopupText();
     el.balanceThreshold.disabled = configurationOnly;
     el.amountBelow.disabled = configurationOnly;
     el.amountAtOrAbove.disabled = configurationOnly;
-    el.autoTopupEnableOnly.disabled = configurationOnly;
-    el.autoTopupThreshold.disabled = configurationOnly || el.autoTopupEnableOnly.checked;
-    el.autoTopupAmount.disabled = configurationOnly || el.autoTopupEnableOnly.checked;
-    el.cardFileButton.disabled = configurationOnly;
-    el.cardFile.disabled = configurationOnly;
-    el.preserveExistingCard.disabled = configurationOnly || !cardFile;
+    el.autoTopupEnableOnly.disabled = crypto || configurationOnly;
+    el.autoTopupThreshold.disabled = crypto || configurationOnly || el.autoTopupEnableOnly.checked;
+    el.autoTopupAmount.disabled = crypto || configurationOnly || el.autoTopupEnableOnly.checked;
+    el.cardFileButton.disabled = crypto || configurationOnly;
+    el.cardFile.disabled = crypto || configurationOnly;
+    el.preserveExistingCard.disabled = crypto || configurationOnly || !cardFile;
     el.cardFileLabel.textContent = cardFile
       ? `${el.preserveExistingCard.checked ? '有卡保留 · 无卡新增' : '替换'} · ${cardFile.name}`
       : '未选择';
-    el.billingState.disabled = configurationOnly;
+    el.billingState.disabled = crypto || configurationOnly;
     document.querySelector('.three-inputs')?.classList.toggle('scope-control-disabled', configurationOnly);
     document.querySelector('.auto-rule-section')?.classList.toggle('scope-control-disabled', configurationOnly);
     for (const button of document.querySelectorAll('[data-source]')) {
@@ -760,6 +784,33 @@
     renderControls();
   }
 
+  function setRechargeMode(mode) {
+    const next = mode === 'crypto' ? 'crypto' : 'bank_card';
+    if (next === state.rechargeMode) return;
+    state.modeDrafts[state.rechargeMode] = {
+      source: state.source,
+      rows: state.rows.map((row) => ({...row})),
+      fileName: state.fileName,
+      opomConfirmed: state.opomConfirmed,
+      cardAllocationSignature: state.cardAllocationSignature,
+      skipMatch: el.skipMatch.checked,
+    };
+    state.rechargeMode = next;
+    const draft = state.modeDrafts[next];
+    state.source = draft?.source || (next === 'crypto' ? 'opom' : 'csv');
+    state.rows = draft?.rows?.map((row) => ({...row})) || [];
+    state.fileName = draft?.fileName || '';
+    state.opomConfirmed = Boolean(draft?.opomConfirmed);
+    state.cardAllocationSignature = draft?.cardAllocationSignature || '';
+    el.skipMatch.checked = draft ? Boolean(draft.skipMatch) : false;
+    if (next === 'crypto') {
+      el.opomLoadState.textContent = state.rows.length ? '已获取 ' + state.rows.length + ' 条' : '尚未获取';
+    }
+    invalidatePreparation();
+    renderControls();
+    renderSchedulerState(state.schedulers[next] || {});
+  }
+
   function markOpomDirty() {
     if (state.source !== 'opom') return;
     state.opomConfirmed = false;
@@ -779,8 +830,10 @@
       balanceThreshold: String(rule.threshold),
       amountBelowThreshold: String(rule.below),
       amountAtOrAboveThreshold: String(rule.atOrAbove),
-      autoTopupThreshold: enableOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
-      autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
+      ...(state.rechargeMode === 'crypto' ? {} : {
+        autoTopupThreshold: enableOnly ? '' : String(numericValue(el.autoTopupThreshold, 30)),
+        autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
+      }),
     };
   }
 
@@ -799,10 +852,11 @@
         defaults: opomDefaults(),
         addressCsvText: '',
         // 本次上传支付卡表示要换卡，只读取 OPOM 账号信息，不采用当前绑卡状态和卡号。
-        ignoreCardBinding: Boolean(el.cardFile.files?.length),
+        ignoreCardBinding: state.rechargeMode === 'crypto' || Boolean(el.cardFile.files?.length),
       },
     });
-    state.rows = applyCurrentRules(applyAddresses(normalizeApiRows(data.rows, 'opom')));
+    const sourceRows = normalizeApiRows(data.rows, 'opom');
+    state.rows = applyCurrentRules(state.rechargeMode === 'crypto' ? sourceRows : applyAddresses(sourceRows));
     state.fileName = `opom-${group}.csv`;
     state.opomConfirmed = true;
     state.cardAllocationSignature = '';
@@ -828,10 +882,12 @@
 
   function optionsPayload() {
     const configurationOnly = isConfigurationOnlyMode();
+    const crypto = state.rechargeMode === 'crypto';
     const enableZdr = el.enableZdrOnly.checked;
     const hasCardCsv = Boolean(el.cardFile.files?.length);
     const preserveExistingPaymentMethod = !configurationOnly && hasCardCsv && el.preserveExistingCard.checked;
-    return {
+    const options = {
+      rechargeMode: state.rechargeMode,
       scopeBillingAddress: configurationOnly ? false : hasCardCsv,
       scopePaymentMethod: configurationOnly ? false : hasCardCsv,
       scopePurchase: !configurationOnly,
@@ -862,6 +918,16 @@
       adspowerFailureGroupName: '',
       adspowerBlockerGroupName: '',
     };
+    if (!crypto) return options;
+    return {
+      ...options,
+      scopeBillingAddress: false,
+      scopePaymentMethod: false,
+      scopePurchase: true,
+      scopeAutoTopup: false,
+      confirmPurchase: false,
+      opomWriteback: false,
+    };
   }
 
   async function matchAdsPower() {
@@ -878,7 +944,7 @@
             rows: state.rows,
             group: el.opomGroup.value.trim() || 'VIP',
             status: state.source === 'opom' ? opomStatusForRequest() : 'needs_recharge',
-            ignoreCardBinding: Boolean(el.cardFile.files?.length),
+            ignoreCardBinding: state.rechargeMode === 'crypto' || Boolean(el.cardFile.files?.length),
             ...runtimeConfig(),
           },
         });
@@ -931,6 +997,7 @@
   }
 
   async function ensureCardsAllocated() {
+    if (state.rechargeMode === 'crypto') return;
     if (isConfigurationOnlyMode()) {
       state.cardAllocationSignature = '';
       return;
@@ -1164,7 +1231,9 @@
     const options = optionsPayload();
     return {
       enabled,
+      rechargeMode: state.rechargeMode,
       confirmAutomaticPurchase: enabled,
+      confirmAutomaticPreparation: enabled,
       group: el.opomGroup.value.trim() || 'VIP',
       status: 'needs_recharge',
       limit: String(clampInteger(el.opomLimit, 1, 200, 50)),
@@ -1181,6 +1250,8 @@
   function renderSchedulerState(scheduler = {}) {
     if (!el.autoRechargeEnabled || !el.autoRechargeSummary || !scheduler.ok) return;
     state.scheduler = scheduler;
+    const schedulerMode = scheduler.settings?.rechargeMode || state.rechargeMode;
+    state.schedulers[schedulerMode] = scheduler;
     el.autoRechargeEnabled.checked = Boolean(scheduler.enabled);
     el.autoRechargeEnabled.disabled = !scheduler.enabled && (!opomConfigured() || !adsPowerConfigured());
     el.autoRechargeEnabled.title = el.autoRechargeEnabled.disabled
@@ -1196,6 +1267,22 @@
     el.autoRechargeSummary.textContent = summary;
     el.autoRechargeSummary.classList.toggle('success', Boolean(scheduler.enabled) && !/failed/i.test(scheduler.status || ''));
     el.autoRechargeSummary.classList.toggle('warning', /failed|skipped|idle_no_ready/i.test(scheduler.status || ''));
+    if (
+      state.rechargeMode === 'crypto'
+      && scheduler.settings?.rechargeMode === 'crypto'
+      && Array.isArray(scheduler.preparedRows)
+      && scheduler.updatedAt
+      && scheduler.updatedAt !== state.schedulerRowsUpdatedAt
+    ) {
+      state.schedulerRowsUpdatedAt = scheduler.updatedAt;
+      state.source = 'opom';
+      state.rows = normalizeApiRows(scheduler.preparedRows, 'opom');
+      state.fileName = 'auto-crypto-monitor.csv';
+      state.opomConfirmed = true;
+      el.skipMatch.checked = false;
+      el.opomLoadState.textContent = '自动计划已获取 ' + state.rows.length + ' 条';
+      renderRows();
+    }
   }
 
   async function toggleAutoRecharge() {
@@ -1204,7 +1291,9 @@
       el.autoRechargeEnabled.checked = false;
       throw new Error('仅退款属于人工专项操作，不支持自动定时执行');
     }
-    const confirmation = el.zdrOnly.checked
+    const confirmation = state.rechargeMode === 'crypto'
+      ? '启用后，服务端会按计划读取低余额账号、匹配 AdsPower 并自动执行到 OKX Wallet 最终确认界面。确认启用？'
+      : el.zdrOnly.checked
       ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
       : el.enableZdrOnly.checked
         ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
@@ -1221,14 +1310,19 @@
       method: 'POST',
       body: schedulerPayload(enabled),
     });
-    renderSchedulerState(scheduler);
+    let nextScheduler = scheduler;
+    if (enabled && state.rechargeMode === 'crypto') {
+      nextScheduler = await requestJson('/api/scheduler/prepare-now', {method: 'POST'});
+    }
+    renderSchedulerState(nextScheduler);
   }
 
   async function refreshJobs() {
     const data = await requestJson('/api/jobs');
     state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
     state.worker = data.worker || {};
-    renderSchedulerState(data.scheduler || {});
+    state.schedulers = data.schedulers || {bank_card: data.scheduler || {}};
+    renderSchedulerState(state.schedulers[state.rechargeMode] || {});
     renderWorkerAndJobs();
     clearError();
     if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
@@ -1302,6 +1396,9 @@
   }
 
   function bindEvents() {
+    for (const button of document.querySelectorAll('[data-recharge-mode]')) {
+      button.addEventListener('click', () => setRechargeMode(button.dataset.rechargeMode));
+    }
     bindSourceControl();
     el.accountFileButton.addEventListener('click', () => {
       // 浏览器对同一路径文件不会再次触发 change；清空原选择后允许重复导入同一份账号 CSV。

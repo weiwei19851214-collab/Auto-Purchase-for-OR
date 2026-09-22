@@ -23,6 +23,7 @@ const els = {
   cancelButton: document.querySelector('#cancelButton'),
   downloadButton: document.querySelector('#downloadButton'),
   executionBody: document.querySelector('#executionBody'),
+  messageColumnHeader: document.querySelector('#messageColumnHeader'),
   eventsBody: document.querySelector('#eventsBody'),
 };
 
@@ -139,6 +140,8 @@ function render(job, rows, events, worker) {
 }
 
 function renderRows(rows, job) {
+  const messageLabel = job.options?.rechargeMode === 'crypto' ? '阻塞原因' : '消息';
+  if (els.messageColumnHeader) els.messageColumnHeader.textContent = messageLabel;
   if (!rows.length) {
     els.executionBody.innerHTML = '<tr><td class="table-empty" colspan="11">任务暂无行数据。</td></tr>';
     return;
@@ -158,7 +161,7 @@ function renderRows(rows, job) {
         <td data-label="余额">${escapeHtml(row.balanceBefore || '-')} → ${escapeHtml(row.balanceAfter || '-')}</td>
         <td data-label="Auto Top-Up">${escapeHtml(row.autoTopupStatus || '-')}${row.autoTopupThreshold || row.autoTopupAmount ? ` ${escapeHtml(row.autoTopupThreshold || '-')}/${escapeHtml(row.autoTopupAmount || '-')}` : ''}</td>
         <td data-label="卡 / OPOM">${cardOpomText(row)}</td>
-        <td class="message" data-label="消息">${messageCell(row)}</td>
+        <td class="message" data-label="${messageLabel}">${messageCell(row)}</td>
         <td data-label="操作"><div class="row-actions">
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="0" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>从本行继续</button>
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="1" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>重试本行</button>

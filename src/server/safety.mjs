@@ -20,6 +20,7 @@ function sha256(value) {
 export function normalizedOptions(options = {}) {
   const args = runnerArgs(options);
   return {
+    rechargeMode: args.rechargeMode,
     removeExisting: args.removeExisting,
     preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
     stopProfiles: args.stopProfiles,

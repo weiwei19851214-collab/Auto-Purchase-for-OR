@@ -9,6 +9,12 @@ const UNKNOWN_ERROR = Object.freeze({
 
 const RULES = [
   {
+    errorCode: 'crypto_insufficient_funds',
+    message: '虚拟币余额不足',
+    matches: ({text, stage}) => /crypto_insufficient_funds|Insufficient funds|余额不足/i.test(text)
+      || /^crypto\.insufficient_funds$/i.test(stage),
+  },
+  {
     errorCode: 'worker_interrupted',
     message: '执行中断，结果待确认',
     matches: ({text, stage}) => /server restarted during row execution/i.test(text) || /^worker\.interrupted$/i.test(stage),

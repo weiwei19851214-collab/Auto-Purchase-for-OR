@@ -96,6 +96,23 @@ Credits 页后，按下面顺序处理单个账号：
 10. 如果启用 OPOM 写回，先写回卡绑定，再写回充值结果。
 11. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
 
+## 虚拟币充值流程（第一阶段）
+
+操作台顶部可以在“银行卡 / 虚拟币”之间切换。虚拟币模式继续使用 OPOM
+`needs_recharge` 低余额账号、余额充值规则、AdsPower 匹配和任务并发，但不读取
+银行卡、Billing 地址或 Auto Top-Up 配置。
+
+当前虚拟币任务自动执行到钱包确认边界：进入 Credits、确认 `Use crypto` 已开启、
+按余额规则输入金额、点击 `Purchase`、在 Coinbase 页面选择 OKX Wallet，再点击
+`Launch extension`。任务随后保留 SunBrowser 和右侧 OKX Wallet 现场，等待操作者
+核对币种、网络、金额和 Gas。代码不会自动点击钱包里的确认、签名或广播按钮。
+虚拟币浏览器流程位于独立的 `src/automation/crypto_recharge_openrouter_cdp.mjs`；
+银行卡继续使用 `src/automation/bind_openrouter_card_cdp.mjs`，两套支付流程互不调用。
+
+OpenRouter 如果要求输入当前密码，任务记录为人工阻断并保留现场。Coinbase 如果
+返回 `Insufficient funds`，任务记录 `crypto.insufficient_funds`，并保存要求的币种和
+金额；不会重试支付，也不会进入银行卡充值流程。
+
 ## CSV 模板
 
 使用 [openrouter-recharge-input-template.csv](./openrouter-recharge-input-template.csv)

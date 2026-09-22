@@ -13,6 +13,15 @@ export const STATUSES = Object.freeze({
 
 export function classifyError(message) {
   const text = String(message || '');
+  if (/Verification required|Enter your current password|crypto_wallet_confirmation_required|wallet confirmation required/i.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: /password/i.test(text) ? 'identity.reverification' : 'crypto.wallet_confirmation',
+      terminal: true,
+      safeToContinueBatch: false,
+      stopProfile: false,
+      message: text,
+    });
+  }
   if (/missing_fields|Missing .*fields|billing address is required by this account/i.test(text)) {
     return statusRecord(STATUSES.MISSING_FIELDS, {
       stage: 'input.missing_fields',

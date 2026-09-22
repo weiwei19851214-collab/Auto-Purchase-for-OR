@@ -333,6 +333,9 @@ export function buildClosedLoopTask(row, args) {
     billingAddressOnly,
     autoTopupOnly,
     purchaseOnly,
+    // 虚拟币充值复用账号、余额规则和 AdsPower 启动链路，浏览器支付步骤独立执行。
+    cryptoOnly: args.rechargeMode === 'crypto',
+    rechargeMode: args.rechargeMode || 'bank_card',
     autoTopup: {
       enabled: scope.autoTopup,
       preserveRules: !!args.autoTopupEnableOnly,

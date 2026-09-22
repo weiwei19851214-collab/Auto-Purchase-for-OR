@@ -11,6 +11,7 @@ export const PUBLIC_DIR = join(ROOT_DIR, 'public');
 export const AUTOMATION_DIR = join(ROOT_DIR, 'src/automation');
 export const AUTOMATION_LIB_DIR = join(AUTOMATION_DIR, 'lib');
 export const BIND_SCRIPT = join(AUTOMATION_DIR, 'bind_openrouter_card_cdp.mjs');
+export const CRYPTO_RECHARGE_SCRIPT = join(AUTOMATION_DIR, 'crypto_recharge_openrouter_cdp.mjs');
 export const BATCH_SCRIPT = join(AUTOMATION_DIR, 'batch_recharge_openrouter_cards_cdp.mjs');
 
 export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4100);

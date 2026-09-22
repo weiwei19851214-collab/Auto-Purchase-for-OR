@@ -12,7 +12,16 @@
       <div class="toolbar-inner">
         <div class="title-lockup">
           <span class="eyebrow">OpenRouter 充值</span>
-          <h1>充值准备</h1>
+          <div class="title-row">
+            <h1>充值准备</h1>
+            <section class="channel-switch-panel" aria-label="充值通道">
+              <span class="field-title">充值通道</span>
+              <div class="segmented channel-switch" role="radiogroup" aria-label="充值通道">
+                <button class="segment is-selected" type="button" role="radio" aria-checked="true" data-recharge-mode="bank_card">银行卡</button>
+                <button class="segment" type="button" role="radio" aria-checked="false" data-recharge-mode="crypto">虚拟币</button>
+              </div>
+            </section>
+          </div>
         </div>
         <nav class="toolbar-actions" aria-label="任务与设置">
           <div class="toolbar-button worker-button" id="workerButton" role="status" aria-live="polite">
@@ -31,6 +40,8 @@
         <span id="errorText"></span>
         <button type="button" id="dismissError">关闭</button>
       </div>
+
+      <p class="sr-only recharge-mode-hint" id="rechargeModeHint" role="status" aria-live="polite">当前使用银行卡充值流程：支付卡、Billing 和 OpenRouter 购买。</p>
 
       <section class="preparation-panel" aria-labelledby="preparationTitle">
         <h2 class="sr-only" id="preparationTitle">准备工作</h2>
@@ -192,6 +203,7 @@
               <input id="concurrency" type="number" min="1" max="10" step="1" value="1" inputmode="numeric" />
             </label>
           </article>
+
         </div>
       </section>
 

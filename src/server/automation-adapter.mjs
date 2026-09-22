@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
 import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, join} from 'node:path';
-import {BIND_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
+import {BIND_SCRIPT, CRYPTO_RECHARGE_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
 import {newId, nowIso} from './ids.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import * as childRunner from '../automation/lib/child-runner.mjs';
@@ -20,6 +20,7 @@ const BASE_INPUT_COLUMNS = [
 ];
 
 const OPTIONAL_COLUMNS = [
+  'recharge_mode',
   'ID',
   'username',
   'opom_account_id',
@@ -61,11 +62,18 @@ function normalizeCardProvider(value) {
   return CARD_PROVIDERS.has(normalized) ? normalized : 'EJH';
 }
 
+function normalizeRechargeMode(value) {
+  return String(value || 'bank_card').trim().toLowerCase() === 'crypto'
+    ? 'crypto'
+    : 'bank_card';
+}
+
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
   const concurrency = Math.min(10, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
   const preserveExistingPaymentMethod = !!options.preserveExistingPaymentMethod;
   return {
+    rechargeMode: normalizeRechargeMode(options.rechargeMode),
     removeExisting: !preserveExistingPaymentMethod && options.removeExisting !== false,
     preserveExistingPaymentMethod,
     stopProfiles: options.stopProfiles !== false,
@@ -226,6 +234,7 @@ export function publicJob(row) {
     dryRunStatus: row.dry_run_status,
     resultCsvReady: existsSync(row.result_csv_path),
     options: {
+      rechargeMode: args.rechargeMode,
       removeExisting: args.removeExisting,
       preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
       stopProfiles: args.stopProfiles,
@@ -471,7 +480,6 @@ export async function executeRow(csvText, rawIndex, options = {}) {
 }
 
 export async function executeRowWithAdapters(csvText, rawIndex, options = {}, adapters = {}) {
-  const bindScript = adapters.bindScript || BIND_SCRIPT;
   const childRunnerAdapter = adapters.childRunner || childRunner;
   const commonAdapter = adapters.common || common;
   const adspowerAdapter = adapters.adspower || adspower;
@@ -489,8 +497,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   });
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
+  const bindScript = adapters.bindScript || (args.rechargeMode === 'crypto' ? CRYPTO_RECHARGE_SCRIPT : BIND_SCRIPT);
   const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
-  const inactiveCardStatus = plan.inactiveOpomCardStatus(row);
+  // 虚拟币充值与银行卡状态完全无关，不能被 OPOM 旧绑卡状态阻断。
+  const inactiveCardStatus = args.rechargeMode === 'crypto' ? '' : plan.inactiveOpomCardStatus(row);
   const scope = plan.executionScope(args);
   const zdrOnly = scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
   const dataTrainingOnly = scope.dataTraining && !scope.zdr && !scope.billingAddress && !scope.paymentMethod && !scope.purchase && !scope.autoTopup;
@@ -558,6 +568,36 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     : await runClosedLoopChildAsync(bindScript, task, args, childRunnerAdapter, commonAdapter);
   let profileStop = {attempted: false};
   if (outcome.ok) {
+    if (args.rechargeMode === 'crypto') {
+      const cryptoPurchase = outcome.result?.cryptoPurchase || {};
+      const insufficientFunds = cryptoPurchase.insufficientFunds === true || cryptoPurchase.checkoutState?.insufficientFunds === true;
+      const walletConfirmationRequired = cryptoPurchase.walletConfirmationRequired === true;
+      return {
+        status: insufficientFunds
+          ? status.STATUSES.FAILED
+          : (walletConfirmationRequired ? status.STATUSES.MANUAL_SECURITY_BLOCKER : status.STATUSES.PURCHASE_UNVERIFIED),
+        stage: insufficientFunds ? 'crypto.insufficient_funds' : (walletConfirmationRequired ? 'crypto.wallet_confirmation' : 'crypto.checkout'),
+        errorCode: insufficientFunds ? 'crypto_insufficient_funds' : (walletConfirmationRequired ? 'crypto_wallet_confirmation_required' : 'crypto_checkout_unverified'),
+        message: insufficientFunds
+          ? `余额不足：需要 ${cryptoPurchase.checkoutState?.requiredAmount || cryptoPurchase.totalDue || cryptoPurchase.amount || ''} ${cryptoPurchase.checkoutState?.requiredAsset || 'USDC'}`
+          : (walletConfirmationRequired
+            ? 'OKX Wallet 已连接，请在钱包中核对金额和网络后确认支付'
+            : '虚拟币支付页面已准备，但尚未确认钱包状态'),
+        details: {
+          ...plan.rowMetadata(row),
+          rechargeMode: 'crypto',
+          purchaseStatus: insufficientFunds ? 'insufficient_funds' : (walletConfirmationRequired ? 'wallet_confirmation_required' : 'checkout_prepared'),
+          purchaseAmount: cryptoPurchase.amount || cryptoPurchase.ruleDecision?.selectedAmount || '',
+          balanceBefore: cryptoPurchase.beforeBalance?.balance ?? '',
+          balanceAfter: '',
+          cryptoPurchase,
+          automationLogDir,
+        },
+        // 钱包确认必须逐账号处理；保留浏览器现场并暂停剩余批次。
+        safeToContinue: false,
+        stopProfile: false,
+      };
+    }
     const details = args.confirmPurchase
       ? plan.successDetails(row, outcome.result, args)
       : testModeSuccessDetails(row, outcome.result, args, plan, commonAdapter);

@@ -142,6 +142,12 @@ summary:focus-visible,
 
 .title-lockup { min-width: 160px; }
 
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
 .eyebrow {
   display: block;
   margin-bottom: 2px;
@@ -259,6 +265,7 @@ h2 { font-size: 19px; font-weight: 760; }
   font-weight: 700;
 }
 
+.channel-switch-panel,
 .preparation-panel,
 .detail-panel {
   min-width: 0;
@@ -269,6 +276,80 @@ h2 { font-size: 19px; font-weight: 760; }
   backdrop-filter: blur(18px) saturate(1.25);
   -webkit-backdrop-filter: blur(18px) saturate(1.25);
 }
+
+.toolbar .channel-switch-panel {
+  display: inline-flex;
+  min-height: 30px;
+  padding: 0;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.toolbar .channel-switch-panel .field-title {
+  color: var(--label);
+  font-size: 15px;
+  font-weight: 680;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.toolbar .channel-switch-panel .channel-switch {
+  width: 156px;
+  min-height: 30px;
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.toolbar .channel-switch-panel .segment {
+  min-height: 26px;
+  border-radius: 6px;
+  font-size: 15px;
+}
+
+body.recharge-mode-crypto .operations-card,
+body.recharge-mode-crypto .support-stack,
+body.recharge-mode-crypto .auto-rule-section {
+  display: none;
+}
+
+body.recharge-mode-crypto .control-grid {
+  grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr) minmax(300px, 1fr);
+  min-width: 940px;
+}
+
+body.recharge-mode-crypto .match-table th:nth-child(8),
+body.recharge-mode-crypto .match-table th:nth-child(9),
+body.recharge-mode-crypto .match-table th:nth-child(10),
+body.recharge-mode-crypto .match-table td:nth-child(8),
+body.recharge-mode-crypto .match-table td:nth-child(9),
+body.recharge-mode-crypto .match-table td:nth-child(10) {
+  display: none;
+}
+
+body.recharge-mode-crypto .match-table {
+  min-width: 100%;
+}
+
+body.recharge-mode-crypto .match-table col:nth-child(8),
+body.recharge-mode-crypto .match-table col:nth-child(9),
+body.recharge-mode-crypto .match-table col:nth-child(10) {
+  display: none;
+}
+
+body.recharge-mode-crypto .match-table .col-select { width: 4%; }
+body.recharge-mode-crypto .match-table .col-account { width: 22%; }
+body.recharge-mode-crypto .match-table .col-health { width: 13%; }
+body.recharge-mode-crypto .match-table .col-ads { width: 10%; }
+body.recharge-mode-crypto .match-table .col-ads-id { width: 13%; }
+body.recharge-mode-crypto .match-table .col-match { width: 9%; }
+body.recharge-mode-crypto .match-table .col-rule { width: 11%; }
+body.recharge-mode-crypto .match-table .col-reason { width: 18%; }
 
 .preparation-panel { overflow-x: auto; padding: 10px; }
 
@@ -1361,6 +1442,8 @@ body[data-page="execution"] .event-line span:last-child {
 @media (max-width: 620px) {
   .toolbar-inner { display: grid; gap: 8px; }
   .toolbar-actions { width: 100%; }
+  .title-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .toolbar .channel-switch-panel .channel-switch { width: 176px; }
   .page-shell { padding: 12px 10px 20px; }
   .detail-header { display: flex; align-items: stretch; flex-direction: column; }
   .metrics, .detail-actions { overflow-x: auto; justify-content: flex-start; }

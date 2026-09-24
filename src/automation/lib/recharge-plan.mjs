@@ -390,6 +390,29 @@ export function buildClosedLoopTask(row, args) {
   };
 }
 
+export function buildCryptoRechargeTask(row, args) {
+  // 虚拟币执行器只接收账号、AdsPower 和充值规则；银行卡、Billing、Auto Top-Up、绑卡回写字段不进入子进程。
+  const purchasePlanResult = purchasePlan(row);
+  const purchase = purchasePlanResult.purchase;
+  const rule = purchase.rule
+    ? {
+      enabled: true,
+      threshold: purchase.rule.threshold,
+      belowAmountConfigured: purchase.rule.belowAmountConfigured === true,
+      belowAmount: purchase.rule.belowAmount,
+      atOrAboveAmount: purchase.rule.atOrAboveAmount,
+    }
+    : undefined;
+  return {
+    profileNo: adsPowerSerialNumber(row) || undefined,
+    profileId: adsPowerUserId(row) || undefined,
+    expectedAccount: loginEmail(row),
+    cryptoOnly: true,
+    rechargeMode: 'crypto',
+    purchase: rule ? {...purchase, rule} : purchase,
+  };
+}
+
 export function baseRowResult(rowNumber, row) {
   return {
     rowNumber,

@@ -98,6 +98,8 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/adspower/match') {
     requireSession(req);
     const payload = await readJsonBody(req);
+    // 虚拟币匹配结果可能包含账号密码，禁止浏览器或代理缓存。
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(res, 200, await matchAdsPowerPayload(payload));
     return;
   }
@@ -124,6 +126,7 @@ async function handle(req, res) {
   if (req.method === 'POST' && pathname === '/api/jobs') {
     requireSession(req);
     const payload = await readJsonBody(req);
+    res.setHeader('Cache-Control', 'no-store');
     sendJson(res, 201, await createJob(db, payload));
     return;
   }

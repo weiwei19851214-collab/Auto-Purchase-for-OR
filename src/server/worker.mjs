@@ -7,6 +7,7 @@ import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
+import {clearWalletSeeds, walletSeedForRow} from './crypto-wallet-secrets.mjs';
 
 const ERROR_ROW_STATUSES = new Set([
   'failed',
@@ -124,6 +125,7 @@ export class JobWorker {
       `).run(redact(error.message), now, now, jobId);
       addEvent(this.db, jobId, 'job.failed', redact(error.message));
     } finally {
+      clearWalletSeeds(jobId);
       this.current = null;
       this.currentRows.clear();
       this.running = false;
@@ -187,6 +189,7 @@ export class JobWorker {
     try {
       result = await this.executeRowFn(csvText, row.raw_index, {
         ...options,
+        ...(options.rechargeMode === 'crypto' ? {runtimeSeedPhrase: walletSeedForRow(job.id, row.raw_index)} : {}),
         runtimeLog: {
           jobId: job.id,
           rowId: row.id,

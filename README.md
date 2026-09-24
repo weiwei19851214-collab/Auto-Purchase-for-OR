@@ -98,19 +98,57 @@ Credits 页后，按下面顺序处理单个账号：
 
 ## 虚拟币充值流程（第一阶段）
 
+金额输入使用虚拟币执行器自己的逐字符 CDP 键盘流程：先用 End 和 Backspace
+清空并回读空值，再按每个字符只发送一次文本事件，最后 Tab 失焦。
+金额回读必须与规则选定值一致，且 Purchase 按钮可用，才允许进入下一步。
+清空失败或金额被页面重置时停止，不追加输入，也不提交付款。
+
 操作台顶部可以在“银行卡 / 虚拟币”之间切换。虚拟币模式继续使用 OPOM
 `needs_recharge` 低余额账号、余额充值规则、AdsPower 匹配和任务并发，但不读取
 银行卡、Billing 地址或 Auto Top-Up 配置。
 
-当前虚拟币任务自动执行到钱包确认边界：进入 Credits、确认 `Use crypto` 已开启、
-按余额规则输入金额、点击 `Purchase`、在 Coinbase 页面选择 OKX Wallet，再点击
-`Launch extension`。任务随后保留 SunBrowser 和右侧 OKX Wallet 现场，等待操作者
+当前虚拟币任务先打开 Credits、核对账号、按余额规则填写金额，再点击 `Purchase` 创建
+Coinbase checkout；这一步不会确认链上付款。随后选择 OKX Wallet 并点击 `Launch extension`，
+由官方流程弹出当前 AdsPower 浏览器的钱包扩展。执行器等待任意打开方式的 OKX 页面，判断状态：
+首次空钱包可从欢迎页、导入方式页或已打开且 12 格全空的助记词页接续导入，并回读钱包主页；
+已登录钱包直接继续；输入框已有内容、Confirm 不可用、钱包锁定、仍需设置密码、
+找不到扩展页面或页面状态不明时停批、保留现场。任务随后保留 SunBrowser 和 OKX Wallet
+现场，等待操作者
 核对币种、网络、金额和 Gas。代码不会自动点击钱包里的确认、签名或广播按钮。
 虚拟币浏览器流程位于独立的 `src/automation/crypto_recharge_openrouter_cdp.mjs`；
 银行卡继续使用 `src/automation/bind_openrouter_card_cdp.mjs`，两套支付流程互不调用。
 
-OpenRouter 如果要求输入当前密码，任务记录为人工阻断并保留现场。Coinbase 如果
-返回 `Insufficient funds`，任务记录 `crypto.insufficient_funds`，并保存要求的币种和
+虚拟币页面主动匹配 AdsPower 时，“账号密码”列按用户要求显示明文。
+账号匹配与密码读取复用同一次 AdsPower 查询响应，不为密码重复请求；匹配结束前按钮保持禁用。
+明文只保存在当前页面的独立内存映射中，不放入账号行、localStorage 或请求缓存；
+重新匹配、重置或更换账号来源时清除。后台自动计划的匹配响应仍只有可用状态。
+遇到 OpenRouter Credits 的“Verification required / Enter your current password”弹窗，
+执行器按浏览器 ID（缺失时按编号）精确查询 AdsPower，并严格核对平台 username 与
+当前任务邮箱后，临时读取 password，逐字符填写并 Tab 失焦。密码不写 CSV、SQLite、
+日志或结果文件；不读取代理密码或备注中的密码。缺失、身份不符或填写失败均保留现场。
+填写后点击密码弹窗内的 Continue 一次，并等待 Coinbase 跳转；未完成验证则保留现场，
+不重复提交密码，不自动处理 MFA、验证码或钱包签名。
+如果弹窗提示 `Invalid credentials`，立即停止当前任务并暂停后续账号，保留浏览器；
+不再次填写或点击 Continue，先核对 AdsPower 保存的该账号密码。
+所有充值账号共用一个 OKX 钱包；欢迎导入页只代表当前浏览器未配置钱包，不覆盖已有钱包。
+CSV 虚拟币任务遇到明确的 OKX 钱包欢迎页时，从当前任务内存中取 D 列，依次点击
+Import wallet、Seed phrase or private key，逐格输入 12 个单词并只点击导入页 Confirm 一次；
+Confirm 不是登录完成证据，必须再次回读已解锁的钱包主页。已有钱包不重新导入；
+页面结构不符、钱包锁定或额外验证时停批并保留现场。Coinbase checkout 已打开时，
+钱包导入失败不代表“未进入充值”：只是钱包连接及最终支付均未确认，不应再次自动点击 Purchase。
+钱包连接和交易确认仍需人工核对，不自动确认签名或付款。
+执行器只使用当前 AdsPower 浏览器中已经存在的 OKX 扩展页面，不要求它固定在左侧、右侧
+或普通标签页，也不会创建 `sidepanel.html` 全屏标签或修改浏览器窗口布局。找不到可控的
+OKX 扩展页面时不会点击 `Purchase`，由操作者先在当前 Profile 中打开钱包扩展。
+即使 Coinbase 已发起 `Launch extension`，也不能据此断言钱包已连接或已付款。
+虚拟币 CSV 上传表头为 `login_email`、`ads_power_serial_number`、`ads_power_user_id`、
+`seed_phrase`；`seed_phrase` 必须是 12 个空格分隔的英文单词。这里只检查词数和字符，
+不验证词表、校验和或钱包归属。页面读取时从账号行剥离 D 列，创建任务时单独发给本机
+服务端并仅保存在当前进程内存中，执行该行后清除；任务 CSV、SQLite、日志和结果 CSV
+不包含助记词。服务重启或任务恢复后无法重新读取助记词，首次导入须重新上传 CSV 或
+由操作者手动完成。原始 CSV 是明文恢复凭据，务必离线保管，
+不要提交到 Git 或上传到其他系统。
+Coinbase 如果返回 `Insufficient funds`，任务记录 `crypto.insufficient_funds`，并保存要求的币种和
 金额；不会重试支付，也不会进入银行卡充值流程。
 
 ## CSV 模板

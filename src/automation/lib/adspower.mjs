@@ -236,6 +236,7 @@ export async function findProfileForAccount(args, account, options = {}) {
     matchSource,
     expectedEmail,
     profile: publicProfile(profile),
+    ...(options.projectMatchedProfile?.(profile, account) || {}),
   };
 }
 
@@ -257,7 +258,7 @@ async function fetchProfilesForEmailScan(args, options = {}) {
   return profiles;
 }
 
-function matchFromProfiles(profileRows, account) {
+function matchFromProfiles(profileRows, account, options = {}) {
   const expectedEmail = account.loginEmail || account.username || account.login_email || '';
   const matches = profileRows.filter((profile) => profileMatchesEmail(profile, expectedEmail));
   if (matches.length === 0) {
@@ -276,6 +277,7 @@ function matchFromProfiles(profileRows, account) {
     matchSource: 'email_index',
     expectedEmail,
     profile: publicProfile(matches[0]),
+    ...(options.projectMatchedProfile?.(matches[0], account) || {}),
   };
 }
 
@@ -303,7 +305,7 @@ export async function matchProfilesForAccounts(args, accounts, options = {}) {
     try {
       const profiles = await fetchProfilesForEmailScan(args, options);
       for (const index of scanIndexes) {
-        results[index] = matchFromProfiles(profiles, accounts[index]);
+        results[index] = matchFromProfiles(profiles, accounts[index], options);
       }
     } catch (error) {
       for (const index of scanIndexes) {

@@ -16,6 +16,7 @@ import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {writeCompletedRow} from './opom-client.mjs';
+import {clearWalletSeeds, holdWalletSeeds, validateWalletSeedRows} from './crypto-wallet-secrets.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -91,9 +92,16 @@ export async function createJob(db, payload) {
   if (!csvText.trim()) throw new Error('csvText is required');
   const sourceFileName = payload.fileName || 'account.csv';
   const options = payload.options || {};
+  if (['seedPhrases', 'walletSeedPhrase', 'runtimeSeedPhrase'].some((key) => key in options)) {
+    throw new Error('钱包助记词不能写入任务配置');
+  }
   const plan = await parsePlan(csvText, options);
   const readyCount = plan.rows.filter((row) => row.status === 'ready').length;
   if (readyCount > 0) verifyLiveConfirmation(payload.liveConfirmationToken, {csvText, options});
+  if (payload.seedPhrases !== undefined && plan.args.rechargeMode !== 'crypto') {
+    throw new Error('只有虚拟币任务可接收钱包助记词');
+  }
+  const seedPhrases = validateWalletSeedRows(payload.seedPhrases, plan.rows);
   const jobId = newId('job');
   const jobOptions = {
     ...options,
@@ -205,6 +213,8 @@ export async function createJob(db, payload) {
         };
       }),
   });
+  // 结果文件成功生成后再持有内存凭据；无可执行行不保存，异常不会遗留助记词。
+  if (readyCount > 0) holdWalletSeeds(jobId, seedPhrases);
   addEvent(db, jobId, 'job.created', 'job queued from uploaded CSV', {
     fileName: sourceFileName,
     jobName,
@@ -319,6 +329,7 @@ export function jobsList(db) {
 export async function cancelJob(db, jobId) {
   const job = getJob(db, jobId);
   if (!job) return null;
+  if (job.status === 'queued') clearWalletSeeds(jobId);
   const now = nowIso();
   db.prepare(`
     UPDATE jobs

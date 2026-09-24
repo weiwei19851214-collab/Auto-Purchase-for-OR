@@ -38,6 +38,16 @@ test('simplifyError maps input and OPOM failures to stable Chinese messages', ()
   assert.equal(binding.message, 'OPOM 绑卡信息不完整');
 });
 
+test('simplifyError keeps crypto form loading and input failures distinct', () => {
+  const loading = simplifyError('Crypto purchase form did not become ready within 20000ms', {stage: 'crypto.purchase_form'});
+  assert.equal(loading.errorCode, 'crypto_purchase_form_not_ready');
+  assert.equal(loading.message, '虚拟币充值表单未加载完成');
+
+  const input = simplifyError('Crypto amount input did not retain 150');
+  assert.equal(input.errorCode, 'crypto_amount_input_failed');
+  assert.equal(input.message, '虚拟币充值金额填写失败');
+});
+
 test('simplifyError maps AdsPower and CDP failures with profile-in-use before generic browser failures', () => {
   const inUse = simplifyError('AdsPower profile is being used by another user; not allowed to open');
   assert.equal(inUse.errorCode, 'adspower_profile_in_use');
@@ -57,6 +67,22 @@ test('simplifyError maps AdsPower and CDP failures with profile-in-use before ge
 });
 
 test('simplifyError maps identity and manual security blockers', () => {
+  const walletNotReady = simplifyError('manual_security_blocker: crypto_wallet_import_unverified');
+  assert.equal(walletNotReady.errorCode, 'crypto_wallet_not_ready');
+  assert.match(walletNotReady.message, /Coinbase 结账页已打开/);
+  assert.match(walletNotReady.message, /连接和付款均未确认/);
+  const lockedWallet = simplifyError('manual_security_blocker: crypto_wallet_import_authentication_required');
+  assert.equal(lockedWallet.errorCode, 'crypto_wallet_authentication_required');
+  assert.match(lockedWallet.message, /连接和付款均未确认/);
+  const missingPhrase = simplifyError('manual_security_blocker: crypto_wallet_import_phrase_missing');
+  assert.equal(missingPhrase.errorCode, 'crypto_wallet_import_phrase_missing');
+  assert.match(missingPhrase.message, /本次任务没有可用的助记词/);
+  const incomplete = simplifyError('manual_security_blocker: crypto_wallet_import_fields_not_empty');
+  assert.equal(incomplete.errorCode, 'crypto_wallet_import_incomplete');
+  assert.match(incomplete.message, /已有内容/);
+  const wrongPassword = simplifyError('manual_security_blocker: crypto_password_invalid_credentials');
+  assert.equal(wrongPassword.errorCode, 'crypto_password_invalid_credentials');
+  assert.match(wrongPassword.message, /密码错误/);
   assert.equal(
     simplifyError('OpenRouter account mismatch: expected a@example.com got b@example.com', {status: 'identity_mismatch'}).errorCode,
     'identity_mismatch',
@@ -104,6 +130,10 @@ test('simplifyError distinguishes Auto Top-Up pending from generic Auto Top-Up f
   const enable = simplifyError('Auto top-up Enable button not found: {"clicked":false,"tail":"Credits"}');
   assert.equal(enable.errorCode, 'auto_topup_action_unavailable');
   assert.equal(enable.message, '自动充值入口未加载');
+
+  const invalidInput = simplifyError('purchaseOnly requires purchase.confirmed, preparePurchaseOnly, or autoTopup.enabled');
+  assert.equal(invalidInput.errorCode, 'automation_input_invalid');
+  assert.equal(invalidInput.message, '自动化执行参数不兼容');
 });
 
 test('simplifyError maps recharge verification and unknown system errors', () => {

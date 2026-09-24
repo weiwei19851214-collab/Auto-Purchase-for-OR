@@ -68,6 +68,13 @@ function normalizeRechargeMode(value) {
     : 'bank_card';
 }
 
+export function automationScriptForRechargeMode(rechargeMode) {
+  // 银行卡和虚拟币是两套独立执行器；只能在调度层按通道二选一，禁止互相回退。
+  return normalizeRechargeMode(rechargeMode) === 'crypto'
+    ? CRYPTO_RECHARGE_SCRIPT
+    : BIND_SCRIPT;
+}
+
 export function runnerArgs(options = {}) {
   const scopePurchase = options.scopePurchase !== false;
   const concurrency = Math.min(10, Math.max(1, Math.floor(Number(options.concurrency || 1) || 1)));
@@ -136,6 +143,10 @@ export async function parsePlan(csvText, options = {}) {
 
   const args = runnerArgs(options);
   const header = [...parsedRows[0]];
+  // 任务源 CSV 会持久化；钱包恢复凭据只允许在本地文件中，由页面剥离后再提交。
+  if (header.some((key) => String(key).trim().toLowerCase() === 'seed_phrase')) {
+    throw new Error('任务 CSV 不接受 seed_phrase；请通过虚拟币页面导入账号 CSV');
+  }
   const missingHeader = requiredInputColumns(args).filter((key) => !header.includes(key));
   if (missingHeader.length) throw new Error(`CSV missing required columns: ${missingHeader.join(', ')}`);
   for (const key of OPTIONAL_COLUMNS) {
@@ -471,7 +482,6 @@ export function cleanupJobUpload(job) {
 
 export async function executeRow(csvText, rawIndex, options = {}) {
   return executeRowWithAdapters(csvText, rawIndex, options, {
-    bindScript: BIND_SCRIPT,
     childRunner,
     common,
     adspower,
@@ -497,7 +507,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   });
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
-  const bindScript = adapters.bindScript || (args.rechargeMode === 'crypto' ? CRYPTO_RECHARGE_SCRIPT : BIND_SCRIPT);
+  const automationScript = adapters.automationScript || automationScriptForRechargeMode(args.rechargeMode);
   const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
   // 虚拟币充值与银行卡状态完全无关，不能被 OPOM 旧绑卡状态阻断。
   const inactiveCardStatus = args.rechargeMode === 'crypto' ? '' : plan.inactiveOpomCardStatus(row);
@@ -554,18 +564,24 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     };
   }
 
-  const task = plan.buildClosedLoopTask(row, args);
+  const task = args.rechargeMode === 'crypto'
+    ? plan.buildCryptoRechargeTask(row, args)
+    : plan.buildClosedLoopTask(row, args);
+  if (args.rechargeMode === 'crypto' && options.runtimeSeedPhrase) {
+    // 只交给当前账号子进程，绝不加入 row/details/result CSV 或 options_json。
+    task.walletSeedPhrase = options.runtimeSeedPhrase;
+  }
   task.adspowerApiBase = args.adspowerApiBase;
   task.adspowerApiKey = args.adspowerApiKey;
   task.adspowerStartTimeoutMs = args.adspowerStartTimeoutMs;
   task.confirmationDebugDir ||= automationLogDir;
-  if (!args.scopePurchase || !args.confirmPurchase) {
+  if (args.rechargeMode !== 'crypto' && (!args.scopePurchase || !args.confirmPurchase)) {
     task.purchase.confirmed = false;
     task.preparePurchaseOnly = args.scopePurchase && args.preparePurchaseOnly;
   }
   const outcome = adapters.runClosedLoopChildAsync
-    ? await adapters.runClosedLoopChildAsync(bindScript, task, args)
-    : await runClosedLoopChildAsync(bindScript, task, args, childRunnerAdapter, commonAdapter);
+    ? await adapters.runClosedLoopChildAsync(automationScript, task, args)
+    : await runClosedLoopChildAsync(automationScript, task, args, childRunnerAdapter, commonAdapter);
   let profileStop = {attempted: false};
   if (outcome.ok) {
     if (args.rechargeMode === 'crypto') {
@@ -581,7 +597,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         message: insufficientFunds
           ? `余额不足：需要 ${cryptoPurchase.checkoutState?.requiredAmount || cryptoPurchase.totalDue || cryptoPurchase.amount || ''} ${cryptoPurchase.checkoutState?.requiredAsset || 'USDC'}`
           : (walletConfirmationRequired
-            ? 'OKX Wallet 已连接，请在钱包中核对金额和网络后确认支付'
+            ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
             : '虚拟币支付页面已准备，但尚未确认钱包状态'),
         details: {
           ...plan.rowMetadata(row),

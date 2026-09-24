@@ -13,6 +13,26 @@ export const STATUSES = Object.freeze({
 
 export function classifyError(message) {
   const text = String(message || '');
+  if (/crypto_wallet_import_/.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.wallet_import', safeToContinueBatch: false, stopProfile: false, message: text,
+    });
+  }
+  if (/crypto_password_/i.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.password_verification', safeToContinueBatch: false, stopProfile: false, message: text,
+    });
+  }
+  if (/Crypto purchase form did not become ready|Crypto amount input (?:not found or not focused|did not retain)|Crypto Purchase button not clickable/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'crypto.purchase_form',
+      terminal: true,
+      // 虚拟币页面加载或输入失败时保留浏览器现场，并暂停后续账号，避免页面刚刷新出来就被关闭。
+      safeToContinueBatch: false,
+      stopProfile: false,
+      message: text,
+    });
+  }
   if (/Verification required|Enter your current password|crypto_wallet_confirmation_required|wallet confirmation required/i.test(text)) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
       stage: /password/i.test(text) ? 'identity.reverification' : 'crypto.wallet_confirmation',

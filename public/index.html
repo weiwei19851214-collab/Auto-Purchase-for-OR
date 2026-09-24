@@ -43,6 +43,22 @@
 
       <p class="sr-only recharge-mode-hint" id="rechargeModeHint" role="status" aria-live="polite">当前使用银行卡充值流程：支付卡、Billing 和 OpenRouter 购买。</p>
 
+      <section class="scheduler-panel" id="autoRechargePanel" aria-labelledby="autoRechargeTitle">
+        <div class="scheduler-identity">
+          <span class="scheduler-channel" id="autoRechargeChannel">银行卡</span>
+          <div>
+            <strong id="autoRechargeTitle">银行卡自动充值计划</strong>
+            <small id="autoRechargeDescription">每小时 15 / 45 分，按当前银行卡页面参数自动创建真实充值任务。</small>
+          </div>
+        </div>
+        <p class="scheduler-summary" id="autoRechargeSummary" role="status" aria-live="polite">银行卡自动充值未启用。</p>
+        <label class="switch-row scheduler-toggle">
+          <span class="sr-only" id="autoRechargeSwitchLabel">启用银行卡自动充值计划</span>
+          <input id="autoRechargeEnabled" type="checkbox" role="switch" aria-labelledby="autoRechargeSwitchLabel" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </section>
+
       <section class="preparation-panel" aria-labelledby="preparationTitle">
         <h2 class="sr-only" id="preparationTitle">准备工作</h2>
         <div class="control-grid">
@@ -57,7 +73,7 @@
             <div class="source-body">
               <div class="csv-source" id="csvSource">
                 <button class="file-button" id="accountFileButton" type="button">
-                  <span>账号 CSV</span>
+                  <span id="accountFileTitle">账号 CSV</span>
                   <small id="accountFileLabel">未选择</small>
                 </button>
               </div>
@@ -228,6 +244,8 @@
             <colgroup>
               <col class="col-select" />
               <col class="col-account" />
+              <col class="col-password crypto-password-column" />
+              <col class="col-seed crypto-seed-column" />
               <col class="col-health" />
               <col class="col-ads" />
               <col class="col-ads-id" />
@@ -244,6 +262,8 @@
                   <input id="selectAllRows" class="select-all-rows" type="checkbox" aria-label="全选或取消全选账号" title="全选或取消全选" />
                 </th>
                 <th scope="col">账号</th>
+                <th scope="col" class="crypto-password-column">账号密码</th>
+                <th scope="col" class="crypto-seed-column">助记词</th>
                 <th scope="col">OPOM health</th>
                 <th scope="col">AdsPower</th>
                 <th scope="col">AdsPowerId</th>
@@ -256,7 +276,7 @@
               </tr>
             </thead>
             <tbody id="matchBody">
-              <tr><td class="empty-row" colspan="11">选择账号来源后开始准备</td></tr>
+              <tr><td class="empty-row" colspan="13">选择账号来源后开始准备</td></tr>
             </tbody>
           </table>
         </div>
@@ -314,20 +334,6 @@
           <button class="close-button" value="cancel" aria-label="关闭设置">关闭</button>
         </header>
         <div class="connection-summary" id="connectionSummary" role="status"></div>
-        <details open>
-          <summary>自动充值计划</summary>
-          <div class="scheduler-setting">
-            <label class="switch-row scheduler-toggle">
-              <span>
-                <strong>每小时 15 / 45 分</strong>
-                <small>按当前准备参数自动创建真实充值任务</small>
-              </span>
-              <input id="autoRechargeEnabled" type="checkbox" role="switch" />
-              <span class="switch-track" aria-hidden="true"></span>
-            </label>
-            <p class="scheduler-summary" id="autoRechargeSummary" role="status" aria-live="polite">自动充值监控未启用。</p>
-          </div>
-        </details>
         <details open>
           <summary>AdsPower</summary>
           <div class="settings-grid">

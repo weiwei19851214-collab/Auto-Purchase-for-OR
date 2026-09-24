@@ -9,10 +9,66 @@ const UNKNOWN_ERROR = Object.freeze({
 
 const RULES = [
   {
+    errorCode: 'crypto_wallet_import_phrase_missing',
+    message: 'Coinbase 结账页已打开，但本次任务没有可用的助记词；请人工处理钱包导入，连接和付款均未确认',
+    matches: ({text}) => /crypto_wallet_import_phrase_missing/i.test(text),
+  },
+  {
+    errorCode: 'crypto_wallet_import_incomplete',
+    message: 'Coinbase 结账页已打开，但 OKX 导入页已有内容或确认按钮不可用；请人工检查，连接和付款均未确认',
+    matches: ({text}) => /crypto_wallet_import_(?:fields_not_empty|field_changed|field_unverified|confirm_unavailable|button_unavailable)/i.test(text),
+  },
+  {
+    errorCode: 'crypto_wallet_not_ready',
+    message: 'Coinbase 结账页已打开，但 OKX 钱包页面状态未确认；请检查浏览器，连接和付款均未确认',
+    matches: ({text}) => /crypto_wallet_import_(?:unverified|page_changed|target_missing|target_ambiguous|unknown_page|inspection_failed)/i.test(text),
+  },
+  {
+    errorCode: 'crypto_wallet_authentication_required',
+    message: 'Coinbase 结账页已打开，但 OKX 钱包仍需设置或输入解锁密码；请人工完成，连接和付款均未确认',
+    matches: ({text}) => /crypto_wallet_import_authentication_required/i.test(text),
+  },
+  {
+    errorCode: 'crypto_password_invalid_credentials',
+    message: 'OpenRouter 当前密码错误，已停止任务，请检查 AdsPower 账号密码',
+    matches: ({text}) => /crypto_password_invalid_credentials/i.test(text),
+  },
+  {
+    errorCode: 'crypto_password_verification_pending',
+    message: '密码已提交，验证尚未完成，请检查浏览器',
+    matches: ({text}) => /crypto_password_verification_pending/i.test(text),
+  },
+  {
+    errorCode: 'crypto_password_filled',
+    message: '账号密码已填写，请人工确认 Continue',
+    matches: ({text}) => /crypto_password_filled/i.test(text),
+  },
+  {
+    errorCode: 'crypto_password_unavailable',
+    message: '无法安全读取或填写该账号密码，请人工验证',
+    matches: ({text}) => /crypto_password_/i.test(text),
+  },
+  {
     errorCode: 'crypto_insufficient_funds',
     message: '虚拟币余额不足',
     matches: ({text, stage}) => /crypto_insufficient_funds|Insufficient funds|余额不足/i.test(text)
       || /^crypto\.insufficient_funds$/i.test(stage),
+  },
+  {
+    errorCode: 'crypto_purchase_form_not_ready',
+    message: '虚拟币充值表单未加载完成',
+    matches: ({text, stage}) => /Crypto purchase form did not become ready/i.test(text)
+      || /^crypto\.purchase_form$/i.test(stage),
+  },
+  {
+    errorCode: 'crypto_amount_input_failed',
+    message: '虚拟币充值金额填写失败',
+    matches: ({text}) => /Crypto amount input (?:not found or not focused|did not retain)/i.test(text),
+  },
+  {
+    errorCode: 'crypto_purchase_button_unavailable',
+    message: '虚拟币充值按钮不可用',
+    matches: ({text}) => /Crypto Purchase button not clickable/i.test(text),
   },
   {
     errorCode: 'worker_interrupted',
@@ -328,6 +384,11 @@ const RULES = [
     errorCode: 'auto_topup_rule_unverified',
     message: '自动充值规则未生效',
     matches: ({text}) => /Auto top-up did not reach requested values/i.test(text),
+  },
+  {
+    errorCode: 'automation_input_invalid',
+    message: '自动化执行参数不兼容',
+    matches: ({text}) => /purchaseOnly requires purchase\.confirmed, preparePurchaseOnly, or autoTopup\.enabled/i.test(text),
   },
   {
     errorCode: 'auto_topup_config_failed',

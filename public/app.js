@@ -3,6 +3,10 @@
 
   const RUNTIME_CONFIG_KEY = 'autoPurchaseRuntimeConfigV1';
   const UI_PREFS_KEY = 'autoPurchaseUiPrefsV1';
+  // 明文仅供当前虚拟币页面展示，不放进 rows，避免随 resolve、CSV、job 或计划一起持久化。
+  const cryptoPasswords = new Map();
+  // 仅当前页面持有 CSV D 列；任务列表、模式草稿、localStorage 均不包含助记词。
+  const cryptoSeedPhrases = new Map();
   const HEALTHY_OPOM = new Set(['', 'ok', 'local_selector', 'completed']);
   const CANONICAL_HEADER = [
     'status',
@@ -78,8 +82,9 @@
     pendingWindow: null,
     pendingWindowBlocked: false,
     creatingJob: false,
+    matchingAdsPower: false,
     cardAllocationSignature: '',
-    schedulerRowsUpdatedAt: '',
+    schedulerRowsUpdatedAt: {bank_card: '', crypto: ''},
     modeDrafts: {
       bank_card: null,
       crypto: null,
@@ -101,6 +106,32 @@
       .replace(/\b(cvv|cvc)\s*[:=]\s*\d{3,4}\b/gi, '$1=[redacted]')
       .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[account]')
       .slice(0, 600);
+  }
+
+  function cryptoPasswordKey(row) {
+    return JSON.stringify([String(row.ads_power_user_id || ''), String(row.login_email || '').trim().toLowerCase()]);
+  }
+
+  function cryptoPasswordText(row) {
+    if (state.rechargeMode !== 'crypto') return '';
+    const password = cryptoPasswords.get(cryptoPasswordKey(row));
+    if (row.crypto_password_status === 'available' && typeof password === 'string') return password;
+    return ({available: '待重新匹配', missing: '未配置', identity_mismatch: '账号不一致', lookup_failed: '读取失败'})[row.crypto_password_status] || '待匹配';
+  }
+
+  function cryptoSeedText(row) {
+    if (state.rechargeMode !== 'crypto') return '';
+    return cryptoSeedPhrases.get(String(row.login_email || '').trim().toLowerCase()) || '';
+  }
+
+  function cryptoSeedMarkup(row) {
+    const phrase = cryptoSeedText(row);
+    if (!phrase) return '<span class="crypto-seed-text">—</span>';
+    const words = phrase.trim().split(/\s+/);
+    const lines = words.length === 12
+      ? [words.slice(0, 6).join(' '), words.slice(6).join(' ')]
+      : [phrase];
+    return `<span class="crypto-seed-text" title="仅当前页面展示，不写入任务和结果文件">${lines.map((line) => `<span>${escapeHtml(line)}</span>`).join('')}</span>`;
   }
 
   function showError(error) {
@@ -455,22 +486,57 @@
     return normalized;
   }
 
-  function rowsFromCsv(text) {
+  function rowsFromCsv(text, crypto = false, seedPhrases = new Map()) {
     const parsed = parseCsv(text);
     if (!parsed.length) return [];
+    let seedIndex = -1;
+    if (crypto) {
+      const header = parsed[0].map((key) => String(key || '').trim().toLowerCase());
+      const required = ['login_email', 'ads_power_serial_number', 'ads_power_user_id', 'seed_phrase'];
+      if (header.length !== required.length || required.some((key) => !header.includes(key))) {
+        throw new Error('虚拟币 CSV 表头只能是 login_email、ads_power_serial_number、ads_power_user_id、seed_phrase 四列');
+      }
+      if (parsed.length < 2) throw new Error('虚拟币 CSV 没有账号行');
+      seedIndex = header.indexOf('seed_phrase');
+      for (const [index, cells] of parsed.slice(1).entries()) {
+        // 只检查 12 词结构，不把恢复凭据放进账号行、任务 CSV 或结果文件。
+        if (!/^[a-z]+(?: [a-z]+){11}$/i.test(String(cells[seedIndex] || '').trim())) {
+          throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行 seed_phrase 需要 12 个空格分隔的英文单词');
+        }
+        if (!String(cells[header.indexOf('login_email')] || '').trim()
+          || !(String(cells[header.indexOf('ads_power_user_id')] || '').trim()
+            || String(cells[header.indexOf('ads_power_serial_number')] || '').trim())) {
+          throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行缺少邮箱或 AdsPower ID/编号');
+        }
+      }
+    }
     const headerPresent = hasSelectorHeader(parsed[0]);
     const sourceRows = headerPresent
-      ? parsed.slice(1).map((row) => objectFromRow(parsed[0], row))
+      ? parsed.slice(1).map((row) => {
+        const {seed_phrase, ...source} = objectFromRow(parsed[0], row);
+        return source;
+      })
       : parsed.map(noHeaderObject);
     const unique = [];
     const seen = new Set();
+    const seenProfileIds = new Set();
+    const seenSerialNumbers = new Set();
     sourceRows.forEach((source, index) => {
       const row = normalizeSourceRow(source, index, 'local_selector');
       if (!row) return;
       const identity = row.opom_account_id || row.login_email || row.ads_power_user_id || row.ads_power_serial_number;
       const key = String(identity || '').trim().toLowerCase();
+      const profileId = String(row.ads_power_user_id || '').trim().toLowerCase();
+      const serialNumber = String(row.ads_power_serial_number || '').trim().toLowerCase();
+      if (crypto && (seen.has(key) || (profileId && seenProfileIds.has(profileId))
+        || (serialNumber && seenSerialNumbers.has(serialNumber)))) {
+        throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行账号或 AdsPower 浏览器重复');
+      }
       if (!key || seen.has(key)) return;
       seen.add(key);
+      if (crypto && profileId) seenProfileIds.add(profileId);
+      if (crypto && serialNumber) seenSerialNumbers.add(serialNumber);
+      if (crypto) seedPhrases.set(String(row.login_email).trim().toLowerCase(), String(parsed[index + 1][seedIndex]).trim());
       unique.push(row);
     });
     return unique;
@@ -650,7 +716,7 @@
       el.selectAllRows.indeterminate = false;
       el.selectAllRows.disabled = true;
       el.selectAllRows.onchange = null;
-      el.matchBody.innerHTML = '<tr><td class="empty-row" colspan="11">选择账号来源后开始准备</td></tr>';
+      el.matchBody.innerHTML = '<tr><td class="empty-row" colspan="13">选择账号来源后开始准备</td></tr>';
       el.detailTitle.textContent = state.source === 'opom' && !state.opomConfirmed
         ? '等待确认 OPOM 参数'
         : '等待导入账号';
@@ -681,6 +747,8 @@
             </label>
           </td>
           <td title="${escapeHtml(row.login_email)}"><strong>${escapeHtml(row.login_email || '—')}</strong></td>
+          <td class="crypto-password-column" title="明文仅用于当前页面展示，不写入任务和结果文件">${escapeHtml(cryptoPasswordText(row))}</td>
+          <td class="crypto-seed-column">${cryptoSeedMarkup(row)}</td>
           <td>${health}</td>
           <td>${escapeHtml(row.ads_power_serial_number || '—')}</td>
           <td>${escapeHtml(row.ads_power_user_id || '—')}</td>
@@ -722,12 +790,15 @@
     el.blockedCount.textContent = String(blocked);
     el.startButton.disabled = !canStart();
     el.startButton.textContent = '开始执行';
-    el.matchButton.disabled = !state.rows.length || el.skipMatch.checked;
-    el.matchButton.textContent = el.skipMatch.checked ? '已跳过匹配' : '匹配 AdsPower';
+    el.matchButton.disabled = state.matchingAdsPower || !state.rows.length || el.skipMatch.checked;
+    el.matchButton.textContent = state.matchingAdsPower ? '匹配中…' : el.skipMatch.checked ? '已跳过匹配' : '匹配 AdsPower';
   }
 
   function canStart() {
+    if (state.matchingAdsPower) return false;
     if (!selectedRows().length) return false;
+    if (state.rechargeMode === 'crypto' && state.source === 'csv'
+      && selectedRows().some((row) => !cryptoSeedPhrases.has(String(row.login_email || '').trim().toLowerCase()))) return false;
     if (el.skipMatch.checked) {
       return selectedRows().some((row) => row.ads_power_user_id || row.ads_power_serial_number);
     }
@@ -742,8 +813,9 @@
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
     el.rechargeModeHint.textContent = crypto
-      ? '虚拟币充值页面已切换；链上充值规则待定义，当前不会启动银行卡执行器。'
+      ? '虚拟币 CSV 的 12 词 seed_phrase 仅在当前任务中临时用于首次导入 OKX 钱包，不写入任务文件或日志。'
       : '当前使用银行卡充值流程：支付卡、Billing 和 OpenRouter 购买。';
+    if (el.accountFileTitle) el.accountFileTitle.textContent = crypto ? '虚拟币账号 CSV' : '账号 CSV';
     document.body.classList.toggle('recharge-mode-crypto', crypto);
     for (const button of document.querySelectorAll('[data-recharge-mode]')) {
       const selected = button.dataset.rechargeMode === state.rechargeMode;
@@ -784,6 +856,8 @@
 
   function setSource(source) {
     if (source === state.source) return;
+    cryptoPasswords.clear();
+    cryptoSeedPhrases.clear();
     state.source = source;
     state.rows = [];
     state.fileName = '';
@@ -804,6 +878,7 @@
   function setRechargeMode(mode) {
     const next = mode === 'crypto' ? 'crypto' : 'bank_card';
     if (next === state.rechargeMode) return;
+    cryptoSeedPhrases.clear();
     state.modeDrafts[state.rechargeMode] = {
       source: state.source,
       rows: state.rows.map((row) => ({...row})),
@@ -855,6 +930,8 @@
   }
 
   async function loadOpom() {
+    cryptoPasswords.clear();
+    renderRows();
     const group = el.opomGroup.value.trim();
     if (!group) throw new Error('请输入 OPOM Group');
     const limit = clampInteger(el.opomLimit, 1, 200, 50);
@@ -884,12 +961,17 @@
   }
 
   async function loadAccountCsv(file) {
-    const rows = rowsFromCsv(await file.text());
+    cryptoPasswords.clear();
+    cryptoSeedPhrases.clear();
+    renderRows();
+    const seeds = new Map();
+    const rows = rowsFromCsv(await file.text(), state.rechargeMode === 'crypto', seeds);
     if (!rows.length) {
       throw new Error('账号 CSV 需要包含邮箱、AdsPowerId、AdsPower 编号或 OPOM 账号 ID');
     }
     assertValidSelectorEmails(rows);
-    state.rows = applyCurrentRules(applyAddresses(rows));
+    for (const [email, phrase] of seeds) cryptoSeedPhrases.set(email, phrase);
+    state.rows = applyCurrentRules(state.rechargeMode === 'crypto' ? rows : applyAddresses(rows));
     state.fileName = file.name;
     state.cardAllocationSignature = '';
     el.accountFileLabel.textContent = `${rows.length} 行 · ${file.name}`;
@@ -949,6 +1031,8 @@
 
   async function matchAdsPower() {
     if (!state.rows.length) throw new Error('请先导入账号');
+    cryptoPasswords.clear();
+    renderRows();
     state.rows = applyCurrentRules(state.rows);
     const needsResolve = state.rows.some((row) => !row.opom_account_id && (
       row.login_email || row.ads_power_user_id || row.ads_power_serial_number
@@ -979,6 +1063,7 @@
     const data = await requestJson('/api/adspower/match', {
       method: 'POST',
       body: {
+        includeAccountPassword: state.rechargeMode === 'crypto',
         rows: state.rows.map((row) => ({
           loginEmail: row.login_email,
           ads_power_user_id: row.ads_power_user_id,
@@ -991,10 +1076,14 @@
       const row = state.rows[result.index];
       if (!row) continue;
       row.ads_match_status = result.status === 'matched' ? 'matched' : 'failed';
+      if (state.rechargeMode === 'crypto') row.crypto_password_status = result.passwordStatus || '';
       if (result.status === 'matched') {
         row.ads_power_user_id = result.profile?.userId || row.ads_power_user_id;
         row.ads_power_serial_number = result.profile?.serialNumber || row.ads_power_serial_number;
         row.ads_power_group_name = result.profile?.groupName || row.ads_power_group_name;
+        if (state.rechargeMode === 'crypto' && result.passwordStatus === 'available' && typeof result.accountPassword === 'string') {
+          cryptoPasswords.set(cryptoPasswordKey(row), result.accountPassword);
+        }
       }
     }
     state.cardAllocationSignature = '';
@@ -1073,6 +1162,10 @@
 
   function validateExecutionInput() {
     if (!selectedRows().length) throw new Error('请至少选择一个账号');
+    if (state.rechargeMode === 'crypto' && state.source === 'csv'
+      && selectedRows().some((row) => !cryptoSeedPhrases.has(String(row.login_email || '').trim().toLowerCase()))) {
+      throw new Error('助记词仅保存在当前页面内存，请重新上传虚拟币 CSV');
+    }
     if (!canStart()) throw new Error('请先完成 AdsPower 匹配，或确认跳过匹配');
     if (isConfigurationOnlyMode()) return;
     const rule = ruleValues();
@@ -1166,6 +1259,9 @@
         body: {
           fileName: state.fileName || `${state.source}-recharge.csv`,
           csvText: canonicalCsv(),
+          ...(state.rechargeMode === 'crypto' && state.source === 'csv' ? {
+            seedPhrases: selectedRows().map((row) => cryptoSeedPhrases.get(String(row.login_email || '').trim().toLowerCase()) || ''),
+          } : {}),
           options: optionsPayload(),
           liveConfirmationToken: state.liveConfirmationToken,
         },
@@ -1183,6 +1279,7 @@
         el.executionFallback.hidden = false;
       }
       state.pendingWindow = null;
+      cryptoSeedPhrases.clear();
       await refreshJobs();
     } catch (error) {
       closePendingWindow();
@@ -1265,7 +1362,24 @@
   }
 
   function renderSchedulerState(scheduler = {}) {
-    if (!el.autoRechargeEnabled || !el.autoRechargeSummary || !scheduler.ok) return;
+    if (!el.autoRechargeEnabled || !el.autoRechargeSummary) return;
+    const crypto = state.rechargeMode === 'crypto';
+    const modeLabel = crypto ? '虚拟币' : '银行卡';
+    el.autoRechargeChannel.textContent = modeLabel;
+    el.autoRechargeTitle.textContent = `${modeLabel}自动充值计划`;
+    el.autoRechargeDescription.textContent = crypto
+      ? '每小时 15 / 45 分，读取低余额账号并执行独立的 OKX Wallet 充值流程。'
+      : '每小时 15 / 45 分，按当前银行卡页面参数自动创建真实充值任务。';
+    el.autoRechargeSwitchLabel.textContent = `启用${modeLabel}自动充值计划`;
+    el.autoRechargePanel.dataset.rechargeMode = state.rechargeMode;
+    if (!scheduler.ok) {
+      state.scheduler = {};
+      el.autoRechargeEnabled.checked = false;
+      el.autoRechargeEnabled.disabled = !opomConfigured() || !adsPowerConfigured();
+      el.autoRechargeSummary.textContent = `${modeLabel}自动充值状态尚未加载。`;
+      el.autoRechargeSummary.classList.remove('success', 'warning');
+      return;
+    }
     state.scheduler = scheduler;
     const schedulerMode = scheduler.settings?.rechargeMode || state.rechargeMode;
     state.schedulers[schedulerMode] = scheduler;
@@ -1275,7 +1389,7 @@
       ? '请先在设置中配置 OPOM 和 AdsPower'
       : '';
     const summary = [
-      scheduler.enabled ? '自动充值已启用。' : '自动充值未启用。',
+      scheduler.enabled ? `${modeLabel}自动充值已启用。` : `${modeLabel}自动充值未启用。`,
       scheduler.schedule || '每小时 15 和 45 分',
       scheduler.nextRunAt ? `下次 ${formatTime(scheduler.nextRunAt)}` : '',
       scheduler.lastRunAt ? `上次 ${formatTime(scheduler.lastRunAt)}` : '',
@@ -1289,9 +1403,9 @@
       && scheduler.settings?.rechargeMode === 'crypto'
       && Array.isArray(scheduler.preparedRows)
       && scheduler.updatedAt
-      && scheduler.updatedAt !== state.schedulerRowsUpdatedAt
+      && scheduler.updatedAt !== state.schedulerRowsUpdatedAt.crypto
     ) {
-      state.schedulerRowsUpdatedAt = scheduler.updatedAt;
+      state.schedulerRowsUpdatedAt.crypto = scheduler.updatedAt;
       state.source = 'opom';
       state.rows = normalizeApiRows(scheduler.preparedRows, 'opom');
       state.fileName = 'auto-crypto-monitor.csv';
@@ -1350,18 +1464,25 @@
   }
 
   async function withBusy(button, busyText, action) {
+    // 列表刷新不能覆盖请求中的按钮状态；同时阻止重复点击发出并行匹配请求。
+    const matching = button === el.matchButton;
+    if (matching && state.matchingAdsPower) return;
+    if (matching) state.matchingAdsPower = true;
     const original = button.textContent;
     button.disabled = true;
     button.textContent = busyText;
     try {
       return await action();
     } finally {
+      if (matching) state.matchingAdsPower = false;
       button.textContent = original;
       renderCounts();
     }
   }
 
   function resetPreparation() {
+    cryptoPasswords.clear();
+    cryptoSeedPhrases.clear();
     state.source = 'csv';
     state.rows = [];
     state.fileName = '';
@@ -1425,7 +1546,9 @@
     el.accountFile.addEventListener('change', () => {
       const file = el.accountFile.files?.[0];
       if (!file) return;
-      withBusy(el.accountFileButton, '读取中…', () => loadAccountCsv(file)).catch(showError);
+      withBusy(el.accountFileButton, '读取中…', () => loadAccountCsv(file))
+        .catch(showError)
+        .finally(() => { el.accountFile.value = ''; });
     });
     el.cardFileButton.addEventListener('click', () => el.cardFile.click());
     el.cardFile.addEventListener('change', () => {

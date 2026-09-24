@@ -1,6 +1,6 @@
 import {existsSync, statSync} from 'node:fs';
 import {join} from 'node:path';
-import {AUTOMATION_DIR, AUTOMATION_LIB_DIR, BATCH_SCRIPT, BIND_SCRIPT, DB_PATH, PUBLIC_DIR} from './config.mjs';
+import {AUTOMATION_DIR, AUTOMATION_LIB_DIR, BATCH_SCRIPT, BIND_SCRIPT, CRYPTO_RECHARGE_SCRIPT, DB_PATH, PUBLIC_DIR} from './config.mjs';
 import {runnerArgs} from './automation-adapter.mjs';
 import {ADSPOWER_STATUS_MODES} from './adspower-status.mjs';
 
@@ -75,6 +75,7 @@ export async function environmentPreflight(options = {}) {
     checkPath('project automation engine', AUTOMATION_DIR, 'dir'),
     checkPath('project automation lib', AUTOMATION_LIB_DIR, 'dir'),
     checkPath('single-profile bind script', BIND_SCRIPT, 'file'),
+    checkPath('crypto recharge script', CRYPTO_RECHARGE_SCRIPT, 'file'),
     checkPath('batch runner script', BATCH_SCRIPT, 'file'),
     checkPath('operator console HTML', join(PUBLIC_DIR, 'index.html'), 'file'),
     checkPath('operator console app script', join(PUBLIC_DIR, 'app.js'), 'file'),

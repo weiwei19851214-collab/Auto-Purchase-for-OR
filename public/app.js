@@ -5,8 +5,10 @@
   const UI_PREFS_KEY = 'autoPurchaseUiPrefsV1';
   // 明文仅供当前虚拟币页面展示，不放进 rows，避免随 resolve、CSV、job 或计划一起持久化。
   const cryptoPasswords = new Map();
-  // 仅当前页面持有 CSV D 列；任务列表、模式草稿、localStorage 均不包含助记词。
+  // 仅当前页面持有 CSV D 列助记词和可选 E 列钱包密码；任务列表、模式草稿、localStorage 均不包含它们。
   const cryptoSeedPhrases = new Map();
+  // 仅当前页面持有 CSV E 列；钱包创建密码不进入 rows、localStorage、任务或结果文件。
+  const cryptoWalletPasswords = new Map();
   const HEALTHY_OPOM = new Set(['', 'ok', 'local_selector', 'completed']);
   const CANONICAL_HEADER = [
     'status',
@@ -486,18 +488,20 @@
     return normalized;
   }
 
-  function rowsFromCsv(text, crypto = false, seedPhrases = new Map()) {
+  function rowsFromCsv(text, crypto = false, seedPhrases = new Map(), walletPasswords = new Map()) {
     const parsed = parseCsv(text);
     if (!parsed.length) return [];
     let seedIndex = -1;
     if (crypto) {
       const header = parsed[0].map((key) => String(key || '').trim().toLowerCase());
       const required = ['login_email', 'ads_power_serial_number', 'ads_power_user_id', 'seed_phrase'];
-      if (header.length !== required.length || required.some((key) => !header.includes(key))) {
-        throw new Error('虚拟币 CSV 表头只能是 login_email、ads_power_serial_number、ads_power_user_id、seed_phrase 四列');
+      if (header.length < required.length || header.length > required.length + 1
+        || required.some((key) => !header.includes(key))) {
+        throw new Error('虚拟币 CSV 表头需要 login_email、ads_power_serial_number、ads_power_user_id、seed_phrase，可选第 5 列钱包密码');
       }
       if (parsed.length < 2) throw new Error('虚拟币 CSV 没有账号行');
       seedIndex = header.indexOf('seed_phrase');
+      const walletPasswordIndex = header.length === 5 ? 4 : -1;
       for (const [index, cells] of parsed.slice(1).entries()) {
         // 只检查 12 词结构，不把恢复凭据放进账号行、任务 CSV 或结果文件。
         if (!/^[a-z]+(?: [a-z]+){11}$/i.test(String(cells[seedIndex] || '').trim())) {
@@ -507,6 +511,9 @@
           || !(String(cells[header.indexOf('ads_power_user_id')] || '').trim()
             || String(cells[header.indexOf('ads_power_serial_number')] || '').trim())) {
           throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行缺少邮箱或 AdsPower ID/编号');
+        }
+        if (walletPasswordIndex >= 0 && !String(cells[walletPasswordIndex] || '')) {
+          throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行缺少钱包密码');
         }
       }
     }
@@ -537,6 +544,9 @@
       if (crypto && profileId) seenProfileIds.add(profileId);
       if (crypto && serialNumber) seenSerialNumbers.add(serialNumber);
       if (crypto) seedPhrases.set(String(row.login_email).trim().toLowerCase(), String(parsed[index + 1][seedIndex]).trim());
+      if (crypto && parsed[0].length === 5) {
+        walletPasswords.set(String(row.login_email).trim().toLowerCase(), String(parsed[index + 1][4] || ''));
+      }
       unique.push(row);
     });
     return unique;
@@ -813,7 +823,7 @@
     el.csvSource.hidden = opom;
     el.opomSource.hidden = !opom;
     el.rechargeModeHint.textContent = crypto
-      ? '虚拟币 CSV 的 12 词 seed_phrase 仅在当前任务中临时用于首次导入 OKX 钱包，不写入任务文件或日志。'
+      ? '虚拟币 CSV 的 D 列助记词和可选 E 列钱包密码仅在当前任务中临时用于首次导入 OKX 钱包，不写入任务文件或日志。'
       : '当前使用银行卡充值流程：支付卡、Billing 和 OpenRouter 购买。';
     if (el.accountFileTitle) el.accountFileTitle.textContent = crypto ? '虚拟币账号 CSV' : '账号 CSV';
     document.body.classList.toggle('recharge-mode-crypto', crypto);
@@ -858,6 +868,7 @@
     if (source === state.source) return;
     cryptoPasswords.clear();
     cryptoSeedPhrases.clear();
+    cryptoWalletPasswords.clear();
     state.source = source;
     state.rows = [];
     state.fileName = '';
@@ -879,6 +890,7 @@
     const next = mode === 'crypto' ? 'crypto' : 'bank_card';
     if (next === state.rechargeMode) return;
     cryptoSeedPhrases.clear();
+    cryptoWalletPasswords.clear();
     state.modeDrafts[state.rechargeMode] = {
       source: state.source,
       rows: state.rows.map((row) => ({...row})),
@@ -963,14 +975,18 @@
   async function loadAccountCsv(file) {
     cryptoPasswords.clear();
     cryptoSeedPhrases.clear();
+    cryptoWalletPasswords.clear();
+    cryptoWalletPasswords.clear();
     renderRows();
     const seeds = new Map();
-    const rows = rowsFromCsv(await file.text(), state.rechargeMode === 'crypto', seeds);
+    const walletPasswords = new Map();
+    const rows = rowsFromCsv(await file.text(), state.rechargeMode === 'crypto', seeds, walletPasswords);
     if (!rows.length) {
       throw new Error('账号 CSV 需要包含邮箱、AdsPowerId、AdsPower 编号或 OPOM 账号 ID');
     }
     assertValidSelectorEmails(rows);
     for (const [email, phrase] of seeds) cryptoSeedPhrases.set(email, phrase);
+    for (const [email, password] of walletPasswords) cryptoWalletPasswords.set(email, password);
     state.rows = applyCurrentRules(state.rechargeMode === 'crypto' ? rows : applyAddresses(rows));
     state.fileName = file.name;
     state.cardAllocationSignature = '';
@@ -1254,14 +1270,22 @@
       if (state.dryRunSignature !== currentSignature()) {
         throw new Error('准备内容已变化，请关闭确认窗口后重新开始');
       }
+      const selectedCryptoRows = selectedRows();
+      const selectedWalletPasswords = selectedCryptoRows.map((row) =>
+        cryptoWalletPasswords.get(String(row.login_email || '').trim().toLowerCase()) || '');
+      const cryptoCredentials = state.rechargeMode === 'crypto' && state.source === 'csv'
+        ? {
+          seedPhrases: selectedCryptoRows.map((row) =>
+            cryptoSeedPhrases.get(String(row.login_email || '').trim().toLowerCase()) || ''),
+          ...(selectedWalletPasswords.every(Boolean) ? {walletPasswords: selectedWalletPasswords} : {}),
+        }
+        : {};
       const data = await requestJson('/api/jobs', {
         method: 'POST',
         body: {
           fileName: state.fileName || `${state.source}-recharge.csv`,
           csvText: canonicalCsv(),
-          ...(state.rechargeMode === 'crypto' && state.source === 'csv' ? {
-            seedPhrases: selectedRows().map((row) => cryptoSeedPhrases.get(String(row.login_email || '').trim().toLowerCase()) || ''),
-          } : {}),
+          ...cryptoCredentials,
           options: optionsPayload(),
           liveConfirmationToken: state.liveConfirmationToken,
         },
@@ -1280,6 +1304,7 @@
       }
       state.pendingWindow = null;
       cryptoSeedPhrases.clear();
+      cryptoWalletPasswords.clear();
       await refreshJobs();
     } catch (error) {
       closePendingWindow();

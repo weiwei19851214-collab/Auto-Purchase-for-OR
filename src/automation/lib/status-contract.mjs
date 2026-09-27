@@ -13,9 +13,18 @@ export const STATUSES = Object.freeze({
 
 export function classifyError(message) {
   const text = String(message || '');
-  if (/crypto_wallet_import_/.test(text)) {
-    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
-      stage: 'crypto.wallet_import', safeToContinueBatch: false, stopProfile: false, message: text,
+  if (/crypto_task_timeout|crypto\.timeout/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'crypto.timeout',
+      terminal: true,
+      safeToContinueBatch: true,
+      stopProfile: true,
+      message: text,
+    });
+  }
+  if (/crypto_wallet_(?:import_|password_)/.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'crypto.wallet_import', safeToContinueBatch: true, stopProfile: true, message: text,
     });
   }
   if (/crypto_password_/i.test(text)) {

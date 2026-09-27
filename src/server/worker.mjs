@@ -7,7 +7,9 @@ import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
-import {clearWalletSeeds, walletSeedForRow} from './crypto-wallet-secrets.mjs';
+import {clearWalletSeeds, walletPasswordForRow, walletSeedForRow} from './crypto-wallet-secrets.mjs';
+import {CRYPTO_TASK_TIMEOUT_MS} from './config.mjs';
+import * as adspower from '../automation/lib/adspower.mjs';
 
 const ERROR_ROW_STATUSES = new Set([
   'failed',
@@ -183,19 +185,54 @@ export class JobWorker {
     addEvent(this.db, job.id, 'row.started', `row ${row.row_number} started`, {}, row.id);
 
     const options = JSON.parse(job.options_json || '{}');
+    const rowArgs = runnerArgs(options);
     const heartbeat = this.startRowHeartbeat(job, row);
     let result;
     let unexpectedError = false;
     try {
-      result = await this.executeRowFn(csvText, row.raw_index, {
+      const executionPromise = this.executeRowFn(csvText, row.raw_index, {
         ...options,
         ...(options.rechargeMode === 'crypto' ? {runtimeSeedPhrase: walletSeedForRow(job.id, row.raw_index)} : {}),
+        ...(options.rechargeMode === 'crypto' ? {runtimeWalletPassword: walletPasswordForRow(job.id, row.raw_index)} : {}),
         runtimeLog: {
           jobId: job.id,
           rowId: row.id,
           rowNumber: row.row_number,
         },
       });
+      if (rowArgs.rechargeMode !== 'crypto') {
+        result = await executionPromise;
+      } else {
+        const elapsedMs = Date.now() - current.startedAtMs;
+        const remainingMs = Math.max(1, CRYPTO_TASK_TIMEOUT_MS - elapsedMs);
+        let timeoutHandle;
+        const timeoutPromise = new Promise((resolve) => {
+          timeoutHandle = setTimeout(() => resolve({timedOut: true}), remainingMs);
+        });
+        const outcome = await Promise.race([executionPromise, timeoutPromise]);
+        clearTimeout(timeoutHandle);
+        if (!outcome?.timedOut) {
+          result = outcome;
+        } else {
+          // 超时必须先关闭当前 AdsPower profile，再把结果标成可继续，避免批次卡死在这一行。
+          const profileStop = await adspower.stopProfile(rowArgs, {
+            userId: row.ads_power_user_id || row.profile_id || '',
+            serialNumber: row.ads_power_serial_number || '',
+          });
+          executionPromise.catch(() => {});
+          result = {
+            status: 'failed',
+            stage: 'crypto.timeout',
+            errorCode: 'crypto_task_timeout',
+            message: '虚拟币充值单行流程超过 3 分钟，已强制关闭浏览器并继续下一任务',
+            errorDetail: 'crypto task timeout after ' + CRYPTO_TASK_TIMEOUT_MS + 'ms',
+            details: {profileStop},
+            safeToContinue: true,
+            stopProfile: true,
+            profileStop,
+          };
+        }
+      }
     } catch (error) {
       unexpectedError = true;
       result = this.resultFromUnexpectedRowError(error, row);

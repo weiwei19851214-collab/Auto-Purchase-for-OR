@@ -6,7 +6,7 @@ import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
 import {DEFAULT_SERVER_PORT, PUBLIC_DIR, ROOT_DIR} from './config.mjs';
 import {openDatabase, getJob, recoverInterruptedWork} from './db.mjs';
 import {httpError, readJsonBody, route, sendFile, sendJson, sendText} from './http-utils.mjs';
-import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList, repairOpomWriteback, resumeJob, resumePreview} from './jobs.mjs';
+import {cancelJob, createJob, dryRunPayload, jobDetails, jobsList, repairOpomWriteback, restoreCryptoSecrets, resumeJob, resumePreview} from './jobs.mjs';
 import {matchAdsPowerPayload} from './adspower-match.mjs';
 import {configuredTargetsFromRunner, inspectAdsPowerStatusTargets} from './adspower-status-targets.mjs';
 import {allocateCardsPayload} from './card-allocation.mjs';
@@ -187,6 +187,12 @@ async function handle(req, res) {
     if (req.method === 'POST' && parts[3] === 'resume-preview') {
       const payload = await readJsonBody(req);
       sendJson(res, 200, await resumePreview(db, jobId, payload));
+      return;
+    }
+
+    if (req.method === 'POST' && parts[3] === 'crypto-secrets') {
+      const payload = await readJsonBody(req);
+      sendJson(res, 200, restoreCryptoSecrets(db, jobId, payload));
       return;
     }
 

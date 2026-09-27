@@ -17,6 +17,9 @@ const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const DEFAULT_TIMEOUT_MS = 30000;
 const CRYPTO_PURCHASE_FORM_WAIT_MS = 20000;
 const POLL_MS = 750;
+const COINBASE_WALLET_UI_TIMEOUT_MS = 5000;
+const COINBASE_WALLET_UI_POLL_MS = 100;
+const COINBASE_FAILURE_STABLE_MS = 3000;
 const OKX_EXTENSION_ID = 'mcohilncbfahbmgdjkbpemcciiolgcge';
 // 业务约定：所有充值账号共用同一个 OKX 钱包，不按 OpenRouter 账号创建不同钱包。
 // Import wallet 欢迎页只说明当前浏览器尚未配置钱包，不能据此断言钱包从未登录；禁止覆盖已有钱包。
@@ -66,6 +69,9 @@ function readInput(args) {
     adspowerStartTimeoutMs: Number(input.adspowerStartTimeoutMs || DEFAULT_TIMEOUT_MS),
     confirmationDebugDir: input.confirmationDebugDir || '',
     walletSeedPhrase: input.walletSeedPhrase || '',
+    walletPassword: input.walletPassword || '',
+    // 当前任务已授权钱包连接；只有显式传 false 才保留 Connect 人工确认，付款/签名仍不自动提交。
+    confirmWalletConnection: input.confirmWalletConnection !== false,
     purchase: {...(input.purchase || {})},
     verbose: !!(args.verbose || input.verbose),
   };
@@ -136,7 +142,16 @@ function normalizeEndpoint(data) {
     || data?.debugPort
     || (String(ws).match(/127\.0\.0\.1:(\d+)/) || [])[1]
     || '';
-  return {browserWs: typeof ws === 'string' ? ws : '', debugPort: String(debugPort || '')};
+  const webdriver = data?.data?.webdriver || data?.webdriver || '';
+  const browserAppPath = String(webdriver || '').replace(
+    /\/chromedriver\.app\/Contents\/MacOS\/chromedriver$/i,
+    '/SunBrowser.app',
+  );
+  return {
+    browserWs: typeof ws === 'string' ? ws : '',
+    debugPort: String(debugPort || ''),
+    browserAppPath: browserAppPath.endsWith('/SunBrowser.app') ? browserAppPath : '',
+  };
 }
 
 function curlJson(url, timeoutSeconds = 3) {
@@ -207,6 +222,7 @@ async function startProfile(input) {
       const endpoint = normalizeEndpoint(await attempt.run());
       input.browserWs = endpoint.browserWs || input.browserWs;
       input.debugPort = endpoint.debugPort || input.debugPort;
+      input.browserAppPath = endpoint.browserAppPath || input.browserAppPath || '';
       const ready = await waitForDebugEndpoint(input);
       if (ready.ready) return {...input, launch: {source: attempt.name, ready}};
       failures.push(attempt.name + ': ' + ready.reason);
@@ -269,7 +285,7 @@ async function dispatchKey(client, type, params = {}) {
   return client.send('Input.dispatchKeyEvent', {type, ...params}, 5000);
 }
 
-async function typeCharacters(client, value) {
+async function typeCharacters(client, value, delayMs = 0) {
   for (const char of String(value)) {
     const key = /^[0-9]$/.test(char)
       ? {key: char, code: 'Digit' + char, windowsVirtualKeyCode: char.charCodeAt(0)}
@@ -278,6 +294,7 @@ async function typeCharacters(client, value) {
     await dispatchKey(client, 'rawKeyDown', key);
     await dispatchKey(client, 'char', {...key, text: char, unmodifiedText: char});
     await dispatchKey(client, 'keyUp', key);
+    if (delayMs > 0) await sleep(delayMs);
   }
 }
 
@@ -658,62 +675,154 @@ async function openCheckout(input, page) {
 }
 
 async function selectOkxWallet(checkout) {
-  const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + COINBASE_WALLET_UI_TIMEOUT_MS;
+  let selectionClicked = false;
   while (Date.now() < deadline) {
-    const clicked = await evaluate(checkout, () => {
+    const controls = await evaluate(checkout, () => {
+      if (location.origin !== 'https://payments.coinbase.com') return {};
       const visible = (node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      const candidates = [...document.querySelectorAll('button,[role="button"],a,li,label,div')]
+      const center = (node) => {
+        node.scrollIntoView({block: 'center', inline: 'center'});
+        const rect = node.getBoundingClientRect();
+        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+      };
+      const launch = [...document.querySelectorAll('button,[role="button"],a')]
+        .find((node) => visible(node) && /^Launch extension$/i.test((node.innerText || node.textContent || '').trim()));
+      if (launch) return {launch: center(launch)};
+      const candidates = [...document.querySelectorAll('button,[role="button"],a,li,label')]
         .filter(visible)
         .map((node) => ({node, text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim()}));
       const item = candidates.find((entry) => entry.text === 'OKX Wallet')
-        || candidates.find((entry) => /^OKX Wallet(?: Recent)?$/i.test(entry.text));
-      if (!item) return false;
-      const button = item.node.closest('button,[role="button"],a,li,label') || item.node;
-      button.click();
-      return true;
+        || candidates.find((entry) => /^OKX Wallet(?:\s+OKX Wallet)?(?:\s+Recent)?$/i.test(entry.text));
+      return item ? {wallet: center(item.node)} : {};
     });
-    if (clicked) break;
-    await sleep(POLL_MS);
+    if (controls.launch) {
+      return {selected: true, launchReady: true, selectionClicked};
+    }
+    if (!selectionClicked && controls.wallet) {
+      await checkout.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: controls.wallet.x, y: controls.wallet.y});
+      await checkout.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: controls.wallet.x, y: controls.wallet.y, button: 'left', clickCount: 1});
+      await checkout.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: controls.wallet.x, y: controls.wallet.y, button: 'left', clickCount: 1});
+      selectionClicked = true;
+    }
+    await sleep(COINBASE_WALLET_UI_POLL_MS);
   }
-  const readyDeadline = Date.now() + DEFAULT_TIMEOUT_MS;
-  while (Date.now() < readyDeadline) {
-    const ready = await evaluate(checkout, () => {
-      const text = document.body?.innerText || '';
-      const launch = [...document.querySelectorAll('button,[role="button"],a')]
-        .some((node) => /^Launch extension$/i.test((node.innerText || node.textContent || '').trim()));
-      return launch && /Scan with OKX Wallet/i.test(text);
-    });
-    if (ready) return {selected: true, launchReady: true};
-    await sleep(POLL_MS);
-  }
-  throw new Error('OKX Wallet or Launch extension was not available');
+  throw new Error('OKX Wallet or Launch extension was not available within 5000ms');
 }
 
-async function launchOkxExtension(checkout) {
-  // 这里只建立连接，绝不点击钱包里的确认、签名或广播按钮。
-  const clicked = await evaluate(checkout, () => {
+function interactiveOkxTargets(debugPort) {
+  const extensionRoot = 'chrome-extension://' + OKX_EXTENSION_ID + '/';
+  return getTargets(debugPort).filter((target) =>
+    ['page', 'other', 'iframe'].includes(target.type)
+    && String(target.url || '').startsWith(extensionRoot)
+    && !/(?:^|\/)(?:ses-)?sandbox\.html(?:\?|#|$)|(?:^|\/)offscreen\.html(?:\?|#|$)/i.test(String(target.url || ''))
+    && target.webSocketDebuggerUrl);
+}
+
+function okxTargetSummary(debugPort) {
+  const extensionRoot = 'chrome-extension://' + OKX_EXTENSION_ID + '/';
+  return getTargets(debugPort)
+    .filter((target) => String(target.url || '').startsWith(extensionRoot))
+    .map((target) => ({
+      type: target.type || '',
+      url: String(target.url || '').split('?')[0],
+      hasWebSocket: !!target.webSocketDebuggerUrl,
+    }));
+}
+
+async function launchOkxExtension(checkout, input = {}) {
+  // Coinbase 的扩展启动需要真实用户手势；这里只建立连接，绝不点击钱包里的确认、签名或广播按钮。
+  let browserActivated = false;
+  if (process.platform === 'darwin' && input.browserAppPath) {
+    try {
+      execFileSync('open', [input.browserAppPath], {stdio: 'ignore'});
+      browserActivated = true;
+      await sleep(150);
+    } catch {}
+  }
+  await checkout.send('Page.bringToFront').catch(() => {});
+  const deadline = Date.now() + COINBASE_WALLET_UI_TIMEOUT_MS;
+  let target = null;
+  while (!target && Date.now() < deadline) {
+    target = await evaluate(checkout, () => {
+      if (location.origin !== 'https://payments.coinbase.com') return null;
+      const button = [...document.querySelectorAll('button,[role="button"],a')]
+        .find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0
+            && /^Launch extension$/i.test((node.innerText || node.textContent || '').trim());
+        });
+      if (!button) return null;
+      button.scrollIntoView({block: 'center', inline: 'center'});
+      const rect = button.getBoundingClientRect();
+      return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+    });
+    if (!target) await sleep(COINBASE_WALLET_UI_POLL_MS);
+  }
+  if (!target) throw new Error('Launch extension button not clickable');
+  await checkout.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
+  await checkout.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  await checkout.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  const firstDeadline = Date.now() + 800;
+  while (Date.now() < firstDeadline) {
+    const targets = interactiveOkxTargets(input.debugPort);
+    if (targets.length) return {clicked: true, browserActivated, fallbackClicked: false, targetCount: targets.length};
+    await sleep(COINBASE_WALLET_UI_POLL_MS);
+  }
+  // 部分 Chrome 版本只把键盘激活识别成扩展启动的真实用户手势。
+  const focused = await evaluate(checkout, () => {
+    const button = [...document.querySelectorAll('button,[role="button"],a')]
+      .find((node) => /^Launch extension$/i.test((node.innerText || node.textContent || '').trim()));
+    button?.focus();
+    return document.activeElement === button;
+  });
+  if (focused) {
+    await dispatchKey(checkout, 'rawKeyDown', {key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+    await dispatchKey(checkout, 'keyUp', {key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
+    const keyboardDeadline = Date.now() + 800;
+    while (Date.now() < keyboardDeadline) {
+      const targets = interactiveOkxTargets(input.debugPort);
+      if (targets.length) return {clicked: true, browserActivated, keyboardClicked: true, fallbackClicked: false, targetCount: targets.length};
+      await sleep(COINBASE_WALLET_UI_POLL_MS);
+    }
+  }
+  // 某些 AdsPower/Chrome 版本只响应 Coinbase 自己的 click handler；只兜底一次，不触碰付款按钮。
+  const fallbackClicked = await evaluate(checkout, () => {
     const button = [...document.querySelectorAll('button,[role="button"],a')]
       .find((node) => /^Launch extension$/i.test((node.innerText || node.textContent || '').trim()));
     if (!button) return false;
     button.click();
     return true;
   });
-  if (!clicked) throw new Error('Launch extension button not clickable');
-  return {clicked: true};
+  const fallbackDeadline = Date.now() + COINBASE_WALLET_UI_TIMEOUT_MS;
+  while (Date.now() < fallbackDeadline) {
+    const targets = interactiveOkxTargets(input.debugPort);
+    if (targets.length) return {clicked: true, browserActivated, fallbackClicked, targetCount: targets.length};
+    await sleep(COINBASE_WALLET_UI_POLL_MS);
+  }
+  writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-launch-failed', {
+    focused,
+    browserActivated,
+    fallbackClicked,
+    targets: okxTargetSummary(input.debugPort),
+  });
+  throw new Error('OKX extension did not open after Launch extension click');
 }
 
 async function readCheckoutState(checkout) {
   const deadline = Date.now() + 10000;
   let state = null;
+  let paymentFailureSeenAt = 0;
   while (Date.now() < deadline) {
     state = await evaluate(checkout, () => {
       const text = document.body?.innerText || '';
       const match = text.match(/You need\s+([0-9,.]+)\s+([A-Z0-9_]+)\s+to complete your payment/i);
       return {
         insufficientFunds: /Insufficient funds/i.test(text),
+        paymentFailed: /Try again/i.test(text),
         walletConnected: /OKX Wallet connected/i.test(text),
         paymentCompleted: /Payment complete|Payment successful|Paid successfully/i.test(text),
         requiredAmount: match?.[1] || '',
@@ -721,13 +830,19 @@ async function readCheckoutState(checkout) {
         tail: text.slice(-1800),
       };
     });
-    if (state.insufficientFunds || state.walletConnected || state.paymentCompleted) return state;
+    if (state.paymentFailed) {
+      paymentFailureSeenAt ||= Date.now();
+      if (Date.now() - paymentFailureSeenAt >= COINBASE_FAILURE_STABLE_MS) return state;
+    } else {
+      paymentFailureSeenAt = 0;
+      if (state.insufficientFunds || state.walletConnected || state.paymentCompleted) return state;
+    }
     await sleep(500);
   }
   return state || {};
 }
 
-async function inspectWalletStage(wallet) {
+export async function inspectWalletStage(wallet) {
   return evaluate(wallet, (extensionId) => {
     if (location.origin !== 'chrome-extension://' + extensionId) return {stage: 'unknown'};
     const visible = (node) => {
@@ -735,15 +850,25 @@ async function inspectWalletStage(wallet) {
       return rect.width > 0 && rect.height > 0;
     };
     const text = document.body?.innerText || '';
-    const route = location.hash || '';
+    const route = (location.hash || '').split('?')[0];
     const buttons = [...document.querySelectorAll('button,[role="button"]')]
       .filter(visible).map((node) => (node.innerText || node.textContent || '').trim());
     const fields = [...document.querySelectorAll('input,textarea')]
       .filter((node) => visible(node) && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type));
     // 只回传阶段、计数与布尔值，不回传页面文本、输入值或助记词。
-    if (/Unlock|Enter password/i.test(text) && fields.some((field) => field.type === 'password')) return {stage: 'locked'};
-    if (/Create password|Set password|Secure your wallet/i.test(text)
-      && fields.some((field) => field.type === 'password')) return {stage: 'password_setup'};
+    // 设置页说明包含 “when unlocking”，不能靠正文子串判断解锁；按路由、字段数量和精确按钮分支。
+    const passwordCount = fields.filter((field) => field.type === 'password').length;
+    if (route === '#/password-type' && /Set password|Create password/i.test(text)
+      && passwordCount === 2 && buttons.some((label) => /^Confirm$/i.test(label))) return {stage: 'password_setup'};
+    if (route === '#/password-type' && /Secure your wallet/i.test(text) && passwordCount === 0
+      && buttons.some((label) => /^Next$/i.test(label))) return {stage: 'password_choice'};
+    if (route === '#/unlock' && passwordCount === 1
+      && buttons.some((label) => /^Unlock$/i.test(label))) return {stage: 'unlock'};
+    if (/Welcome to OKX Wallet/i.test(text)
+      && buttons.some((label) => /^Start your Web3 journey$/i.test(label))) return {stage: 'post_password_welcome'};
+    if (/Connect account/i.test(text)
+      && buttons.some((label) => /^Connect$/i.test(label))) return {stage: 'connect_request'};
+    if (route.startsWith('#/connect/') && /\bConnected\b/i.test(text)) return {stage: 'ready'};
     if (/Transaction|Gas fee|Sign request|Approve payment/i.test(text)) return {stage: 'unknown'};
     // Confirm 在空表单上是 disabled，仍是识别此路由的必要控件。
     if (route === '#/import-with-seed-phrase-and-private-key' && fields.length === 12
@@ -765,7 +890,7 @@ async function waitForWalletStage(wallet, allowed, timeoutMs = 10000) {
   do {
     const state = await inspectWalletStage(wallet);
     if (allowed.includes(state.stage)) return state;
-    if (state.stage === 'locked' || state.stage === 'password_setup') {
+    if (state.stage === 'unlock' || state.stage === 'password_setup') {
       throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
     }
     await sleep(400);
@@ -778,11 +903,24 @@ async function clickWalletStep(wallet, stage, label) {
     throw new Error('manual_security_blocker: crypto_wallet_import_page_changed');
   }
   const target = await evaluate(wallet, (expectedStage, expectedLabelSource, extensionId) => {
-    const routes = {welcome: '#/initialize', method: '#/initialize-import', words: '#/import-with-seed-phrase-and-private-key'};
-    if (location.origin !== 'chrome-extension://' + extensionId || location.hash !== routes[expectedStage]) return null;
+    const routes = {
+      welcome: '#/initialize',
+      method: '#/initialize-import',
+      words: '#/import-with-seed-phrase-and-private-key',
+      password_choice: '#/password-type',
+      post_password_welcome: '#/show-supported-chains',
+      unlock: '#/unlock',
+      password_setup: '#/password-type',
+      connect_request: '#/connect/',
+    };
+    if (location.origin !== 'chrome-extension://' + extensionId
+      || !routes[expectedStage]
+      || !String(location.hash || '').startsWith(routes[expectedStage])) return null;
     const expectedLabel = new RegExp(expectedLabelSource, 'i');
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-    const selectors = expectedStage === 'method' ? 'button,[role="button"],a,li,div' : 'button,[role="button"]';
+    const selectors = ['method', 'password_choice'].includes(expectedStage)
+      ? 'button,[role="button"],a,li,div'
+      : 'button,[role="button"]';
     const matches = [...document.querySelectorAll(selectors)].filter((node) => {
       const rect = node.getBoundingClientRect();
       const text = normalize(node.innerText || node.textContent);
@@ -808,10 +946,10 @@ async function clickWalletStep(wallet, stage, label) {
   await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
 }
 
-export async function importOkxWallet(wallet, phrase) {
+export async function importOkxWallet(wallet, phrase, options = {}) {
   const initial = await inspectWalletStage(wallet);
   if (initial.stage === 'ready') return {status: 'ready'};
-  if (initial.stage === 'locked' || initial.stage === 'password_setup') {
+  if (initial.stage === 'unlock' || initial.stage === 'password_setup') {
     throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
   }
   if (!['welcome', 'method', 'words'].includes(initial.stage)) {
@@ -835,31 +973,81 @@ export async function importOkxWallet(wallet, phrase) {
 
   const words = phrase.split(' ');
   for (let index = 0; index < words.length; index += 1) {
-    const focused = await evaluate(wallet, (fieldIndex, extensionId) => {
+    const fieldTarget = await evaluate(wallet, (fieldIndex, extensionId) => {
       if (location.origin !== 'chrome-extension://' + extensionId
-        || location.hash !== '#/import-with-seed-phrase-and-private-key') return false;
+        || location.hash !== '#/import-with-seed-phrase-and-private-key') return null;
       const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
       });
-      if (fields.length !== 12 || fields.slice(fieldIndex).some((field) => !!field.value)) return false;
-      fields[fieldIndex].focus();
-      return document.activeElement === fields[fieldIndex];
+      if (fields.length !== 12
+        || fields.slice(0, fieldIndex).some((field) => !field.value)
+        || !!fields[fieldIndex].value) return null;
+      fields[fieldIndex].scrollIntoView({block: 'center', inline: 'center'});
+      const rect = fields[fieldIndex].getBoundingClientRect();
+      return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
     }, index, OKX_EXTENSION_ID);
+    if (!fieldTarget) throw new Error('manual_security_blocker: crypto_wallet_import_field_changed');
+    // OKX 的输入区位于 SES iframe 中；必须真实点击当前格，再逐字符键入，不能用 DOM focus/value 旁路。
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: fieldTarget.x, y: fieldTarget.y});
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: fieldTarget.x, y: fieldTarget.y, button: 'left', clickCount: 1});
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: fieldTarget.x, y: fieldTarget.y, button: 'left', clickCount: 1});
+    const focusReady = async () => evaluate(wallet, (fieldIndex) => {
+      const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
+      });
+      return fields.length === 12 && document.activeElement === fields[fieldIndex];
+    }, index);
+    let focused = false;
+    let focusDeadline = Date.now() + 500;
+    while (!focused && Date.now() < focusDeadline) {
+      focused = await focusReady();
+      if (!focused) await sleep(50);
+    }
+    if (!focused) {
+      // OKX SES 首次点击偶尔只激活窗口；第二次点击才把焦点交给输入框。
+      await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: fieldTarget.x, y: fieldTarget.y, button: 'left', clickCount: 1});
+      await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: fieldTarget.x, y: fieldTarget.y, button: 'left', clickCount: 1});
+      focusDeadline = Date.now() + 500;
+      while (!focused && Date.now() < focusDeadline) {
+        focused = await focusReady();
+        if (!focused) await sleep(50);
+      }
+    }
+    if (!focused) {
+      // 两次真实鼠标点击后仍无焦点时，只用 DOM focus 选择目标格；内容仍全部由真实键盘事件输入。
+      focused = await evaluate(wallet, (fieldIndex) => {
+        const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
+        });
+        if (fields.length !== 12 || !fields[fieldIndex]) return false;
+        fields[fieldIndex].focus();
+        return document.activeElement === fields[fieldIndex];
+      }, index);
+    }
     if (!focused) throw new Error('manual_security_blocker: crypto_wallet_import_field_changed');
-    await typeCharacters(wallet, words[index]);
+    await typeCharacters(wallet, words[index], 12);
     await dispatchKey(wallet, 'rawKeyDown', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
     await dispatchKey(wallet, 'keyUp', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
-    const verified = await evaluate(wallet, (fieldIndex, length, extensionId) => {
-      if (location.origin !== 'chrome-extension://' + extensionId
-        || location.hash !== '#/import-with-seed-phrase-and-private-key') return false;
-      const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
-      });
-      return fields.length === 12 && fields[fieldIndex].value.length === length
-        && document.activeElement !== fields[fieldIndex];
-    }, index, words[index].length, OKX_EXTENSION_ID);
+    const deadline = Date.now() + 2000;
+    let verified = false;
+    do {
+      verified = await evaluate(wallet, (fieldIndex, length, extensionId) => {
+        if (location.origin !== 'chrome-extension://' + extensionId
+          || location.hash !== '#/import-with-seed-phrase-and-private-key') return false;
+        const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
+        });
+        const nextFocused = fieldIndex === fields.length - 1
+          ? document.activeElement !== fields[fieldIndex]
+          : document.activeElement === fields[fieldIndex + 1];
+        return fields.length === 12 && fields[fieldIndex].value.length === length && nextFocused;
+      }, index, words[index].length, OKX_EXTENSION_ID);
+      if (!verified) await sleep(50);
+    } while (!verified && Date.now() < deadline);
     if (!verified) throw new Error('manual_security_blocker: crypto_wallet_import_field_unverified');
   }
   // 只在仍是导入页、12 格都已输入且 Confirm 可用时提交；导入成功还必须回读钱包主页。
@@ -877,13 +1065,145 @@ export async function importOkxWallet(wallet, phrase) {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
     });
+    const text = document.body?.innerText || '';
     return buttons.length === 1 && !buttons[0].disabled && fields.length === 12
-      && fields.every((field) => !!field.value);
+      && fields.every((field) => !!field.value)
+      && !/Incorrect seed phrase|Check and re-enter/i.test(text);
   }, OKX_EXTENSION_ID);
   if (!confirmReady) throw new Error('manual_security_blocker: crypto_wallet_import_confirm_unavailable');
   await clickWalletStep(wallet, 'words', /^Confirm$/i);
-  await waitForWalletStage(wallet, ['ready'], 20000);
+  if (options.deferPasswordSetup) {
+    const transitionDeadline = Date.now() + 800;
+    let stage = 'words';
+    while (Date.now() < transitionDeadline) {
+      stage = (await inspectWalletStage(wallet).catch(() => ({stage: 'transitioning'}))).stage;
+      if (stage !== 'words') return {status: 'password_setup'};
+      await sleep(50);
+    }
+    // SES 偶尔接收鼠标事件但未触发 React handler；仅对已启用的导入 Confirm 兜底一次。
+    await evaluate(wallet, () => {
+      const button = [...document.querySelectorAll('button,[role="button"]')]
+        .find((node) => !node.disabled && /^Confirm$/i.test((node.innerText || node.textContent || '').trim()));
+      button?.click();
+    });
+    return {status: 'password_setup'};
+  }
+  const nextStage = await waitForWalletStage(wallet, ['ready', 'password_setup'], 20000);
+  if (nextStage.stage === 'password_setup') {
+    throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
+  }
   return {status: 'ready'};
+}
+
+// 设置密码要求两格，解锁要求一格；只向当前阶段填写，不使用 OpenRouter 账号密码替代 CSV 钱包密码。
+export async function completeOkxPasswordSetup(wallet, password, expectedStage = 'password_setup') {
+  const normalizedPassword = typeof password === 'string' ? password : '';
+  if (!normalizedPassword) throw new Error('manual_security_blocker: crypto_wallet_password_missing');
+  if (!['password_setup', 'unlock'].includes(expectedStage)) {
+    throw new Error('manual_security_blocker: crypto_wallet_password_page_changed');
+  }
+  const state = await inspectWalletStage(wallet);
+  if (state.stage !== expectedStage) {
+    throw new Error('manual_security_blocker: crypto_wallet_password_page_changed');
+  }
+  const expectedCount = expectedStage === 'password_setup' ? 2 : 1;
+  for (let index = 0; index < expectedCount; index += 1) {
+    if ((await inspectWalletStage(wallet)).stage !== expectedStage) {
+      throw new Error('manual_security_blocker: crypto_wallet_password_page_changed');
+    }
+    // 每格滚动后重新取坐标，不能提前缓存两格坐标；只回传长度，绝不回传密码。
+    const target = await evaluate(wallet, (fieldIndex, count) => {
+      const fields = [...document.querySelectorAll('input[type="password"]')].filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !node.disabled;
+      });
+      if (fields.length !== count) return null;
+      const field = fields[fieldIndex];
+      field.scrollIntoView({block: 'center', inline: 'center'});
+      const rect = field.getBoundingClientRect();
+      return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, length: field.value.length};
+    }, index, expectedCount);
+    if (!target) throw new Error('manual_security_blocker: crypto_wallet_password_fields_unavailable');
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
+    await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+    const focusReady = () => evaluate(wallet, (fieldIndex) => {
+      const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !node.disabled && node.type === 'password';
+      });
+      return document.activeElement === fields[fieldIndex];
+    }, index);
+    let focused = false;
+    const focusDeadline = Date.now() + 1000;
+    do {
+      focused = await focusReady();
+      if (!focused) await sleep(50);
+    } while (!focused && Date.now() < focusDeadline);
+    if (!focused) throw new Error('manual_security_blocker: crypto_wallet_password_field_changed');
+    await clearFocusedInput(wallet, target.length);
+    const cleared = await evaluate(wallet, () => document.activeElement?.type === 'password'
+      && document.activeElement.value === '');
+    if (!cleared) throw new Error('manual_security_blocker: crypto_wallet_password_unverified');
+    await typeCharacters(wallet, normalizedPassword, 12);
+    await dispatchKey(wallet, 'rawKeyDown', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
+    await dispatchKey(wallet, 'keyUp', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
+    const verified = await evaluate(wallet, (fieldIndex, length) => {
+      const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !node.disabled && node.type === 'password';
+      });
+      return fields[fieldIndex]?.value.length === length && document.activeElement !== fields[fieldIndex];
+    }, index, normalizedPassword.length);
+    if (!verified) throw new Error('manual_security_blocker: crypto_wallet_password_unverified');
+  }
+  const submitLabel = expectedStage === 'unlock' ? 'Unlock' : 'Confirm';
+  const submitted = await evaluate(wallet, (extensionId, count, length, label, stage) => {
+    if (location.origin !== 'chrome-extension://' + extensionId) return null;
+    const route = (location.hash || '').split('?')[0];
+    if (route !== (stage === 'unlock' ? '#/unlock' : '#/password-type')) return null;
+    const fields = [...document.querySelectorAll('input[type="password"]')].filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && !node.disabled;
+    });
+    if (fields.length !== count || fields.some((field) => field.value.length !== length)
+      || (count === 2 && fields[0].value !== fields[1].value)) return null;
+    const buttons = [...document.querySelectorAll('button,[role="button"]')].filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && !node.disabled
+        && node.getAttribute('aria-disabled') !== 'true'
+        && (node.innerText || node.textContent || '').trim() === label;
+    });
+    if (buttons.length !== 1) return null;
+    buttons[0].scrollIntoView({block: 'center', inline: 'center'});
+    const rect = buttons[0].getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  }, OKX_EXTENSION_ID, expectedCount, normalizedPassword.length, submitLabel, expectedStage);
+  if (!submitted) throw new Error('manual_security_blocker: crypto_wallet_password_submit_unavailable');
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: submitted.x, y: submitted.y});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: submitted.x, y: submitted.y, button: 'left', clickCount: 1});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: submitted.x, y: submitted.y, button: 'left', clickCount: 1});
+}
+
+async function completeOkxPasswordUnlock(wallet, password) {
+  await completeOkxPasswordSetup(wallet, password, 'unlock');
+}
+
+async function clickOkxWalletConnect(wallet) {
+  const state = await inspectWalletStage(wallet);
+  if (state.stage !== 'connect_request') {
+    throw new Error('manual_security_blocker: crypto_wallet_connect_page_changed');
+  }
+  // 连接仅限当前 Coinbase 来源，不把其他 DApp 的 Connect 当作充值流程授权。
+  const trusted = await evaluate(wallet, () => {
+    const text = document.body?.innerText || '';
+    return (location.hash || '').startsWith('#/connect/')
+      && /\bCoinbase\b/.test(text)
+      && /(?:^|\s)payments\.coinbase\.com(?=\s|$)/.test(text);
+  });
+  if (!trusted) throw new Error('manual_security_blocker: crypto_wallet_connect_origin_mismatch');
+  await clickWalletStep(wallet, 'connect_request', /^Connect$/i);
+  return {status: 'connect_submitted'};
 }
 
 export async function findOkxWalletTargets(input, listTargets = getTargets, pause = sleep) {
@@ -891,7 +1211,8 @@ export async function findOkxWalletTargets(input, listTargets = getTargets, paus
   const deadline = Date.now() + 10000;
   do {
     const targets = listTargets(input.debugPort).filter((target) =>
-      ['page', 'other'].includes(target.type) && String(target.url || '').startsWith(extensionRoot)
+      ['page', 'other', 'iframe'].includes(target.type) && String(target.url || '').startsWith(extensionRoot)
+      && !/(?:^|\/)(?:ses-)?sandbox\.html(?:\?|#|$)|(?:^|\/)offscreen\.html(?:\?|#|$)/i.test(String(target.url || ''))
       && target.webSocketDebuggerUrl);
     if (targets.length) return targets;
     await pause(200);
@@ -902,7 +1223,7 @@ export async function findOkxWalletTargets(input, listTargets = getTargets, paus
 export function classifyOkxWalletStages(stages) {
   const actionable = stages.flatMap((state, index) =>
     ['welcome', 'method', 'words', 'ready'].includes(state.stage) ? [index] : []);
-  if (stages.some((state) => ['locked', 'password_setup'].includes(state.stage))) {
+  if (stages.some((state) => ['unlock', 'password_setup'].includes(state.stage))) {
     return {status: 'authentication_required', index: -1};
   }
   if (actionable.length > 1) return {status: 'ambiguous', index: -1};
@@ -910,45 +1231,119 @@ export function classifyOkxWalletStages(stages) {
   return {status: 'pending', index: -1};
 }
 
-async function prepareOkxWallet(input) {
-  try {
-    const deadline = Date.now() + 10000;
-    let lastKnownStages = [];
-    do {
-      const targets = await findOkxWalletTargets(input);
-      const clients = [];
-      try {
-        for (const target of targets) {
-          const wallet = await cdp(target.webSocketDebuggerUrl);
-          clients.push(wallet);
-          await wallet.send('Runtime.enable');
+async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastKnownStages = [];
+  do {
+    const targets = await findOkxWalletTargets(input);
+    const clients = [];
+    let selectedIndex = -1;
+    try {
+      for (const target of targets) {
+        const wallet = await cdp(target.webSocketDebuggerUrl);
+        clients.push(wallet);
+        await wallet.send('Runtime.enable');
+      }
+      const stages = await Promise.all(clients.map((wallet) =>
+        inspectWalletStage(wallet).catch(() => ({stage: 'unknown'}))));
+      lastKnownStages = stages.map((state) => state.stage);
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-targets', {
+        allowed,
+        targets: targets.map((target, index) => ({
+          type: target.type || '',
+          url: String(target.url || '').split('?')[0],
+          stage: stages[index]?.stage || 'unknown',
+        })),
+      });
+      const matches = stages.flatMap((state, index) => allowed.includes(state.stage) ? [index] : []);
+      if (matches.length > 1) {
+        throw new Error('manual_security_blocker: crypto_wallet_import_target_ambiguous');
+      }
+      if (matches.length === 1) {
+        selectedIndex = matches[0];
+        const wallet = clients[selectedIndex];
+        for (let index = 0; index < clients.length; index += 1) {
+          if (index !== selectedIndex) clients[index].close();
         }
-        const stages = await Promise.all(clients.map((wallet) => inspectWalletStage(wallet).catch(() => ({stage: 'unknown'}))));
-        lastKnownStages = stages.map((state) => state.stage);
-        const selection = classifyOkxWalletStages(stages);
-        if (['welcome', 'method', 'words'].includes(selection.status)) {
-          return await importOkxWallet(clients[selection.index], input.walletSeedPhrase);
-        }
-        if (selection.status === 'ready') {
-          if ((await inspectWalletStage(clients[selection.index])).stage !== 'ready') {
-            throw new Error('manual_security_blocker: crypto_wallet_import_unverified');
-          }
-          return {status: 'ready'};
-        }
-        if (selection.status === 'authentication_required') {
-          throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
-        }
-        if (selection.status === 'ambiguous') throw new Error('manual_security_blocker: crypto_wallet_import_target_ambiguous');
-      } finally {
+        return {wallet, target: targets[selectedIndex], state: stages[selectedIndex]};
+      }
+      if (stages.some((state) => ['unlock', 'password_setup'].includes(state.stage))) {
+        throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
+      }
+    } catch (error) {
+      if (/^manual_security_blocker: crypto_wallet_import_/.test(error.message || '')) throw error;
+    } finally {
+      if (selectedIndex < 0) {
         for (const client of clients) client.close();
       }
-      await sleep(200);
-    } while (Date.now() < deadline);
-    throw new Error('manual_security_blocker: crypto_wallet_import_unverified:' + lastKnownStages.join(','));
+    }
+    await sleep(200);
+  } while (Date.now() < deadline);
+  throw new Error('manual_security_blocker: crypto_wallet_import_page_changed:' + lastKnownStages.join(','));
+}
+
+export async function prepareOkxWallet(input, adapters = {}) {
+  const acquire = adapters.acquireStage || acquireOkxWalletStage;
+  let current;
+  try {
+    // 普通密码页是可执行阶段，不是人工阻断；允许从上一次已完成的页面直接接续。
+    let allowed = ['ready', 'unlock', 'welcome', 'method', 'words', 'password_choice', 'password_setup',
+      'post_password_welcome', 'connect_request'];
+    for (let transition = 0; transition < 8; transition += 1) {
+      current = await acquire(input, allowed, 20000);
+      const stage = current.state.stage;
+      if (stage === 'ready') return {status: 'ready'};
+      if (stage === 'connect_request') {
+        if (input.confirmWalletConnection === false) return {status: 'connect_required'};
+        return await clickOkxWalletConnect(current.wallet);
+      }
+      if (['unlock', 'password_choice', 'password_setup'].includes(stage) && !input.walletPassword) {
+        throw new Error('manual_security_blocker: crypto_wallet_password_missing');
+      }
+      switch (stage) {
+        case 'welcome':
+          await clickWalletStep(current.wallet, stage, /^Import(?: existing)? wallet$/i);
+          allowed = ['method', 'words'];
+          break;
+        case 'method':
+          await clickWalletStep(current.wallet, stage, /^Seed phrase or private key\s+Use 12, 18, or 24-word seed phrases, or private keys/i);
+          allowed = ['words'];
+          break;
+        case 'words':
+          await importOkxWallet(current.wallet, input.walletSeedPhrase, {deferPasswordSetup: true});
+          allowed = ['password_choice', 'password_setup', 'post_password_welcome', 'ready', 'connect_request'];
+          break;
+        case 'password_choice':
+          await clickWalletStep(current.wallet, stage, /^Password\s+Create a password to protect your wallet/i);
+          await clickWalletStep(current.wallet, stage, /^Next$/i);
+          allowed = ['password_setup'];
+          break;
+        case 'password_setup':
+          await completeOkxPasswordSetup(current.wallet, input.walletPassword);
+          allowed = ['post_password_welcome', 'ready', 'connect_request'];
+          break;
+        case 'unlock':
+          await completeOkxPasswordUnlock(current.wallet, input.walletPassword);
+          allowed = ['ready', 'connect_request'];
+          break;
+        case 'post_password_welcome':
+          await clickWalletStep(current.wallet, stage, /^Start your Web3 journey$/i);
+          allowed = ['ready', 'connect_request'];
+          break;
+        default:
+          throw new Error('manual_security_blocker: crypto_wallet_import_unknown_page');
+      }
+      // OKX 会在路由切换时重建 SES iframe；每一步完成后重新绑定，不重跑助记词或密码提交。
+      current.wallet.close();
+      current = null;
+    }
+    throw new Error('manual_security_blocker: crypto_wallet_import_page_changed');
   } catch (error) {
-    if (/^manual_security_blocker: crypto_wallet_import_/.test(error.message || '')) throw error;
+    if (/^manual_security_blocker: crypto_wallet_(?:import_|password_|connect_)/.test(error.message || '')) throw error;
     // 扩展内部异常不得将浏览器错误（可能包含输入内容）写入任务日志。
     throw new Error('manual_security_blocker: crypto_wallet_import_inspection_failed');
+  } finally {
+    current?.wallet?.close();
   }
 }
 
@@ -988,9 +1383,37 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
   const checkout = checkoutTarget.checkout;
   try {
     const walletSelection = await chooseWallet(checkout);
-    await openWalletExtension(checkout);
+    const walletLaunch = await openWalletExtension(checkout, input);
+    writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-launch', {
+      selectionClicked: walletSelection.selectionClicked === true,
+      launchReady: walletSelection.launchReady === true,
+      fallbackClicked: walletLaunch?.fallbackClicked === true,
+      browserActivated: walletLaunch?.browserActivated === true,
+      targetCount: Number(walletLaunch?.targetCount || 0),
+    });
     // Coinbase 的 Launch extension 弹出钱包后，再判断登录状态或执行首次导入。
     const wallet = await prepareWallet(input);
+    if (wallet.status === 'connect_required' || wallet.status === 'connect_submitted') {
+      const checkoutState = await inspectCheckout(checkout);
+      const okxTargets = await inspectTargets(input.debugPort);
+      return {
+        checkout,
+        cryptoPurchase: {
+          ...purchaseContext,
+          purchaseClick,
+          checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
+          walletSelection,
+          wallet,
+          checkoutState,
+          okxTargets,
+          walletConnectionRequired: wallet.status === 'connect_required',
+          walletConnectionSubmitted: wallet.status === 'connect_submitted',
+          walletConfirmationRequired: true,
+          insufficientFunds: checkoutState.insufficientFunds === true,
+          paymentFailed: checkoutState.paymentFailed === true,
+        },
+      };
+    }
     if (wallet.status !== 'ready') throw new Error('manual_security_blocker: crypto_wallet_import_unverified');
     const checkoutState = await inspectCheckout(checkout);
     const okxTargets = await inspectTargets(input.debugPort);
@@ -1002,6 +1425,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
         walletSelection,
         wallet,
+        walletPasswordAvailable: Boolean(input.walletPassword),
         checkoutState,
         okxTargets,
         insufficientFunds: checkoutState.insufficientFunds === true,
@@ -1036,7 +1460,9 @@ async function runCryptoRecharge(rawInput) {
     writeDiagnostic(input.confirmationDebugDir, 'crypto-checkout-result', cryptoPurchase);
     return {
       ok: true,
-      status: cryptoPurchase.insufficientFunds ? 'crypto_insufficient_funds' : 'wallet_confirmation_required',
+      status: cryptoPurchase.paymentFailed
+        ? 'crypto_payment_failed'
+        : (cryptoPurchase.insufficientFunds ? 'crypto_insufficient_funds' : 'wallet_confirmation_required'),
       account: account.account,
       launch: input.launch,
       cryptoPurchase,

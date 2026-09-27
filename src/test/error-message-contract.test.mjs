@@ -97,6 +97,18 @@ test('simplifyError maps identity and manual security blockers', () => {
   );
 });
 
+test('simplifyError distinguishes missing OKX wallet password from generic authentication', () => {
+  const missing = simplifyError('manual_security_blocker: crypto_wallet_password_missing');
+  assert.equal(missing.errorCode, 'crypto_wallet_password_missing');
+  assert.match(missing.message, /第 5 列/);
+});
+
+test('simplifyError maps crypto three-minute timeout to a resumable failure', () => {
+  const timeout = simplifyError('crypto_task_timeout');
+  assert.equal(timeout.errorCode, 'crypto_task_timeout');
+  assert.match(timeout.message, /3 分钟/);
+});
+
 test('simplifyError distinguishes payment decline from frequency or amount limit', () => {
   const limit = simplifyError('Payment Issue: amount limit reached after repeated attempts; Your card was declined');
   assert.equal(limit.errorCode, 'card_rate_or_amount_limit');

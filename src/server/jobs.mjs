@@ -16,7 +16,7 @@ import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {writeCompletedRow} from './opom-client.mjs';
-import {clearWalletSeeds, holdWalletSeeds, validateWalletSeedRows} from './crypto-wallet-secrets.mjs';
+import {clearWalletSeeds, holdWalletPasswords, holdWalletSeeds, validateWalletPasswords, validateWalletSeedRows} from './crypto-wallet-secrets.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -102,6 +102,7 @@ export async function createJob(db, payload) {
     throw new Error('只有虚拟币任务可接收钱包助记词');
   }
   const seedPhrases = validateWalletSeedRows(payload.seedPhrases, plan.rows);
+  const walletPasswords = validateWalletPasswords(payload.walletPasswords, plan.rows);
   const jobId = newId('job');
   const jobOptions = {
     ...options,
@@ -215,6 +216,7 @@ export async function createJob(db, payload) {
   });
   // 结果文件成功生成后再持有内存凭据；无可执行行不保存，异常不会遗留助记词。
   if (readyCount > 0) holdWalletSeeds(jobId, seedPhrases);
+  if (readyCount > 0) holdWalletPasswords(jobId, walletPasswords);
   addEvent(db, jobId, 'job.created', 'job queued from uploaded CSV', {
     fileName: sourceFileName,
     jobName,
@@ -225,6 +227,26 @@ export async function createJob(db, payload) {
     addEvent(db, jobId, 'job.completed', 'no executable rows');
   }
   return jobDetails(db, jobId);
+}
+
+export function restoreCryptoSecrets(db, jobId, payload = {}) {
+  const job = getJob(db, jobId);
+  if (!job) throw httpError(404, 'Job not found');
+  const options = JSON.parse(job.options_json || '{}');
+  if (runnerArgs(options).rechargeMode !== 'crypto') {
+    throw httpError(409, 'Only crypto jobs accept wallet credentials');
+  }
+  const rows = listRows(db, jobId).sort((left, right) => left.raw_index - right.raw_index);
+  const seedPhrases = validateWalletSeedRows(payload.seedPhrases, rows);
+  const walletPasswords = validateWalletPasswords(payload.walletPasswords, rows);
+  holdWalletSeeds(jobId, seedPhrases);
+  holdWalletPasswords(jobId, walletPasswords);
+  addEvent(db, jobId, 'job.crypto_secrets_restored', 'crypto wallet credentials restored in memory', {
+    rowCount: rows.length,
+    hasSeedPhrases: !!seedPhrases,
+    hasWalletPasswords: !!walletPasswords,
+  });
+  return {ok: true, jobId, rowCount: rows.length};
 }
 
 function publicOptions(options) {

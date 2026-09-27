@@ -85,6 +85,7 @@ test('runnerArgs clamps concurrency to a safe local range', () => {
 test('runnerArgs caps a row timeout below the three-minute total budget', () => {
   assert.equal(runnerArgs({rowTimeoutMs: 999999}).rowTimeoutMs, 175000);
   assert.equal(runnerArgs({rowTimeoutMs: 30000}).rowTimeoutMs, 30000);
+  assert.equal(runnerArgs({rechargeMode: 'crypto', rowTimeoutMs: 999999}).rowTimeoutMs, 170000);
 });
 
 test('runnerArgs carries OPOM card provider selection', () => {

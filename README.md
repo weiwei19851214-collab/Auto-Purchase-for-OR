@@ -132,7 +132,9 @@ Coinbase checkout；这一步不会确认链上付款。随后选择 OKX Wallet 
 不再次填写或点击 Continue，先核对 AdsPower 保存的该账号密码。
 所有充值账号共用一个 OKX 钱包；欢迎导入页只代表当前浏览器未配置钱包，不覆盖已有钱包。
 CSV 虚拟币任务遇到明确的 OKX 钱包欢迎页时，从当前任务内存中取 D 列，依次点击
-Import wallet、Seed phrase or private key，逐格输入 12 个单词并只点击导入页 Confirm 一次；
+Import wallet、Seed phrase or private key；执行器会连接实际承载表单的 OKX SES iframe，
+对每一格发送真实鼠标点击，再逐字符输入对应单词并按 Tab 切换下一格。只有 12 格都已填写、
+页面没有助记词错误提示且 Confirm 已启用时，才只点击导入页 Confirm 一次；
 Confirm 不是登录完成证据，必须再次回读已解锁的钱包主页。已有钱包不重新导入；
 页面结构不符、钱包锁定或额外验证时停批并保留现场。Coinbase checkout 已打开时，
 钱包导入失败不代表“未进入充值”：只是钱包连接及最终支付均未确认，不应再次自动点击 Purchase。
@@ -142,10 +144,10 @@ Confirm 不是登录完成证据，必须再次回读已解锁的钱包主页。
 OKX 扩展页面时不会点击 `Purchase`，由操作者先在当前 Profile 中打开钱包扩展。
 即使 Coinbase 已发起 `Launch extension`，也不能据此断言钱包已连接或已付款。
 虚拟币 CSV 上传表头为 `login_email`、`ads_power_serial_number`、`ads_power_user_id`、
-`seed_phrase`；`seed_phrase` 必须是 12 个空格分隔的英文单词。这里只检查词数和字符，
-不验证词表、校验和或钱包归属。页面读取时从账号行剥离 D 列，创建任务时单独发给本机
+`seed_phrase`，可选第 5 列钱包密码；`seed_phrase` 必须是 12 个空格分隔的英文单词。这里只检查词数和字符，
+不验证词表、校验和或钱包归属。页面读取时从账号行剥离 D/E 列，创建任务时单独发给本机
 服务端并仅保存在当前进程内存中，执行该行后清除；任务 CSV、SQLite、日志和结果 CSV
-不包含助记词。服务重启或任务恢复后无法重新读取助记词，首次导入须重新上传 CSV 或
+不包含助记词或钱包密码。服务重启或任务恢复后无法重新读取这些凭据，首次导入须重新上传 CSV 或
 由操作者手动完成。原始 CSV 是明文恢复凭据，务必离线保管，
 不要提交到 Git 或上传到其他系统。
 Coinbase 如果返回 `Insufficient funds`，任务记录 `crypto.insufficient_funds`，并保存要求的币种和

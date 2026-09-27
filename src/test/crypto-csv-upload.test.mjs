@@ -25,7 +25,8 @@ function clientCsvFunctions() {
 test('crypto CSV strips the phrase before creating normalized task rows', () => {
   const {rowsFromCsv} = clientCsvFunctions();
   const seeds = new Map();
-  const rows = rowsFromCsv(csvLines(header, 'user@example.com,1234,abcd1234,' + phrase), true, seeds);
+  const passwords = new Map();
+  const rows = rowsFromCsv(csvLines(header + ',password', 'user@example.com,1234,abcd1234,' + phrase + ',wallet-pass'), true, seeds, passwords);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].login_email, 'user@example.com');
   assert.equal(rows[0].ads_power_serial_number, '1234');
@@ -33,12 +34,13 @@ test('crypto CSV strips the phrase before creating normalized task rows', () => 
   assert.equal(JSON.stringify(rows).includes(phrase), false);
   assert.equal('seed_phrase' in rows[0], false);
   assert.equal(seeds.get('user@example.com'), phrase);
+  assert.equal(passwords.get('user@example.com'), 'wallet-pass');
 });
 
 test('crypto CSV requires headers, twelve words, and unique accounts', () => {
   const {rowsFromCsv} = clientCsvFunctions();
   assert.throws(() => rowsFromCsv(csvLines('login_email,ads_power_user_id', 'user@example.com,abcd1234'), true), /表头/);
-  assert.throws(() => rowsFromCsv(csvLines(header + ',extra', 'user@example.com,1234,abcd1234,' + phrase + ',x'), true), /表头/);
+  assert.throws(() => rowsFromCsv(csvLines(header + ',password', 'user@example.com,1234,abcd1234,' + phrase + ','), true), /缺少钱包密码/);
   assert.throws(() => rowsFromCsv(csvLines(header, 'user@example.com,1234,abcd1234,short'), true), /第 2 行 seed_phrase/);
   assert.throws(() => rowsFromCsv(csvLines(header, 'user@example.com,1234,abcd1234,' + phrase,
     'user@example.com,5678,efgh5678,' + phrase), true), /账号或 AdsPower 浏览器重复/);

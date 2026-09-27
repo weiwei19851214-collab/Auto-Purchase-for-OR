@@ -9,6 +9,12 @@ const UNKNOWN_ERROR = Object.freeze({
 
 const RULES = [
   {
+    errorCode: 'crypto_task_timeout',
+    message: '虚拟币充值单行流程超过 3 分钟，已强制关闭浏览器并继续下一任务',
+    matches: ({text, stage}) => /crypto_task_timeout|crypto\.timeout/i.test(text)
+      || /^crypto\.timeout$/i.test(stage),
+  },
+  {
     errorCode: 'crypto_wallet_import_phrase_missing',
     message: 'Coinbase 结账页已打开，但本次任务没有可用的助记词；请人工处理钱包导入，连接和付款均未确认',
     matches: ({text}) => /crypto_wallet_import_phrase_missing/i.test(text),
@@ -24,9 +30,14 @@ const RULES = [
     matches: ({text}) => /crypto_wallet_import_(?:unverified|page_changed|target_missing|target_ambiguous|unknown_page|inspection_failed)/i.test(text),
   },
   {
+    errorCode: 'crypto_wallet_password_missing',
+    message: 'OKX 钱包已进入设置密码页面，但当前任务没有可用的钱包密码；请重新上传包含第 5 列密码的 CSV',
+    matches: ({text}) => /crypto_wallet_password_missing/i.test(text),
+  },
+  {
     errorCode: 'crypto_wallet_authentication_required',
     message: 'Coinbase 结账页已打开，但 OKX 钱包仍需设置或输入解锁密码；请人工完成，连接和付款均未确认',
-    matches: ({text}) => /crypto_wallet_import_authentication_required/i.test(text),
+    matches: ({text}) => /crypto_wallet_(?:import_authentication_required|password_)/i.test(text),
   },
   {
     errorCode: 'crypto_password_invalid_credentials',
@@ -47,6 +58,11 @@ const RULES = [
     errorCode: 'crypto_password_unavailable',
     message: '无法安全读取或填写该账号密码，请人工验证',
     matches: ({text}) => /crypto_password_/i.test(text),
+  },
+  {
+    errorCode: 'crypto_payment_failed_try_again',
+    message: 'Coinbase 充值失败：页面显示 Try again，已关闭浏览器并继续下一任务',
+    matches: ({text}) => /crypto_payment_failed_try_again|Try again/i.test(text),
   },
   {
     errorCode: 'crypto_insufficient_funds',

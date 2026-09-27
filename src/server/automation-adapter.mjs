@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
 import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, join} from 'node:path';
-import {BIND_SCRIPT, CRYPTO_RECHARGE_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
+import {BIND_SCRIPT, CRYPTO_RECHARGE_SCRIPT, RESULT_DIR, UPLOAD_DIR, LOG_DIR, DEFAULT_ROW_TIMEOUT_MS, MAX_ROW_TIMEOUT_MS, CRYPTO_CHILD_TIMEOUT_MS, AUTOMATION_LOG_RETENTION_HOURS} from './config.mjs';
 import {newId, nowIso} from './ids.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import * as childRunner from '../automation/lib/child-runner.mjs';
@@ -101,7 +101,10 @@ export function runnerArgs(options = {}) {
     autoTopupThreshold: options.autoTopupThreshold || '',
     autoTopupAmount: options.autoTopupAmount || '',
     cardProvider: normalizeCardProvider(options.cardProvider),
-    rowTimeoutMs: Math.min(MAX_ROW_TIMEOUT_MS, Math.max(1000, Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS))),
+    rowTimeoutMs: Math.min(
+      normalizeRechargeMode(options.rechargeMode) === 'crypto' ? CRYPTO_CHILD_TIMEOUT_MS : MAX_ROW_TIMEOUT_MS,
+      Math.max(1000, Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS)),
+    ),
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',
     adspowerApiKey: options.adspowerApiKey || process.env.ADSPOWER_API_KEY || '',
@@ -571,6 +574,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     // 只交给当前账号子进程，绝不加入 row/details/result CSV 或 options_json。
     task.walletSeedPhrase = options.runtimeSeedPhrase;
   }
+  if (args.rechargeMode === 'crypto' && options.runtimeWalletPassword) {
+    // 钱包创建密码只在当前行子进程内使用，不写入任务行、SQLite、日志或结果 CSV。
+    task.walletPassword = options.runtimeWalletPassword;
+  }
   task.adspowerApiBase = args.adspowerApiBase;
   task.adspowerApiKey = args.adspowerApiKey;
   task.adspowerStartTimeoutMs = args.adspowerStartTimeoutMs;
@@ -587,18 +594,28 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     if (args.rechargeMode === 'crypto') {
       const cryptoPurchase = outcome.result?.cryptoPurchase || {};
       const insufficientFunds = cryptoPurchase.insufficientFunds === true || cryptoPurchase.checkoutState?.insufficientFunds === true;
+      const paymentFailed = cryptoPurchase.paymentFailed === true || cryptoPurchase.checkoutState?.paymentFailed === true;
+      const walletConnectionRequired = cryptoPurchase.walletConnectionRequired === true;
       const walletConfirmationRequired = cryptoPurchase.walletConfirmationRequired === true;
+      const terminalFailure = paymentFailed || insufficientFunds;
+      if (terminalFailure && args.stopProfiles) {
+        profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
+      }
       return {
-        status: insufficientFunds
+        status: terminalFailure
           ? status.STATUSES.FAILED
           : (walletConfirmationRequired ? status.STATUSES.MANUAL_SECURITY_BLOCKER : status.STATUSES.PURCHASE_UNVERIFIED),
-        stage: insufficientFunds ? 'crypto.insufficient_funds' : (walletConfirmationRequired ? 'crypto.wallet_confirmation' : 'crypto.checkout'),
-        errorCode: insufficientFunds ? 'crypto_insufficient_funds' : (walletConfirmationRequired ? 'crypto_wallet_confirmation_required' : 'crypto_checkout_unverified'),
-        message: insufficientFunds
+        stage: paymentFailed ? 'crypto.payment_failed' : (insufficientFunds ? 'crypto.insufficient_funds' : (walletConfirmationRequired ? 'crypto.wallet_confirmation' : 'crypto.checkout')),
+        errorCode: paymentFailed ? 'crypto_payment_failed_try_again' : (insufficientFunds ? 'crypto_insufficient_funds' : (walletConfirmationRequired ? 'crypto_wallet_confirmation_required' : 'crypto_checkout_unverified')),
+        message: paymentFailed
+          ? 'Coinbase 充值失败：页面显示 Try again，已关闭浏览器并继续下一任务'
+          : (insufficientFunds
           ? `余额不足：需要 ${cryptoPurchase.checkoutState?.requiredAmount || cryptoPurchase.totalDue || cryptoPurchase.amount || ''} ${cryptoPurchase.checkoutState?.requiredAsset || 'USDC'}`
+          : (walletConnectionRequired
+            ? 'Coinbase 正在等待 OKX 钱包连接，请在当前钱包窗口核对 Coinbase 来源后人工点击 Connect'
           : (walletConfirmationRequired
             ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
-            : '虚拟币支付页面已准备，但尚未确认钱包状态'),
+            : '虚拟币支付页面已准备，但尚未确认钱包状态'))),
         details: {
           ...plan.rowMetadata(row),
           rechargeMode: 'crypto',
@@ -609,9 +626,10 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           cryptoPurchase,
           automationLogDir,
         },
-        // 钱包确认必须逐账号处理；保留浏览器现场并暂停剩余批次。
-        safeToContinue: false,
-        stopProfile: false,
+        // 明确付款失败立即关闭并继续；只有真实钱包确认边界才保留现场。
+        safeToContinue: terminalFailure,
+        stopProfile: terminalFailure,
+        profileStop,
       };
     }
     const details = args.confirmPurchase

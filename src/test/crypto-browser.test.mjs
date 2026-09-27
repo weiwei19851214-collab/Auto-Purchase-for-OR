@@ -109,8 +109,24 @@ test('crypto browser reports Coinbase insufficient USDC funds without closing th
   assert.equal(result.stage, 'crypto.insufficient_funds');
   assert.equal(result.errorCode, 'crypto_insufficient_funds');
   assert.equal(result.message, '余额不足：需要 10.50 USDC');
-  assert.equal(result.safeToContinue, false);
-  assert.equal(result.stopProfile, false);
+  assert.equal(result.safeToContinue, true);
+  assert.equal(result.stopProfile, true);
+});
+
+test('Coinbase Try again is a terminal crypto payment failure and is not retried', async () => {
+  const result = await executeRowWithAdapters(CRYPTO_CSV, 0, CRYPTO_OPTIONS, {
+    common: {cardLast4: () => ''},
+    runClosedLoopChildAsync: async () => ({
+      ok: true,
+      result: {cryptoPurchase: {paymentFailed: true, checkoutState: {paymentFailed: true}}},
+    }),
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stage, 'crypto.payment_failed');
+  assert.equal(result.errorCode, 'crypto_payment_failed_try_again');
+  assert.match(result.message, /Try again/);
+  assert.equal(result.safeToContinue, true);
+  assert.equal(result.stopProfile, true);
 });
 
 test('worker keeps the crypto amount in the user-facing block reason', () => {
@@ -156,6 +172,17 @@ test('crypto browser flow uses human amount input and stops before wallet paymen
   assert.match(source, /const amountInput = await fillAmount\(page, purchase\.amount\)/);
   assert.ok(source.includes('payments\\.coinbase\\.com'));
   assert.match(source, /async function selectOkxWallet/);
+  assert.match(source, /COINBASE_WALLET_UI_TIMEOUT_MS = 5000/);
+  assert.match(source, /COINBASE_WALLET_UI_POLL_MS = 100/);
+  assert.match(source, /if \(controls\.launch\)/);
+  assert.match(source, /COINBASE_FAILURE_STABLE_MS = 3000/);
+  assert.match(source, /Page\.bringToFront/);
+  assert.match(source, /fallbackClicked/);
+  assert.match(source, /crypto-wallet-launch/);
+  assert.match(source, /keyboardClicked/);
+  assert.match(source, /crypto-wallet-launch-failed/);
+  assert.match(source, /browserAppPath/);
+  assert.match(source, /execFileSync\('open'/);
   assert.match(source, /async function launchOkxExtension/);
   assert.doesNotMatch(source, /okx-keychain|readWalletCredentials/);
   assert.match(source, /async function continueCryptoAfterAmount/);

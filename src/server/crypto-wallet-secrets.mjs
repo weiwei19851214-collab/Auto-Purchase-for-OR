@@ -1,5 +1,6 @@
 // 助记词只在当前 Node 进程内按 job/CSV 行号暂存；数据库、任务 CSV 和结果文件均不持有它。
 const jobSeeds = new Map();
+const jobWalletPasswords = new Map();
 
 export function validateWalletSeedRows(seedPhrases, planRows) {
   if (seedPhrases === undefined) return null;
@@ -24,10 +25,31 @@ export function holdWalletSeeds(jobId, seedPhrases) {
   if (seedPhrases) jobSeeds.set(jobId, seedPhrases);
 }
 
+export function validateWalletPasswords(walletPasswords, planRows) {
+  if (walletPasswords === undefined) return null;
+  if (!Array.isArray(walletPasswords) || walletPasswords.length !== planRows.length) {
+    throw new Error('虚拟币钱包密码与任务行数不一致，请重新上传 CSV');
+  }
+  return walletPasswords.map((password, index) => {
+    const value = String(password || '');
+    if (!value) throw new Error('虚拟币 CSV 第 ' + (index + 2) + ' 行缺少钱包密码');
+    return value;
+  });
+}
+
+export function holdWalletPasswords(jobId, walletPasswords) {
+  if (walletPasswords) jobWalletPasswords.set(jobId, walletPasswords);
+}
+
 export function walletSeedForRow(jobId, rawIndex) {
   return jobSeeds.get(jobId)?.[rawIndex] || '';
 }
 
+export function walletPasswordForRow(jobId, rawIndex) {
+  return jobWalletPasswords.get(jobId)?.[rawIndex] || '';
+}
+
 export function clearWalletSeeds(jobId) {
   jobSeeds.delete(jobId);
+  jobWalletPasswords.delete(jobId);
 }

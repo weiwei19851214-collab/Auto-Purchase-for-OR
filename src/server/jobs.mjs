@@ -16,7 +16,6 @@ import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {writeCompletedRow} from './opom-client.mjs';
-import {clearWalletSeeds, holdWalletPasswords, holdWalletSeeds, validateWalletPasswords, validateWalletSeedRows} from './crypto-wallet-secrets.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -92,17 +91,9 @@ export async function createJob(db, payload) {
   if (!csvText.trim()) throw new Error('csvText is required');
   const sourceFileName = payload.fileName || 'account.csv';
   const options = payload.options || {};
-  if (['seedPhrases', 'walletSeedPhrase', 'runtimeSeedPhrase'].some((key) => key in options)) {
-    throw new Error('钱包助记词不能写入任务配置');
-  }
   const plan = await parsePlan(csvText, options);
   const readyCount = plan.rows.filter((row) => row.status === 'ready').length;
   if (readyCount > 0) verifyLiveConfirmation(payload.liveConfirmationToken, {csvText, options});
-  if (payload.seedPhrases !== undefined && plan.args.rechargeMode !== 'crypto') {
-    throw new Error('只有虚拟币任务可接收钱包助记词');
-  }
-  const seedPhrases = validateWalletSeedRows(payload.seedPhrases, plan.rows);
-  const walletPasswords = validateWalletPasswords(payload.walletPasswords, plan.rows);
   const jobId = newId('job');
   const jobOptions = {
     ...options,
@@ -214,9 +205,6 @@ export async function createJob(db, payload) {
         };
       }),
   });
-  // 结果文件成功生成后再持有内存凭据；无可执行行不保存，异常不会遗留助记词。
-  if (readyCount > 0) holdWalletSeeds(jobId, seedPhrases);
-  if (readyCount > 0) holdWalletPasswords(jobId, walletPasswords);
   addEvent(db, jobId, 'job.created', 'job queued from uploaded CSV', {
     fileName: sourceFileName,
     jobName,
@@ -227,26 +215,6 @@ export async function createJob(db, payload) {
     addEvent(db, jobId, 'job.completed', 'no executable rows');
   }
   return jobDetails(db, jobId);
-}
-
-export function restoreCryptoSecrets(db, jobId, payload = {}) {
-  const job = getJob(db, jobId);
-  if (!job) throw httpError(404, 'Job not found');
-  const options = JSON.parse(job.options_json || '{}');
-  if (runnerArgs(options).rechargeMode !== 'crypto') {
-    throw httpError(409, 'Only crypto jobs accept wallet credentials');
-  }
-  const rows = listRows(db, jobId).sort((left, right) => left.raw_index - right.raw_index);
-  const seedPhrases = validateWalletSeedRows(payload.seedPhrases, rows);
-  const walletPasswords = validateWalletPasswords(payload.walletPasswords, rows);
-  holdWalletSeeds(jobId, seedPhrases);
-  holdWalletPasswords(jobId, walletPasswords);
-  addEvent(db, jobId, 'job.crypto_secrets_restored', 'crypto wallet credentials restored in memory', {
-    rowCount: rows.length,
-    hasSeedPhrases: !!seedPhrases,
-    hasWalletPasswords: !!walletPasswords,
-  });
-  return {ok: true, jobId, rowCount: rows.length};
 }
 
 function publicOptions(options) {
@@ -351,7 +319,6 @@ export function jobsList(db) {
 export async function cancelJob(db, jobId) {
   const job = getJob(db, jobId);
   if (!job) return null;
-  if (job.status === 'queued') clearWalletSeeds(jobId);
   const now = nowIso();
   db.prepare(`
     UPDATE jobs
@@ -444,6 +411,7 @@ function previewRows(rows, startRowNumber, includeRiskyRows = false, onlyRow = f
   const candidates = rows.filter((row) => onlyRow ? row.row_number === startRowNumber : row.row_number >= startRowNumber);
   const output = {
     startRowNumber,
+    taskRowNumber: Math.max(1, Number(startRowNumber || 0) - 1),
     includeRiskyRows: !!includeRiskyRows,
     onlyRow: !!onlyRow,
     totalCandidateRows: candidates.length,
@@ -458,6 +426,7 @@ function previewRows(rows, startRowNumber, includeRiskyRows = false, onlyRow = f
     const item = {
       rowId: row.id,
       rowNumber: row.row_number,
+      taskRowNumber: Math.max(1, Number(row.row_number || 0) - 1),
       profileId: row.profile_id,
       status: row.status,
       message: row.message,

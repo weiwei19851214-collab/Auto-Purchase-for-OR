@@ -319,6 +319,38 @@ body.recharge-mode-crypto .auto-rule-section {
   display: none;
 }
 
+.crypto-rule-mode {
+  display: none;
+  grid-template-columns: auto minmax(190px, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+body.recharge-mode-crypto .crypto-rule-mode {
+  display: grid;
+}
+
+.crypto-rule-mode .segmented {
+  width: 100%;
+  min-height: 38px;
+}
+
+.crypto-rule-mode .segment {
+  min-height: 32px;
+  font-size: 12px;
+}
+
+.crypto-fixed-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+.crypto-fixed-field[hidden],
+#balanceRuleFields[hidden] {
+  display: none;
+}
+
 body.recharge-mode-crypto .control-grid {
   grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr) minmax(300px, 1fr);
   min-width: 940px;

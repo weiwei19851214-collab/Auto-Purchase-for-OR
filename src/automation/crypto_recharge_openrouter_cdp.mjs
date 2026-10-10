@@ -11,13 +11,18 @@ import {execFileSync} from 'node:child_process';
 import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {readCryptoAccountPassword} from './lib/crypto-account-password.mjs';
+import {
+  checkoutPaymentFingerprint,
+  classifyOkxTransactionSnapshot,
+} from './lib/crypto-wallet-transaction.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
 const DEFAULT_ADSPOWER_BASE = 'http://127.0.0.1:50325';
 const DEFAULT_TIMEOUT_MS = 30000;
 const CRYPTO_PURCHASE_FORM_WAIT_MS = 20000;
 const POLL_MS = 750;
-const COINBASE_WALLET_UI_TIMEOUT_MS = 5000;
+// Coinbase/AdsPower 的扩展弹窗不是同步打开；给页面渲染、真实手势和 OKX notification 页留出人工级等待。
+const COINBASE_WALLET_UI_TIMEOUT_MS = 15000;
 const COINBASE_WALLET_UI_POLL_MS = 100;
 const COINBASE_FAILURE_STABLE_MS = 3000;
 const OKX_EXTENSION_ID = 'mcohilncbfahbmgdjkbpemcciiolgcge';
@@ -72,6 +77,8 @@ function readInput(args) {
     walletPassword: input.walletPassword || '',
     // 当前任务已授权钱包连接；只有显式传 false 才保留 Connect 人工确认，付款/签名仍不自动提交。
     confirmWalletConnection: input.confirmWalletConnection !== false,
+    // 任务层显式开启后，才自动处理 OKX 风险继续和交易 Confirm；银行卡流程不会传入此字段。
+    confirmWalletPayment: input.confirmWalletPayment === true,
     purchase: {...(input.purchase || {})},
     verbose: !!(args.verbose || input.verbose),
   };
@@ -376,8 +383,9 @@ function money(value) {
   return String(Math.round(number * 100) / 100);
 }
 
-async function readBalance(page) {
-  const deadline = Date.now() + 20000;
+async function readBalance(page, options = {}) {
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
+  const deadline = Date.now() + timeoutMs;
   let state = null;
   while (Date.now() < deadline) {
     state = await evaluate(page, () => {
@@ -391,6 +399,19 @@ async function readBalance(page) {
     await sleep(POLL_MS);
   }
   throw new Error('Could not parse current OpenRouter credit balance');
+}
+
+async function waitForBalanceIncrease(page, beforeBalance, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastBalance = null;
+  while (Date.now() < deadline) {
+    try {
+      lastBalance = await readBalance(page, {timeoutMs: 3000});
+      if (Number(lastBalance.balance) > Number(beforeBalance)) return lastBalance;
+    } catch {}
+    await sleep(500);
+  }
+  throw new Error('purchase_unverified: crypto balance did not increase after wallet confirmation');
 }
 
 export async function resolveAmount(page, purchase) {
@@ -710,7 +731,7 @@ async function selectOkxWallet(checkout) {
     }
     await sleep(COINBASE_WALLET_UI_POLL_MS);
   }
-  throw new Error('OKX Wallet or Launch extension was not available within 5000ms');
+  throw new Error('OKX Wallet or Launch extension was not available within 15000ms');
 }
 
 function interactiveOkxTargets(debugPort) {
@@ -766,8 +787,25 @@ async function launchOkxExtension(checkout, input = {}) {
   await checkout.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
   await checkout.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
   await checkout.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  const readInsufficientFunds = async () => evaluate(checkout, () => {
+    const text = document.body?.innerText || '';
+    const match = text.match(/You need\s+([0-9,.]+)\s+([A-Z0-9_]+)\s+to complete your payment/i);
+    return {
+      insufficientFunds: /Insufficient funds/i.test(text),
+      requiredAmount: match?.[1] || '',
+      requiredAsset: match?.[2] || '',
+    };
+  }).catch(() => ({}));
+  const stateAfterClick = await readInsufficientFunds();
+  if (stateAfterClick.insufficientFunds === true) {
+    return {clicked: true, browserActivated, fallbackClicked: false, targetCount: 0, checkoutState: stateAfterClick};
+  }
   const firstDeadline = Date.now() + 800;
   while (Date.now() < firstDeadline) {
+    const checkoutState = await readInsufficientFunds();
+    if (checkoutState.insufficientFunds === true) {
+      return {clicked: true, browserActivated, fallbackClicked: false, targetCount: 0, checkoutState};
+    }
     const targets = interactiveOkxTargets(input.debugPort);
     if (targets.length) return {clicked: true, browserActivated, fallbackClicked: false, targetCount: targets.length};
     await sleep(COINBASE_WALLET_UI_POLL_MS);
@@ -784,6 +822,10 @@ async function launchOkxExtension(checkout, input = {}) {
     await dispatchKey(checkout, 'keyUp', {key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
     const keyboardDeadline = Date.now() + 800;
     while (Date.now() < keyboardDeadline) {
+      const checkoutState = await readInsufficientFunds();
+      if (checkoutState.insufficientFunds === true) {
+        return {clicked: true, browserActivated, keyboardClicked: true, fallbackClicked: false, targetCount: 0, checkoutState};
+      }
       const targets = interactiveOkxTargets(input.debugPort);
       if (targets.length) return {clicked: true, browserActivated, keyboardClicked: true, fallbackClicked: false, targetCount: targets.length};
       await sleep(COINBASE_WALLET_UI_POLL_MS);
@@ -799,9 +841,24 @@ async function launchOkxExtension(checkout, input = {}) {
   });
   const fallbackDeadline = Date.now() + COINBASE_WALLET_UI_TIMEOUT_MS;
   while (Date.now() < fallbackDeadline) {
+    const checkoutState = await readInsufficientFunds();
+    if (checkoutState.insufficientFunds === true) {
+      return {clicked: true, browserActivated, fallbackClicked, targetCount: 0, checkoutState};
+    }
     const targets = interactiveOkxTargets(input.debugPort);
     if (targets.length) return {clicked: true, browserActivated, fallbackClicked, targetCount: targets.length};
     await sleep(COINBASE_WALLET_UI_POLL_MS);
+  }
+  // Coinbase 已明确报余额不足时，OKX 是否展开不是失败根因；优先保留支付页业务结果。
+  const checkoutState = await readCheckoutState(checkout, {timeoutMs: 1000});
+  if (checkoutState.insufficientFunds === true) {
+    return {
+      clicked: true,
+      browserActivated,
+      fallbackClicked,
+      targetCount: 0,
+      checkoutState,
+    };
   }
   writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-launch-failed', {
     focused,
@@ -812,8 +869,10 @@ async function launchOkxExtension(checkout, input = {}) {
   throw new Error('OKX extension did not open after Launch extension click');
 }
 
-async function readCheckoutState(checkout) {
-  const deadline = Date.now() + 10000;
+async function readCheckoutState(checkout, options = {}) {
+  // 钱包连接阶段的 Coinbase 错误可能晚于首屏出现，调用方可按当前阶段延长观察窗口。
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 10000;
+  const deadline = Date.now() + timeoutMs;
   let state = null;
   let paymentFailureSeenAt = 0;
   while (Date.now() < deadline) {
@@ -827,6 +886,7 @@ async function readCheckoutState(checkout) {
         paymentCompleted: /Payment complete|Payment successful|Paid successfully/i.test(text),
         requiredAmount: match?.[1] || '',
         requiredAsset: match?.[2] || '',
+        network: (text.match(/\bNetwork\s*:?\s*([^\n]+)/i) || [])[1]?.trim() || '',
         tail: text.slice(-1800),
       };
     });
@@ -835,7 +895,8 @@ async function readCheckoutState(checkout) {
       if (Date.now() - paymentFailureSeenAt >= COINBASE_FAILURE_STABLE_MS) return state;
     } else {
       paymentFailureSeenAt = 0;
-      if (state.insufficientFunds || state.walletConnected || state.paymentCompleted) return state;
+      if (state.insufficientFunds || state.paymentCompleted
+        || (state.walletConnected && options.requirePaymentCompleted !== true)) return state;
     }
     await sleep(500);
   }
@@ -1028,7 +1089,8 @@ export async function importOkxWallet(wallet, phrase, options = {}) {
       }, index);
     }
     if (!focused) throw new Error('manual_security_blocker: crypto_wallet_import_field_changed');
-    await typeCharacters(wallet, words[index], 12);
+    // 每个单词按可观察的键盘节奏输入，避免 SES iframe 尚未完成状态同步就连续切换。
+    await typeCharacters(wallet, words[index], 40);
     await dispatchKey(wallet, 'rawKeyDown', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
     await dispatchKey(wallet, 'keyUp', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
     const deadline = Date.now() + 2000;
@@ -1145,7 +1207,7 @@ export async function completeOkxPasswordSetup(wallet, password, expectedStage =
     const cleared = await evaluate(wallet, () => document.activeElement?.type === 'password'
       && document.activeElement.value === '');
     if (!cleared) throw new Error('manual_security_blocker: crypto_wallet_password_unverified');
-    await typeCharacters(wallet, normalizedPassword, 12);
+    await typeCharacters(wallet, normalizedPassword, 40);
     await dispatchKey(wallet, 'rawKeyDown', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
     await dispatchKey(wallet, 'keyUp', {key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9});
     const verified = await evaluate(wallet, (fieldIndex, length) => {
@@ -1369,6 +1431,116 @@ async function inspectOkxTargets(debugPort) {
   return output;
 }
 
+async function checkoutFingerprint(checkout) {
+  return evaluate(checkout, () => ({
+    origin: location.origin,
+    pathname: location.pathname,
+    text: document.body?.innerText || '',
+  }));
+}
+
+function paymentNetworkFromContext(context = {}) {
+  return context.network || context.checkoutState?.network || context.requiredNetwork || '';
+}
+
+async function inspectOkxTransactionStage(wallet, expected = {}) {
+  const snapshot = await evaluate(wallet, () => ({
+    origin: location.origin,
+    text: document.body?.innerText || '',
+    buttons: [...document.querySelectorAll('button,[role="button"]')].map((node) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        label: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim(),
+        visible: rect.width > 0 && rect.height > 0,
+        disabled: node.disabled === true,
+        ariaDisabled: node.getAttribute('aria-disabled') || '',
+      };
+    }).filter((button) => button.visible),
+  }));
+  return classifyOkxTransactionSnapshot(snapshot, expected);
+}
+
+async function clickOkxTransactionButton(wallet, expectedStage, label, expected) {
+  const state = await inspectOkxTransactionStage(wallet, expected);
+  if (state.stage !== expectedStage || state.originOk !== true
+    || (expectedStage === 'confirm_send' && (state.hasAmount !== true || state.hasNetwork !== true))) {
+    throw new Error('manual_security_blocker: crypto_wallet_transaction_page_changed');
+  }
+  const target = await evaluate(wallet, (extensionId, expectedLabel) => {
+    if (location.origin !== 'chrome-extension://' + extensionId) return null;
+    const visible = (node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const matches = [...document.querySelectorAll('button,[role="button"]')].filter((node) => {
+      const labelText = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+      const rect = node.getBoundingClientRect();
+      return visible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true'
+        && labelText === expectedLabel && rect.width > 0 && rect.height > 0;
+    });
+    if (matches.length !== 1) return null;
+    matches[0].scrollIntoView({block: 'center', inline: 'center'});
+    const rect = matches[0].getBoundingClientRect();
+    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+  }, OKX_EXTENSION_ID, label);
+  if (!target) throw new Error('manual_security_blocker: crypto_wallet_transaction_button_unavailable');
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+}
+
+async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warning'], timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = {stage: 'unknown'};
+  do {
+    let targets;
+    try {
+      targets = await findOkxWalletTargets(input);
+    } catch {
+      targets = [];
+    }
+    const matches = [];
+    for (const target of targets) {
+      let wallet;
+      try {
+        wallet = await cdp(target.webSocketDebuggerUrl);
+        await wallet.send('Runtime.enable');
+        const state = await inspectOkxTransactionStage(wallet, expected);
+        lastState = state;
+        if (stages.includes(state.stage)) matches.push({wallet, target, state});
+        else wallet.close();
+      } catch {
+        wallet?.close();
+      }
+    }
+    if (matches.length > 1) {
+      for (const match of matches) match.wallet.close();
+      throw new Error('manual_security_blocker: crypto_wallet_transaction_target_ambiguous');
+    }
+    if (matches.length === 1) return matches[0];
+    await sleep(250);
+  } while (Date.now() < deadline);
+  throw new Error('manual_security_blocker: crypto_wallet_transaction_confirmation_unavailable:' + lastState.stage);
+}
+
+export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '') {
+  const expected = {amount, asset, network};
+  let current = await acquireOkxTransactionTarget(input, expected, ['risk_warning']);
+  let wallet = current.wallet;
+  try {
+    await clickOkxTransactionButton(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
+    wallet.close();
+    wallet = null;
+    current = await acquireOkxTransactionTarget(input, expected, ['confirm_send'], 15000);
+    wallet = current.wallet;
+    const state = current.state;
+    await clickOkxTransactionButton(wallet, 'confirm_send', 'Confirm', expected);
+    return {confirmed: true, riskWarningClicked: true, confirmationClicked: true, network: state.network};
+  } finally {
+    wallet?.close();
+  }
+}
+
 export async function continueCryptoAfterAmount(input, page, purchaseContext, adapters = {}) {
   const prepareWallet = adapters.prepareWallet || prepareOkxWallet;
   const submitPurchase = adapters.submitPurchase || clickPurchase;
@@ -1377,13 +1549,14 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
   const openWalletExtension = adapters.launchExtension || launchOkxExtension;
   const inspectCheckout = adapters.readCheckout || readCheckoutState;
   const inspectTargets = adapters.inspectTargets || inspectOkxTargets;
-  // Purchase 只创建 Coinbase checkout；最终钱包确认、签名和广播仍严格保留给人工。
+  const confirmWalletPaymentFn = adapters.confirmWalletPayment || confirmOkxWalletPayment;
+  // Purchase 创建 Coinbase checkout；钱包风险提示和交易 Confirm 仅在任务显式开启时自动点击。
   const purchaseClick = await submitPurchase(page);
   const checkoutTarget = await openPaymentCheckout(input, page);
   const checkout = checkoutTarget.checkout;
   try {
     const walletSelection = await chooseWallet(checkout);
-    const walletLaunch = await openWalletExtension(checkout, input);
+  const walletLaunch = await openWalletExtension(checkout, input);
     writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-launch', {
       selectionClicked: walletSelection.selectionClicked === true,
       launchReady: walletSelection.launchReady === true,
@@ -1391,10 +1564,59 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       browserActivated: walletLaunch?.browserActivated === true,
       targetCount: Number(walletLaunch?.targetCount || 0),
     });
+    if (walletLaunch?.checkoutState?.insufficientFunds === true) {
+      const checkoutState = walletLaunch.checkoutState;
+      const okxTargets = await inspectTargets(input.debugPort);
+      return {
+        checkout,
+        cryptoPurchase: {
+          ...purchaseContext,
+          purchaseClick,
+          checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
+          walletSelection,
+          wallet: {status: 'not_required', reason: 'checkout_insufficient_funds'},
+          checkoutState,
+          okxTargets,
+          walletConnectionRequired: false,
+          walletConfirmationRequired: false,
+          insufficientFunds: true,
+          paymentFailed: checkoutState.paymentFailed === true,
+          walletPaymentConfirmation: {confirmed: false},
+        },
+      };
+    }
+    // 显式自动付款时，Launch extension 后先再读一次 Coinbase；迟到的余额不足
+    // 优先于任何 OKX 交易按钮。未开启自动付款时保持原有人工边界和调用顺序。
+    if (input.confirmWalletPayment === true) {
+      const checkoutStateAfterLaunch = await inspectCheckout(checkout, {timeoutMs: 1000});
+      if (checkoutStateAfterLaunch.insufficientFunds === true) {
+        const okxTargets = await inspectTargets(input.debugPort);
+        return {
+          checkout,
+          cryptoPurchase: {
+            ...purchaseContext,
+            purchaseClick,
+            checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
+            walletSelection,
+            wallet: {status: 'not_required', reason: 'checkout_insufficient_funds'},
+            checkoutState: checkoutStateAfterLaunch,
+            okxTargets,
+            walletConnectionRequired: false,
+            walletConfirmationRequired: false,
+            insufficientFunds: true,
+            paymentFailed: checkoutStateAfterLaunch.paymentFailed === true,
+            walletPaymentConfirmation: {confirmed: false},
+          },
+        };
+      }
+    }
     // Coinbase 的 Launch extension 弹出钱包后，再判断登录状态或执行首次导入。
     const wallet = await prepareWallet(input);
+    let walletPaymentConfirmation = {confirmed: false};
     if (wallet.status === 'connect_required' || wallet.status === 'connect_submitted') {
-      const checkoutState = await inspectCheckout(checkout);
+      // 余额不足不需要等人工连接钱包；页面错误可能在 Launch extension 后异步渲染，
+      // 延长读取窗口，避免先误判为 wallet_confirmation 而把当前任务挂住。
+      const checkoutState = await inspectCheckout(checkout, {timeoutMs: 30000});
       const okxTargets = await inspectTargets(input.debugPort);
       return {
         checkout,
@@ -1408,14 +1630,73 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
           okxTargets,
           walletConnectionRequired: wallet.status === 'connect_required',
           walletConnectionSubmitted: wallet.status === 'connect_submitted',
-          walletConfirmationRequired: true,
+          walletConfirmationRequired: checkoutState.insufficientFunds !== true && checkoutState.paymentFailed !== true,
           insufficientFunds: checkoutState.insufficientFunds === true,
           paymentFailed: checkoutState.paymentFailed === true,
+          walletPaymentConfirmation,
         },
       };
     }
     if (wallet.status !== 'ready') throw new Error('manual_security_blocker: crypto_wallet_import_unverified');
-    const checkoutState = await inspectCheckout(checkout);
+    if (input.confirmWalletPayment === true) {
+      // 钱包已就绪后再次读取 Coinbase；余额不足的异步结果优先于任何钱包交易按钮。
+      const checkoutStateBeforePayment = await inspectCheckout(checkout, {timeoutMs: 1000});
+      const livePaymentPage = await checkoutFingerprint(checkout).catch(() => null);
+      const paymentPage = livePaymentPage || (typeof checkout?.send !== 'function'
+        ? {
+          origin: 'https://payments.coinbase.com',
+          pathname: String(checkoutTarget.target.url || '').split('?')[0].replace('https://payments.coinbase.com', ''),
+          text: '',
+        }
+        : null);
+      if (!paymentPage) throw new Error('manual_security_blocker: crypto_wallet_transaction_checkout_unverified');
+      if (checkoutStateBeforePayment.insufficientFunds === true) {
+        const okxTargets = await inspectTargets(input.debugPort);
+        return {
+          checkout,
+          cryptoPurchase: {
+            ...purchaseContext,
+            purchaseClick,
+            checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
+            walletSelection,
+            wallet,
+            checkoutState: checkoutStateBeforePayment,
+            okxTargets,
+            walletConnectionRequired: false,
+            walletConfirmationRequired: false,
+            insufficientFunds: true,
+            paymentFailed: checkoutStateBeforePayment.paymentFailed === true,
+            walletPaymentConfirmation: {confirmed: false},
+          },
+        };
+      }
+      const checkoutFingerprintData = checkoutPaymentFingerprint(paymentPage.text);
+      // Coinbase 的 Pay 金额可能包含网络/服务费（例如 Credits 10 但钱包支付 10.50），
+      // 交易页必须优先匹配 checkout 展示的实际扣款金额。
+      const expectedAmount = checkoutFingerprintData.amount
+        || purchaseContext.amount
+        || purchaseContext.ruleDecision?.selectedAmount;
+      const expectedAsset = checkoutFingerprintData.asset
+        || checkoutStateBeforePayment.requiredAsset
+        || purchaseContext.requiredAsset;
+      const expectedNetwork = paymentNetworkFromContext({...purchaseContext, checkoutState: checkoutStateBeforePayment}) || checkoutFingerprintData.network;
+      if (!expectedAmount || !expectedAsset) {
+        throw new Error('manual_security_blocker: crypto_wallet_transaction_payment_context_missing');
+      }
+      // Coinbase 有时不在结账正文展示网络；此时由 OKX 确认页要求唯一且已知的网络，
+      // 不静默默认到某条链。
+      if (!/^(?:https?:\/\/)?payments\.coinbase\.com$/i.test(paymentPage.origin || '')
+        || !/^\/payment-sessions\/[^/]+$/i.test(paymentPage.pathname || '')) {
+        throw new Error('manual_security_blocker: crypto_wallet_transaction_checkout_unverified');
+      }
+      walletPaymentConfirmation = await confirmWalletPaymentFn(
+        input,
+        expectedAmount,
+        expectedAsset,
+        expectedNetwork,
+      );
+    }
+    const checkoutState = await inspectCheckout(checkout, {timeoutMs: walletPaymentConfirmation.confirmed ? 60000 : 10000, requirePaymentCompleted: walletPaymentConfirmation.confirmed});
     const okxTargets = await inspectTargets(input.debugPort);
     return {
       checkout,
@@ -1430,6 +1711,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         okxTargets,
         insufficientFunds: checkoutState.insufficientFunds === true,
         walletConfirmationRequired: checkoutState.insufficientFunds !== true && checkoutState.paymentCompleted !== true,
+        walletPaymentConfirmation,
       },
     };
   } catch (error) {
@@ -1457,12 +1739,27 @@ async function runCryptoRecharge(rawInput) {
     const continued = await continueCryptoAfterAmount(input, page, {...purchase, useCrypto, purchaseForm, amountInput});
     checkout = continued.checkout;
     const cryptoPurchase = continued.cryptoPurchase;
+    if (cryptoPurchase.walletPaymentConfirmation?.confirmed === true) {
+      const checkoutState = await readCheckoutState(checkout, {timeoutMs: 60000, requirePaymentCompleted: true});
+      if (checkoutState.paymentCompleted !== true) {
+        throw new Error('purchase_unverified: Coinbase did not show payment completion after wallet Confirm');
+      }
+      checkout.close();
+      checkout = null;
+      const afterBalance = await waitForBalanceIncrease(page, purchase.beforeBalance?.balance, 45000);
+      cryptoPurchase.checkoutState = checkoutState;
+      cryptoPurchase.afterBalance = afterBalance;
+      cryptoPurchase.balanceAfter = afterBalance.balance;
+      cryptoPurchase.paymentCompleted = true;
+    }
     writeDiagnostic(input.confirmationDebugDir, 'crypto-checkout-result', cryptoPurchase);
     return {
       ok: true,
-      status: cryptoPurchase.paymentFailed
-        ? 'crypto_payment_failed'
-        : (cryptoPurchase.insufficientFunds ? 'crypto_insufficient_funds' : 'wallet_confirmation_required'),
+      status: cryptoPurchase.paymentCompleted
+        ? 'crypto_payment_completed'
+        : (cryptoPurchase.insufficientFunds
+          ? 'crypto_insufficient_funds'
+          : (cryptoPurchase.paymentFailed ? 'crypto_payment_failed' : 'wallet_confirmation_required')),
       account: account.account,
       launch: input.launch,
       cryptoPurchase,

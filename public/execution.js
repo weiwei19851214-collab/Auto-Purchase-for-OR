@@ -113,7 +113,7 @@ function render(job, rows, events, worker) {
   els.runCaption.textContent = `job ${job.id}`;
   const currentSummary = currentRows
     .filter((row) => row.jobId === job.id)
-    .map((row) => `#${row.rowNumber} ${row.profileId || '-'} ${row.stage || '-'}`)
+    .map((row) => `#${taskRowNumber(row)} ${row.profileId || '-'} ${row.stage || '-'}`)
     .join(' · ');
   els.runMeta.textContent = [
     `范围 ${job.options?.executionScope || '-'}`,
@@ -150,10 +150,11 @@ function renderRows(rows, job) {
   els.executionBody.innerHTML = rows.map((row) => {
     const canRepair = canRepairOpom(row, canOperate);
     const failedRow = isFailedJobRow(row);
+    const displayRowNumber = taskRowNumber(row);
     return `
       <tr class="${failedRow ? 'detail-row-failed' : ''}">
         <td data-label="状态">${statusPill(row.status, statusLabel(row.status))}</td>
-        <td data-label="行">${escapeHtml(row.rowNumber)}</td>
+        <td data-label="行">${escapeHtml(displayRowNumber)}</td>
         <td data-label="账号"><span class="account-cell"><strong>${escapeHtml(row.loginEmail || row.username || '-')}</strong><small>${escapeHtml(row.opomAccountId || '')}</small></span></td>
         <td data-label="AdsPower">${escapeHtml(row.adsPowerSerialNumber || '-')}<br><span class="muted">${escapeHtml(row.adsPowerUserId || '')}</span></td>
         <td data-label="阶段">${escapeHtml(row.stage || '-')}</td>
@@ -165,7 +166,7 @@ function renderRows(rows, job) {
         <td data-label="操作"><div class="row-actions">
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="0" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>从本行继续</button>
           <button type="button" class="resume-row" data-row-number="${escapeHtml(row.rowNumber)}" data-only-row="1" ${canOperate && !['completed', 'skipped'].includes(row.status) ? '' : 'disabled'}>重试本行</button>
-          ${canRepair ? `<button type="button" class="repair-opom" data-row-number="${escapeHtml(row.rowNumber)}">补写 OPOM</button>` : ''}
+          ${canRepair ? `<button type="button" class="repair-opom" data-row-number="${escapeHtml(row.rowNumber)}" data-task-row-number="${escapeHtml(displayRowNumber)}">补写 OPOM</button>` : ''}
         </div></td>
       </tr>
     `;
@@ -174,8 +175,17 @@ function renderRows(rows, job) {
     button.addEventListener('click', () => resumeRow(Number(button.dataset.rowNumber), button.dataset.onlyRow === '1').catch(showError));
   });
   els.executionBody.querySelectorAll('.repair-opom').forEach((button) => {
-    button.addEventListener('click', () => repairOpom(Number(button.dataset.rowNumber)).catch(showError));
+    button.addEventListener('click', () => repairOpom(
+      Number(button.dataset.rowNumber),
+      Number(button.dataset.taskRowNumber),
+    ).catch(showError));
   });
+}
+
+function taskRowNumber(row = {}) {
+  const value = Number(row.taskRowNumber);
+  if (Number.isInteger(value) && value > 0) return value;
+  return Math.max(1, Number(row.rowNumber || 0) - 1);
 }
 
 function isFailedJobRow(row = {}) {
@@ -312,7 +322,7 @@ async function resumeRow(startRowNumber, onlyRow) {
 
 function resumeSummary(preview) {
   return [
-    `${preview.onlyRow ? '重试本行' : '从本行继续'}：第 ${preview.startRowNumber} 行`,
+    `${preview.onlyRow ? '重试本行' : '从本行继续'}：第 ${preview.taskRowNumber || Math.max(1, Number(preview.startRowNumber || 0) - 1)} 行`,
     `候选 ${preview.totalCandidateRows || 0} 行`,
     `将重排 ${preview.queuedRows?.length || 0} 行`,
     `已在队列 ${preview.alreadyQueuedRows?.length || 0} 行`,
@@ -321,9 +331,9 @@ function resumeSummary(preview) {
   ].join('\n');
 }
 
-async function repairOpom(rowNumber) {
-  if (!window.confirm(`只补写第 ${rowNumber} 行 OPOM 结果，不会打开浏览器或重新购买。确认继续？`)) return;
-  await api(`/api/jobs/${encodeURIComponent(jobId)}/rows/${encodeURIComponent(rowNumber)}/opom-writeback-repair`, {
+async function repairOpom(sourceRowNumber, displayRowNumber) {
+  if (!window.confirm(`只补写第 ${displayRowNumber} 行 OPOM 结果，不会打开浏览器或重新购买。确认继续？`)) return;
+  await api(`/api/jobs/${encodeURIComponent(jobId)}/rows/${encodeURIComponent(sourceRowNumber)}/opom-writeback-repair`, {
     method: 'POST',
     body: '{}',
   });

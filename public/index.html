@@ -107,7 +107,14 @@
               <span class="field-title">充值规则</span>
               <strong class="compact-value" id="ruleSummary">145/150/20</strong>
             </div>
-            <div class="three-inputs">
+            <div class="crypto-rule-mode" id="cryptoRuleModeControl" role="radiogroup" aria-label="虚拟币充值规则">
+              <span class="field-title">虚拟币充值方式</span>
+              <div class="segmented" role="radiogroup" aria-label="虚拟币充值方式">
+                <button class="segment is-selected" type="button" role="radio" aria-checked="true" data-crypto-rule-mode="balance_threshold">按余额阈值</button>
+                <button class="segment" type="button" role="radio" aria-checked="false" data-crypto-rule-mode="fixed_amount">固定金额</button>
+              </div>
+            </div>
+            <div class="three-inputs" id="balanceRuleFields">
               <label>
                 <span>阈值</span>
                 <input id="balanceThreshold" type="number" min="0.01" step="1" value="145" inputmode="decimal" />
@@ -119,6 +126,12 @@
               <label>
                 <span>达到/高于</span>
                 <input id="amountAtOrAbove" type="number" min="0" step="1" value="20" inputmode="decimal" />
+              </label>
+            </div>
+            <div class="crypto-fixed-field" id="cryptoFixedAmountField" hidden>
+              <label>
+                <span>固定充值金额</span>
+                <input id="cryptoFixedAmount" type="number" min="0.01" step="1" value="10" inputmode="decimal" />
               </label>
             </div>
             <div class="auto-rule-section">

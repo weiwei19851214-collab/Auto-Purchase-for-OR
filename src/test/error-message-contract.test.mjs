@@ -178,3 +178,7 @@ test('simplifyError treats bind-script timeouts as a row timeout', () => {
   assert.equal(result.errorCode, 'row_execution_timeout');
   assert.equal(result.message, '子任务执行超时');
 });
+test('simplifyError gives Coinbase insufficient funds a user-facing recharge failure message', () => {
+  const result = simplifyError('crypto_insufficient_funds');
+  assert.match(result.message, /任务余额不足，任务未执行完/);
+});

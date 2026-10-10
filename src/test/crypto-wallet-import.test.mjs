@@ -227,7 +227,7 @@ test('real wallet flow reacquires the target after Import wallet and method rout
   assert.match(source, /OKX SES 首次点击偶尔只激活窗口/);
   assert.match(source, /两次真实鼠标点击后仍无焦点/);
   assert.match(source, /SES 偶尔接收鼠标事件但未触发 React handler/);
-  assert.match(source, /typeCharacters\(wallet, words\[index\], 12\)/);
+  assert.match(source, /typeCharacters\(wallet, words\[index\], 40\)/);
 });
 
 test('seed phrases remain in job memory and are never part of the child result', async () => {
@@ -264,25 +264,23 @@ test('seed phrases remain in job memory and are never part of the child result',
   assert.ok(source.indexOf('validateWalletSeedRows') < source.indexOf('makeJobFiles(jobId'));
 });
 
-test('job creation keeps the recovery phrase out of SQLite and both CSV files', async () => {
+test('job creation keeps the recovery phrase in the task CSV but out of result CSV and SQLite', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'crypto-wallet-test-'));
   const db = openDatabase(join(directory, 'runner.sqlite'));
   let files;
   try {
-    const csvText = ['status,login_email,ads_power_user_id,ads_match_status,balance_threshold,amount_below_threshold,amount_at_or_above_threshold',
-      ',user@example.com,profile1,matched,145,150,20'].join(String.fromCharCode(10));
+    const csvText = ['status,login_email,ads_power_user_id,ads_match_status,balance_threshold,amount_below_threshold,amount_at_or_above_threshold,seed_phrase,wallet_password',
+      ',user@example.com,profile1,matched,145,150,20,' + phrase + ',fixture-wallet-only'].join(String.fromCharCode(10));
     const options = {rechargeMode: 'crypto', scopeBillingAddress: false, scopePaymentMethod: false,
       scopePurchase: true, scopeAutoTopup: false, confirmPurchase: false};
     const liveConfirmationToken = createLiveConfirmation({csvText, options, ready: 1}).token;
-    const created = await createJob(db, {csvText, options, seedPhrases: [phrase], liveConfirmationToken});
+    const created = await createJob(db, {csvText, options, liveConfirmationToken});
     const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(created.job.id);
     files = [job.csv_path, job.result_csv_path];
-    assert.equal(walletSeedForRow(job.id, 0), phrase);
-    for (const content of [readFileSync(job.csv_path), readFileSync(job.result_csv_path),
-      readFileSync(join(directory, 'runner.sqlite')), Buffer.from(JSON.stringify(created))]) {
-      assert.equal(content.includes(Buffer.from(phrase)), false);
-    }
-    clearWalletSeeds(job.id);
+    assert.equal(readFileSync(job.csv_path).includes(phrase), true);
+    assert.equal(readFileSync(job.result_csv_path).includes(phrase), false);
+    assert.equal(readFileSync(job.result_csv_path).includes('fixture-wallet-only'), false);
+    assert.equal(readFileSync(join(directory, 'runner.sqlite')).includes(Buffer.from(phrase)), false);
   } finally {
     db.close();
     for (const file of files || []) {

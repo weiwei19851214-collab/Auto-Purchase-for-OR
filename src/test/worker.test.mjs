@@ -85,6 +85,52 @@ test('worker records row exceptions and continues safe batches', async () => {
   }
 });
 
+test('worker pauses the whole task when crypto wallet funds are insufficient', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-insufficient-funds-'));
+  try {
+    const db = openDatabase(join(dir, 'test.sqlite'));
+    const dryRun = await dryRunPayload({fileName: 'account.csv', csvText: TWO_ROW_CSV});
+    const created = await createJob(db, {
+      fileName: 'account.csv',
+      csvText: TWO_ROW_CSV,
+      liveConfirmationToken: dryRun.liveConfirmationToken,
+    });
+    const calls = [];
+    const worker = new JobWorker(db, {
+      heartbeatMs: 1000,
+      executeRowFn: async (_csvText, rawIndex) => {
+        calls.push(rawIndex);
+        return {
+          status: 'failed',
+          stage: 'crypto.insufficient_funds',
+          errorCode: 'crypto_insufficient_funds',
+          message: '任务余额不足，任务未执行完：Coinbase 余额不足，需要 10.50 USDC',
+          details: {
+            purchaseStatus: 'insufficient_funds',
+            purchaseAmount: '10',
+            balanceBefore: '0',
+          },
+          safeToContinue: false,
+          stopProfile: true,
+          profileStop: {attempted: true},
+        };
+      },
+    });
+
+    await worker.runJob(created.job.id);
+    const details = jobDetails(db, created.job.id);
+    assert.deepEqual(calls, [0]);
+    assert.equal(details.job.status, 'blocked');
+    assert.match(details.job.error, /任务余额不足，任务未执行完/);
+    assert.equal(details.rows[0].status, 'failed');
+    assert.equal(details.rows[0].errorCode, 'crypto_insufficient_funds');
+    assert.equal(details.rows[1].status, 'queued');
+    assert.equal(details.events.some((event) => event.type === 'job.blocked'), true);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
 test('worker clears the unused CSV card from preserved-card row state and result CSV', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'or-runner-worker-preserved-card-'));
   try {

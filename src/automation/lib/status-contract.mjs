@@ -13,6 +13,16 @@ export const STATUSES = Object.freeze({
 
 export function classifyError(message) {
   const text = String(message || '');
+  if (/crypto_insufficient_funds|Insufficient funds|余额不足/i.test(text)) {
+    return statusRecord(STATUSES.FAILED, {
+      stage: 'crypto.insufficient_funds',
+      terminal: true,
+      // 余额不足会影响同一钱包的后续账号，必须暂停整个批次。
+      safeToContinueBatch: false,
+      stopProfile: true,
+      message: text,
+    });
+  }
   if (/crypto_task_timeout|crypto\.timeout/i.test(text)) {
     return statusRecord(STATUSES.FAILED, {
       stage: 'crypto.timeout',
@@ -30,6 +40,15 @@ export function classifyError(message) {
   if (/crypto_password_/i.test(text)) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
       stage: 'crypto.password_verification', safeToContinueBatch: false, stopProfile: false, message: text,
+    });
+  }
+  if (/crypto_wallet_transaction_/i.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.wallet_confirmation',
+      terminal: true,
+      safeToContinueBatch: false,
+      stopProfile: false,
+      message: text,
     });
   }
   if (/Crypto purchase form did not become ready|Crypto amount input (?:not found or not focused|did not retain)|Crypto Purchase button not clickable/i.test(text)) {

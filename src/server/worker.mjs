@@ -7,7 +7,6 @@ import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
-import {clearWalletSeeds, walletPasswordForRow, walletSeedForRow} from './crypto-wallet-secrets.mjs';
 import {CRYPTO_TASK_TIMEOUT_MS} from './config.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 
@@ -127,7 +126,6 @@ export class JobWorker {
       `).run(redact(error.message), now, now, jobId);
       addEvent(this.db, jobId, 'job.failed', redact(error.message));
     } finally {
-      clearWalletSeeds(jobId);
       this.current = null;
       this.currentRows.clear();
       this.running = false;
@@ -170,6 +168,7 @@ export class JobWorker {
       jobId: job.id,
       rowId: row.id,
       rowNumber: row.row_number,
+      taskRowNumber: Math.max(1, Number(row.row_number || 0) - 1),
       profileId: row.profile_id,
       stage: 'worker.running',
       startedAt: now,
@@ -192,8 +191,6 @@ export class JobWorker {
     try {
       const executionPromise = this.executeRowFn(csvText, row.raw_index, {
         ...options,
-        ...(options.rechargeMode === 'crypto' ? {runtimeSeedPhrase: walletSeedForRow(job.id, row.raw_index)} : {}),
-        ...(options.rechargeMode === 'crypto' ? {runtimeWalletPassword: walletPasswordForRow(job.id, row.raw_index)} : {}),
         runtimeLog: {
           jobId: job.id,
           rowId: row.id,
@@ -414,6 +411,7 @@ export class JobWorker {
         jobId: job.id,
         rowId: row.id,
         rowNumber: row.row_number,
+        taskRowNumber: Math.max(1, Number(row.row_number || 0) - 1),
         profileId: row.profile_id,
         stage: 'worker.running',
         elapsedMs,

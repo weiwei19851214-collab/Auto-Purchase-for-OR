@@ -89,6 +89,7 @@ test('database migration preserves historical raw errors as detail and exposes a
     assert.match(row.error_detail, /repeated attempts/i);
 
     const exposed = publicRow({...row, missing_json: '[]'});
+    assert.equal(exposed.taskRowNumber, 1);
     assert.equal(exposed.errorCode, 'card_rate_or_amount_limit');
     assert.equal(exposed.message, '支付次数过多或超限');
     assert.match(exposed.errorDetail, /repeated attempts/i);

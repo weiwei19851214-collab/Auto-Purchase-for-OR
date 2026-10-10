@@ -185,6 +185,27 @@ test('purchasePlan supports fixed recharge amounts by balance threshold', () => 
   assert.equal(plan.purchase.rule.atOrAboveAmount, '20');
 });
 
+test('purchasePlan supports explicit fixed crypto recharge amount', () => {
+  const plan = rechargePlan.purchasePlan({balance_threshold: '145', amount_below_threshold: '150'}, {
+    rechargeMode: 'crypto',
+    cryptoRechargeRuleMode: 'fixed_amount',
+    cryptoFixedAmount: '37.50',
+  });
+  assert.equal(plan.mode, 'fixed_amount');
+  assert.equal(plan.purchase.amount, '37.5');
+  assert.deepEqual(plan.missing, []);
+});
+
+test('purchasePlan blocks crypto fixed mode without a positive amount', () => {
+  const plan = rechargePlan.purchasePlan({}, {
+    rechargeMode: 'crypto',
+    cryptoRechargeRuleMode: 'fixed_amount',
+    cryptoFixedAmount: '',
+  });
+  assert.equal(plan.mode, 'fixed_amount');
+  assert.deepEqual(plan.missing, ['crypto_fixed_amount']);
+});
+
 test('purchasePlan accepts zero on either balance-rule branch as skip purchase', () => {
   const zeroBelow = rechargePlan.purchasePlan({
     balance_threshold: '145',

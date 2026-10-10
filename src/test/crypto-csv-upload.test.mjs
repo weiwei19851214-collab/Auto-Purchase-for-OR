@@ -22,7 +22,7 @@ function clientCsvFunctions() {
   return context;
 }
 
-test('crypto CSV strips the phrase before creating normalized task rows', () => {
+test('crypto CSV keeps wallet fields in normalized task rows for retry', () => {
   const {rowsFromCsv} = clientCsvFunctions();
   const seeds = new Map();
   const passwords = new Map();
@@ -31,8 +31,8 @@ test('crypto CSV strips the phrase before creating normalized task rows', () => 
   assert.equal(rows[0].login_email, 'user@example.com');
   assert.equal(rows[0].ads_power_serial_number, '1234');
   assert.equal(rows[0].ads_power_user_id, 'abcd1234');
-  assert.equal(JSON.stringify(rows).includes(phrase), false);
-  assert.equal('seed_phrase' in rows[0], false);
+  assert.equal(rows[0].seed_phrase, phrase);
+  assert.equal(rows[0].wallet_password, 'wallet-pass');
   assert.equal(seeds.get('user@example.com'), phrase);
   assert.equal(passwords.get('user@example.com'), 'wallet-pass');
 });
@@ -56,22 +56,23 @@ test('bank card selector CSV retains its existing header contract', () => {
   assert.equal(rowsFromCsv(csvLines('login_email,ads_power_user_id', 'user@example.com,abcd1234')).length, 1);
 });
 
-test('server refuses raw seed_phrase before a job can persist the CSV', async () => {
-  await assert.rejects(parsePlan(csvLines(header, 'user@example.com,1234,abcd1234,' + phrase), {
+test('server accepts seed_phrase in the persisted crypto task CSV', async () => {
+  const result = await parsePlan(csvLines(header + ',status,balance_threshold,amount_below_threshold,amount_at_or_above_threshold', 'user@example.com,1234,abcd1234,' + phrase + ',,145,150,20'), {
     rechargeMode: 'crypto', scopeBillingAddress: false, scopePaymentMethod: false,
     scopePurchase: true, scopeAutoTopup: false, confirmPurchase: false,
-  }), (error) => error.message.includes('seed_phrase') && !error.message.includes(phrase));
+  });
+  assert.equal(result.rows[0].status, 'ready');
 });
 
 test('sanitized crypto CSV still reaches the existing recharge dry-run', async () => {
   const {rowsFromCsv} = clientCsvFunctions();
   const [row] = rowsFromCsv(csvLines(header, 'user@example.com,1234,abcd1234,' + phrase), true);
   const taskHeader = ['status', 'login_email', 'ads_power_serial_number', 'ads_power_user_id',
-    'balance_threshold', 'amount_below_threshold', 'amount_at_or_above_threshold'];
+    'balance_threshold', 'amount_below_threshold', 'amount_at_or_above_threshold', 'seed_phrase'];
   const taskCsv = csvLines(taskHeader.join(','), taskHeader.map((key) => ({
-    ...row, balance_threshold: '145', amount_below_threshold: '150', amount_at_or_above_threshold: '20',
+    ...row, balance_threshold: '145', amount_below_threshold: '150', amount_at_or_above_threshold: '20', seed_phrase: phrase,
   })[key] || '').join(','));
-  assert.equal(taskCsv.includes(phrase), false);
+  assert.equal(taskCsv.includes(phrase), true);
   const result = await parsePlan(taskCsv, {
     rechargeMode: 'crypto', scopeBillingAddress: false, scopePaymentMethod: false,
     scopePurchase: true, scopeAutoTopup: false, confirmPurchase: false, skipAdsPowerMatch: true,

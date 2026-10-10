@@ -84,7 +84,7 @@ test('crypto browser result pauses the batch at the OKX wallet confirmation boun
   assert.equal(result.details.purchaseAmount, '150');
 });
 
-test('crypto browser reports Coinbase insufficient USDC funds without closing the profile', async () => {
+test('crypto browser reports Coinbase insufficient USDC funds and pauses the task', async () => {
   const result = await executeRowWithAdapters(CRYPTO_CSV, 0, CRYPTO_OPTIONS, {
     common: {cardLast4: () => ''},
     runClosedLoopChildAsync: async () => ({
@@ -108,8 +108,9 @@ test('crypto browser reports Coinbase insufficient USDC funds without closing th
   assert.equal(result.status, 'failed');
   assert.equal(result.stage, 'crypto.insufficient_funds');
   assert.equal(result.errorCode, 'crypto_insufficient_funds');
-  assert.equal(result.message, '余额不足：需要 10.50 USDC');
-  assert.equal(result.safeToContinue, true);
+  assert.match(result.message, /任务余额不足，任务未执行完/);
+  assert.match(result.message, /10\.50 USDC/);
+  assert.equal(result.safeToContinue, false);
   assert.equal(result.stopProfile, true);
 });
 
@@ -124,7 +125,7 @@ test('Coinbase Try again is a terminal crypto payment failure and is not retried
   assert.equal(result.status, 'failed');
   assert.equal(result.stage, 'crypto.payment_failed');
   assert.equal(result.errorCode, 'crypto_payment_failed_try_again');
-  assert.match(result.message, /Try again/);
+  assert.match(result.message, /充值失败，可能是余额不足/);
   assert.equal(result.safeToContinue, true);
   assert.equal(result.stopProfile, true);
 });
@@ -161,6 +162,34 @@ test('bank-card and crypto scheduler controls live on the channel page instead o
   assert.ok(script.includes('state.schedulers[state.rechargeMode]'));
 });
 
+test('crypto recharge defaults the account source to CSV when no mode draft exists', () => {
+  const script = readFileSync(join(process.cwd(), 'public/app.js'), 'utf8');
+  assert.match(script, /state.source = draft?.source || 'csv';/);
+  assert.match(script, /state.source = 'opom';/);
+});
+
+test('crypto fixed amount controls reach the task options and toggle the visible rule fields', () => {
+  const script = readFileSync(join(process.cwd(), 'public/app.js'), 'utf8');
+  assert.match(script, /data-crypto-rule-mode/);
+  assert.match(script, /cryptoRechargeRuleMode: crypto \? cryptoRuleMode\(\) : 'balance_threshold'/);
+  assert.match(script, /cryptoFixedAmount: crypto \? String\(cryptoFixedAmount\(\)\) : ''/);
+  assert.match(script, /balanceRuleFields.hidden = fixedCrypto/);
+  assert.match(script, /cryptoFixedAmountField.hidden = !fixedCrypto/);
+});
+
+test('crypto fixed amount defaults to ten while balance rule amounts remain unchanged', () => {
+  const html = readFileSync(join(process.cwd(), 'public/index.html'), 'utf8');
+  const script = readFileSync(join(process.cwd(), 'public/app.js'), 'utf8');
+  assert.match(html, /id="cryptoFixedAmount"[^>]*value="10"/);
+  assert.ok(script.includes('return numericValue(el.cryptoFixedAmount, 10);'));
+  assert.ok(script.includes("cryptoFixedAmount: el.cryptoFixedAmount?.value || '10'"));
+  assert.ok(script.includes("el.cryptoFixedAmount.value = draft?.cryptoFixedAmount || '10';"));
+  assert.ok(script.includes("el.cryptoFixedAmount.value = '10';"));
+  // 只调整虚拟币固定金额，余额阈值分支仍保留原来的充值金额。
+  assert.match(html, /id="amountBelow"[^>]*value="150"/);
+  assert.match(html, /id="amountAtOrAbove"[^>]*value="20"/);
+});
+
 test('crypto browser flow uses human amount input and stops before wallet payment confirmation', () => {
   const source = readFileSync(join(process.cwd(), 'src/automation/crypto_recharge_openrouter_cdp.mjs'), 'utf8');
   const bankCardSource = readFileSync(join(process.cwd(), 'src/automation/bind_openrouter_card_cdp.mjs'), 'utf8');
@@ -172,7 +201,7 @@ test('crypto browser flow uses human amount input and stops before wallet paymen
   assert.match(source, /const amountInput = await fillAmount\(page, purchase\.amount\)/);
   assert.ok(source.includes('payments\\.coinbase\\.com'));
   assert.match(source, /async function selectOkxWallet/);
-  assert.match(source, /COINBASE_WALLET_UI_TIMEOUT_MS = 5000/);
+  assert.match(source, /COINBASE_WALLET_UI_TIMEOUT_MS = 15000/);
   assert.match(source, /COINBASE_WALLET_UI_POLL_MS = 100/);
   assert.match(source, /if \(controls\.launch\)/);
   assert.match(source, /COINBASE_FAILURE_STABLE_MS = 3000/);
@@ -197,6 +226,12 @@ test('crypto browser flow uses human amount input and stops before wallet paymen
   assert.match(source, /async function readCheckoutState/);
   assert.match(source, /Insufficient funds/);
   assert.match(source, /walletConfirmationRequired: checkoutState\.insufficientFunds !== true/);
+  assert.match(source, /risk_warning/);
+  assert.match(source, /clickOkxTransactionButton/);
+  assert.match(source, /confirm_send/);
+  assert.match(source, /paymentCompleted/);
+  assert.match(source, /waitForBalanceIncrease/);
+  assert.match(source, /confirmWalletPayment: input.confirmWalletPayment === true/);
   assert.ok(source.includes("await fillCryptoVerificationPassword(input, page)"));
   assert.ok(source.includes("await continueCryptoVerification(page)"));
   assert.ok(source.includes("verification && !verificationSubmitted"));
@@ -232,4 +267,138 @@ test('post-amount flow launches OKX, then checks login before wallet confirmatio
     readCheckout: async () => { confirmations += 1; return {}; },
   }), /crypto_wallet_import_unverified/);
   assert.equal(confirmations, 0);
+});
+
+test('crypto checkout prioritizes insufficient funds while wallet connection is pending', async () => {
+  let readOptions = null;
+  const checkout = {close() {}};
+  const result = await continueCryptoAfterAmount({}, {}, {amount: '150'}, {
+    prepareWallet: async () => ({status: 'connect_required'}),
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => {},
+    readCheckout: async (_checkout, options) => {
+      readOptions = options;
+      return {
+        insufficientFunds: true,
+        paymentFailed: true,
+        requiredAmount: '157.50',
+        requiredAsset: 'USDC',
+      };
+    },
+    inspectTargets: async () => [],
+  });
+
+  assert.equal(readOptions.timeoutMs, 30000);
+  assert.equal(result.cryptoPurchase.insufficientFunds, true);
+  assert.equal(result.cryptoPurchase.paymentFailed, true);
+  assert.equal(result.cryptoPurchase.walletConfirmationRequired, false);
+});
+
+test('explicit wallet payment confirmation still skips OKX when Coinbase reports insufficient funds', async () => {
+  const checkout = {close() {}};
+  let prepared = false;
+  let confirmed = false;
+  const result = await continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {amount: '150'}, {
+    prepareWallet: async () => {
+      prepared = true;
+      throw new Error('wallet preparation must not run after insufficient funds');
+    },
+    confirmWalletPayment: async () => {
+      confirmed = true;
+      throw new Error('wallet payment must not run after insufficient funds');
+    },
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => ({
+      checkoutState: {insufficientFunds: true, requiredAmount: '157.50', requiredAsset: 'USDC'},
+    }),
+    inspectTargets: async () => [],
+  });
+  assert.equal(prepared, false);
+  assert.equal(confirmed, false);
+  assert.equal(result.cryptoPurchase.insufficientFunds, true);
+  result.checkout.close();
+});
+
+test('crypto checkout uses Coinbase insufficient funds even when OKX did not expand', async () => {
+  const checkout = {close() {}};
+  let prepared = false;
+  const result = await continueCryptoAfterAmount({}, {}, {amount: '150'}, {
+    prepareWallet: async () => {
+      prepared = true;
+      throw new Error('OKX should not be required after Coinbase insufficient funds');
+    },
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => ({
+      checkoutState: {
+        insufficientFunds: true,
+        requiredAmount: '157.50',
+        requiredAsset: 'USDC',
+      },
+    }),
+    inspectTargets: async () => [],
+  });
+
+  assert.equal(prepared, false);
+  assert.equal(result.cryptoPurchase.insufficientFunds, true);
+  assert.equal(result.cryptoPurchase.wallet.status, 'not_required');
+  assert.equal(result.cryptoPurchase.walletConfirmationRequired, false);
+  assert.equal(result.cryptoPurchase.checkoutState.requiredAsset, 'USDC');
+  result.checkout.close();
+});
+
+test('crypto checkout leaves a non-ready wallet at the connection boundary without payment confirmation', async () => {
+  const checkout = {close() {}};
+  let confirmed = false;
+  const result = await continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {amount: '10'}, {
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => ({targetCount: 1}),
+    prepareWallet: async () => ({status: 'connect_required'}),
+    confirmWalletPayment: async () => {
+      confirmed = true;
+      return {confirmed: true};
+    },
+    readCheckout: async () => ({walletConnected: false}),
+    inspectTargets: async () => [],
+  });
+  assert.equal(confirmed, false);
+  assert.equal(result.cryptoPurchase.walletConfirmationRequired, true);
+  result.checkout.close();
+});
+
+test('crypto checkout can confirm OKX risk warning and payment confirmation before completion verification', async () => {
+  const checkout = {close() {}};
+  const calls = [];
+  const result = await continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {
+    amount: '10',
+    beforeBalance: {balance: 20},
+    requiredAsset: 'USDC',
+    network: 'Arbitrum One',
+  }, {
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => ({targetCount: 1}),
+    prepareWallet: async () => ({status: 'ready'}),
+    confirmWalletPayment: async (_input, amount, asset, network) => {
+      calls.push(['confirm-wallet-payment', amount, asset, network]);
+      return {confirmed: true, riskWarningClicked: true, confirmationClicked: true, network};
+    },
+    readCheckout: async (_checkout, options) => {
+      calls.push(['read-checkout', options.timeoutMs]);
+      return {paymentCompleted: true};
+    },
+    inspectTargets: async () => [],
+  });
+  assert.deepEqual(calls, [['read-checkout', 1000], ['read-checkout', 1000], ['confirm-wallet-payment', '10', 'USDC', 'Arbitrum One'], ['read-checkout', 60000]]);
+  assert.equal(result.cryptoPurchase.walletPaymentConfirmation.confirmed, true);
+  assert.equal(result.cryptoPurchase.checkoutState.paymentCompleted, true);
+  result.checkout.close();
 });

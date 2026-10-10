@@ -91,3 +91,17 @@ test('crypto page rule 145/150/20 selects and enters the correct fixed amount at
     assert.equal(input.value, expected);
   }
 });
+
+test('crypto fixed amount ignores the current balance and uses the configured amount', async () => {
+  const task = buildCryptoRechargeTask({}, {
+    rechargeMode: 'crypto',
+    cryptoRechargeRuleMode: 'fixed_amount',
+    cryptoFixedAmount: '37.50',
+  });
+  const {page, input} = fakeAmountPage('10', {balance: '999'});
+  const decision = await resolveAmount(page, task.purchase);
+  assert.equal(decision.amount, '37.5');
+  assert.equal(decision.skippedByRule, false);
+  await fillAmount(page, decision.amount);
+  assert.equal(input.value, '37.5');
+});

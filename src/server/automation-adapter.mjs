@@ -48,6 +48,8 @@ const OPTIONAL_COLUMNS = [
   'amount_at_or_above_threshold',
   'auto_topup_threshold',
   'auto_topup_amount',
+  'seed_phrase',
+  'wallet_password',
 ];
 
 export function safeFileName(name) {
@@ -68,6 +70,12 @@ function normalizeRechargeMode(value) {
     : 'bank_card';
 }
 
+function normalizeCryptoRuleMode(value) {
+  return String(value || '').trim().toLowerCase() === 'fixed_amount'
+    ? 'fixed_amount'
+    : 'balance_threshold';
+}
+
 export function automationScriptForRechargeMode(rechargeMode) {
   // 银行卡和虚拟币是两套独立执行器；只能在调度层按通道二选一，禁止互相回退。
   return normalizeRechargeMode(rechargeMode) === 'crypto'
@@ -81,6 +89,10 @@ export function runnerArgs(options = {}) {
   const preserveExistingPaymentMethod = !!options.preserveExistingPaymentMethod;
   return {
     rechargeMode: normalizeRechargeMode(options.rechargeMode),
+    cryptoRechargeRuleMode: normalizeCryptoRuleMode(options.cryptoRechargeRuleMode),
+    cryptoFixedAmount: String(options.cryptoFixedAmount || '').trim(),
+    // 虚拟币最终钱包确认必须由任务显式开启；银行卡流程不读取此开关。
+    confirmWalletPayment: options.confirmWalletPayment === true,
     removeExisting: !preserveExistingPaymentMethod && options.removeExisting !== false,
     preserveExistingPaymentMethod,
     stopProfiles: options.stopProfiles !== false,
@@ -146,10 +158,7 @@ export async function parsePlan(csvText, options = {}) {
 
   const args = runnerArgs(options);
   const header = [...parsedRows[0]];
-  // 任务源 CSV 会持久化；钱包恢复凭据只允许在本地文件中，由页面剥离后再提交。
-  if (header.some((key) => String(key).trim().toLowerCase() === 'seed_phrase')) {
-    throw new Error('任务 CSV 不接受 seed_phrase；请通过虚拟币页面导入账号 CSV');
-  }
+  // 虚拟币钱包字段随本地任务源 CSV 保存，失败行重试直接复用同一行输入。
   const missingHeader = requiredInputColumns(args).filter((key) => !header.includes(key));
   if (missingHeader.length) throw new Error(`CSV missing required columns: ${missingHeader.join(', ')}`);
   for (const key of OPTIONAL_COLUMNS) {
@@ -249,6 +258,9 @@ export function publicJob(row) {
     resultCsvReady: existsSync(row.result_csv_path),
     options: {
       rechargeMode: args.rechargeMode,
+      cryptoRechargeRuleMode: args.cryptoRechargeRuleMode,
+      cryptoFixedAmount: args.rechargeMode === 'crypto' ? args.cryptoFixedAmount : '',
+      confirmWalletPayment: args.rechargeMode === 'crypto' && args.confirmWalletPayment,
       removeExisting: args.removeExisting,
       preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
       stopProfiles: args.stopProfiles,
@@ -299,9 +311,12 @@ export function publicJob(row) {
 }
 
 export function publicRow(row) {
+  // rowNumber 兼容 CSV 物理行号（含表头）；taskRowNumber 是操作台从 1 开始的业务序号。
+  const sourceRowNumber = Number(row.row_number || 0);
   return {
     id: row.id,
     rowNumber: row.row_number,
+    taskRowNumber: Math.max(1, sourceRowNumber - 1),
     profileId: row.profile_id,
     opomAccountId: row.opom_account_id,
     username: row.username_masked,
@@ -384,7 +399,7 @@ export async function writeResultCsv({csvPath, resultCsvPath, rowsByRawIndex, ru
     'auto_topup_threshold',
     'auto_topup_amount',
     ...plan.resultColumns(),
-  ]);
+  ]).filter((column) => !['seed_phrase', 'wallet_password'].includes(String(column).trim().toLowerCase()));
   const outcomeByRawIndex = new Map(rowsByRawIndex.map((item) => [item.rawIndex, item]));
   const outputRows = sourceRows.map((row, index) => {
     const source = csv.rowObject(sourceHeader, row);
@@ -597,25 +612,57 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       const paymentFailed = cryptoPurchase.paymentFailed === true || cryptoPurchase.checkoutState?.paymentFailed === true;
       const walletConnectionRequired = cryptoPurchase.walletConnectionRequired === true;
       const walletConfirmationRequired = cryptoPurchase.walletConfirmationRequired === true;
+      const paymentCompleted = cryptoPurchase.paymentCompleted === true
+        && cryptoPurchase.walletPaymentConfirmation?.confirmed === true;
       const terminalFailure = paymentFailed || insufficientFunds;
       if (terminalFailure && args.stopProfiles) {
         profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
       }
+      if (paymentCompleted) {
+        if (args.stopProfiles) profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
+        return {
+          status: status.STATUSES.COMPLETED,
+          stage: 'closed_loop.complete',
+          errorCode: '',
+          message: '虚拟币充值成功',
+          details: {
+            ...plan.rowMetadata(row),
+            rechargeMode: 'crypto',
+            purchaseStatus: 'verified',
+            purchaseAmount: cryptoPurchase.amount || cryptoPurchase.ruleDecision?.selectedAmount || '',
+            balanceBefore: cryptoPurchase.beforeBalance?.balance ?? '',
+            balanceAfter: cryptoPurchase.balanceAfter ?? cryptoPurchase.afterBalance?.balance ?? '',
+            walletPaymentConfirmation: cryptoPurchase.walletPaymentConfirmation,
+            cryptoPurchase,
+            automationLogDir,
+          },
+          safeToContinue: true,
+          stopProfile: true,
+          profileStop,
+        };
+      }
+      const requiredAmount = cryptoPurchase.checkoutState?.requiredAmount || cryptoPurchase.totalDue || '';
+      const requiredAsset = cryptoPurchase.checkoutState?.requiredAsset || '';
+      const insufficientFundsMessage = [
+        '任务余额不足，任务未执行完：Coinbase 余额不足',
+        requiredAmount && requiredAsset ? '需要 ' + requiredAmount + ' ' + requiredAsset : '',
+      ].filter(Boolean).join('，');
+      const cryptoMessage = insufficientFunds
+        ? insufficientFundsMessage
+        : (paymentFailed
+          ? '充值失败，可能是余额不足：Coinbase 页面显示 Try again，已关闭浏览器并继续下一任务'
+          : (walletConnectionRequired
+            ? 'Coinbase 正在等待 OKX 钱包连接，请在当前钱包窗口核对 Coinbase 来源后人工点击 Connect'
+            : (walletConfirmationRequired
+              ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
+              : '虚拟币支付页面已准备，但尚未确认钱包状态')));
       return {
         status: terminalFailure
           ? status.STATUSES.FAILED
           : (walletConfirmationRequired ? status.STATUSES.MANUAL_SECURITY_BLOCKER : status.STATUSES.PURCHASE_UNVERIFIED),
-        stage: paymentFailed ? 'crypto.payment_failed' : (insufficientFunds ? 'crypto.insufficient_funds' : (walletConfirmationRequired ? 'crypto.wallet_confirmation' : 'crypto.checkout')),
-        errorCode: paymentFailed ? 'crypto_payment_failed_try_again' : (insufficientFunds ? 'crypto_insufficient_funds' : (walletConfirmationRequired ? 'crypto_wallet_confirmation_required' : 'crypto_checkout_unverified')),
-        message: paymentFailed
-          ? 'Coinbase 充值失败：页面显示 Try again，已关闭浏览器并继续下一任务'
-          : (insufficientFunds
-          ? `余额不足：需要 ${cryptoPurchase.checkoutState?.requiredAmount || cryptoPurchase.totalDue || cryptoPurchase.amount || ''} ${cryptoPurchase.checkoutState?.requiredAsset || 'USDC'}`
-          : (walletConnectionRequired
-            ? 'Coinbase 正在等待 OKX 钱包连接，请在当前钱包窗口核对 Coinbase 来源后人工点击 Connect'
-          : (walletConfirmationRequired
-            ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
-            : '虚拟币支付页面已准备，但尚未确认钱包状态'))),
+        stage: insufficientFunds ? 'crypto.insufficient_funds' : (paymentFailed ? 'crypto.payment_failed' : (walletConfirmationRequired ? 'crypto.wallet_confirmation' : 'crypto.checkout')),
+        errorCode: insufficientFunds ? 'crypto_insufficient_funds' : (paymentFailed ? 'crypto_payment_failed_try_again' : (walletConfirmationRequired ? 'crypto_wallet_confirmation_required' : 'crypto_checkout_unverified')),
+        message: cryptoMessage,
         details: {
           ...plan.rowMetadata(row),
           rechargeMode: 'crypto',
@@ -626,8 +673,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           cryptoPurchase,
           automationLogDir,
         },
-        // 明确付款失败立即关闭并继续；只有真实钱包确认边界才保留现场。
-        safeToContinue: terminalFailure,
+        // 钱包余额是整个批次的共享前提，余额不足时暂停任务，避免后续账号继续进入支付流程。
+        safeToContinue: insufficientFunds ? false : terminalFailure,
         stopProfile: terminalFailure,
         profileStop,
       };

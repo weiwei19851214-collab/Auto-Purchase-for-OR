@@ -161,8 +161,9 @@ OPOM 生产只读验证通过后，按以下顺序执行：
 6. 勾选执行确认并启动运行；控制台会先自动运行 preflight。任何浏览器自动化启动前，都要解决所有 `missing_fields`、`identity_mismatch` 和 AdsPower 匹配失败。
 7. 对一行运行 no-purchase mode。它可以打开 AdsPower/OpenRouter 并准备购买表单，但不得点击最终 Purchase。
 8. 如果有测试数据，验证一行预期的 `identity_mismatch`。
-9. 只有存在安全的阻断场景时，才验证一行预期的 `manual_security_blocker`。保留浏览器打开，供人工检查。
-10. 获得明确授权后，创建 EJH 卡批次，并验证 safe card CSV 路径。
+9. 虚拟币真实付款时，只有在获得当前任务的明确钱包付款确认授权后，才允许自动处理 OKX 的 `Continue (Unsafe)` 和交易 `Confirm`。执行器必须动态核对 Coinbase 与 OKX 的实际金额、币种、网络；缺少或不一致时保留浏览器并人工处理。若 Coinbase 显示 `Insufficient funds`，沿用余额不足分支，不进入 OKX 交易确认。
+10. 只有存在安全的阻断场景时，才验证一行预期的 `manual_security_blocker`。保留浏览器打开，供人工检查。
+11. 获得明确授权后，创建 EJH 卡批次，并验证 safe card CSV 路径。
 11. 获得明确授权后，运行一行小额真实充值。
 12. 确认该行拥有所有完成证据：OPOM 账号已匹配、AdsPower profile 已匹配、OpenRouter 账号已匹配、新卡绑定已写入 OPOM、余额增长已验证、Auto top-up 回读匹配、result CSV 已生成、AdsPower 状态处理已记录。
 

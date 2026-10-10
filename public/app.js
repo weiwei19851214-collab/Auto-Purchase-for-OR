@@ -3,11 +3,11 @@
 
   const RUNTIME_CONFIG_KEY = 'autoPurchaseRuntimeConfigV1';
   const UI_PREFS_KEY = 'autoPurchaseUiPrefsV1';
-  // 明文仅供当前虚拟币页面展示，不放进 rows，避免随 resolve、CSV、job 或计划一起持久化。
+  // 账号密码只用于匹配展示；钱包字段随本地任务 CSV 保存，供失败行重试。
   const cryptoPasswords = new Map();
-  // 仅当前页面持有 CSV D 列助记词和可选 E 列钱包密码；任务列表、模式草稿、localStorage 均不包含它们。
+  // CSV 导入后保留助记词到任务行，避免执行页重试时丢失。
   const cryptoSeedPhrases = new Map();
-  // 仅当前页面持有 CSV E 列；钱包创建密码不进入 rows、localStorage、任务或结果文件。
+  // 钱包密码随本地任务源 CSV 保存，不写入 localStorage。
   const cryptoWalletPasswords = new Map();
   const HEALTHY_OPOM = new Set(['', 'ok', 'local_selector', 'completed']);
   const CANONICAL_HEADER = [
@@ -43,6 +43,8 @@
     'auto_topup_threshold',
     'auto_topup_amount',
     'recharge_mode',
+    'seed_phrase',
+    'wallet_password',
     'idempotency_key',
   ];
 
@@ -68,6 +70,7 @@
   const state = {
     source: 'csv',
     rechargeMode: 'bank_card',
+    cryptoRuleMode: 'balance_threshold',
     rows: [],
     fileName: '',
     sessionToken: '',
@@ -204,11 +207,22 @@
     };
   }
 
+  function cryptoRuleMode() {
+    return state.cryptoRuleMode === 'fixed_amount' ? 'fixed_amount' : 'balance_threshold';
+  }
+
+  function cryptoFixedAmount() {
+    return numericValue(el.cryptoFixedAmount, 10);
+  }
+
   function ruleText() {
     if (el.refundOnly.checked) return '仅退款';
     if (el.dataTrainingOnly.checked) return '仅开启 Data Training';
     if (el.disableDataTrainingOnly.checked) return '仅关闭 Data Training';
     if (isZdrOnlyMode()) return '仅 ZDR';
+    if (state.rechargeMode === 'crypto' && cryptoRuleMode() === 'fixed_amount') {
+      return '固定/' + cryptoFixedAmount();
+    }
     const rule = ruleValues();
     return `${rule.threshold}/${rule.below}/${rule.atOrAbove}`;
   }
@@ -262,7 +276,7 @@
     }
     const defaults = {
       adspowerApiBase: 'http://127.0.0.1:50325',
-      opomBaseUrl: 'http://20.2.209.2',
+      opomBaseUrl: 'http://172.184.250.216',
     };
     for (const key of CONFIG_FIELDS) {
       if (el[key]) el[key].value = saved[key] ?? defaults[key] ?? '';
@@ -480,6 +494,8 @@
       state: valueFrom(source, ['state']),
       auto_topup_threshold: valueFrom(source, ['auto_topup_threshold']),
       auto_topup_amount: valueFrom(source, ['auto_topup_amount']),
+      seed_phrase: valueFrom(source, ['seed_phrase']),
+      wallet_password: valueFrom(source, ['wallet_password', 'password']),
       idempotency_key: valueFrom(source, ['idempotency_key'])
         || `${sourceName}:${String(opomId || loginEmail || userId || serialNumber).toLowerCase()}:${index + 1}`,
       execute: source.execute !== false,
@@ -520,8 +536,7 @@
     const headerPresent = hasSelectorHeader(parsed[0]);
     const sourceRows = headerPresent
       ? parsed.slice(1).map((row) => {
-        const {seed_phrase, ...source} = objectFromRow(parsed[0], row);
-        return source;
+        return objectFromRow(parsed[0], row);
       })
       : parsed.map(noHeaderObject);
     const unique = [];
@@ -807,8 +822,8 @@
   function canStart() {
     if (state.matchingAdsPower) return false;
     if (!selectedRows().length) return false;
-    if (state.rechargeMode === 'crypto' && state.source === 'csv'
-      && selectedRows().some((row) => !cryptoSeedPhrases.has(String(row.login_email || '').trim().toLowerCase()))) return false;
+    if (state.rechargeMode === 'crypto'
+      && selectedRows().some((row) => !String(row.seed_phrase || '').trim())) return false;
     if (el.skipMatch.checked) {
       return selectedRows().some((row) => row.ads_power_user_id || row.ads_power_serial_number);
     }
@@ -834,9 +849,17 @@
     }
     el.ruleSummary.textContent = ruleText();
     el.autoTopupSummary.textContent = autoTopupText();
-    el.balanceThreshold.disabled = configurationOnly;
-    el.amountBelow.disabled = configurationOnly;
-    el.amountAtOrAbove.disabled = configurationOnly;
+    const fixedCrypto = crypto && cryptoRuleMode() === 'fixed_amount';
+    if (el.balanceRuleFields) el.balanceRuleFields.hidden = fixedCrypto;
+    if (el.cryptoFixedAmountField) el.cryptoFixedAmountField.hidden = !fixedCrypto;
+    el.balanceThreshold.disabled = configurationOnly || fixedCrypto;
+    el.amountBelow.disabled = configurationOnly || fixedCrypto;
+    el.amountAtOrAbove.disabled = configurationOnly || fixedCrypto;
+    for (const button of document.querySelectorAll('[data-crypto-rule-mode]')) {
+      const selected = button.dataset.cryptoRuleMode === cryptoRuleMode();
+      button.classList.toggle('is-selected', selected);
+      button.setAttribute('aria-checked', String(selected));
+    }
     el.autoTopupEnableOnly.disabled = crypto || configurationOnly;
     el.autoTopupThreshold.disabled = crypto || configurationOnly || el.autoTopupEnableOnly.checked;
     el.autoTopupAmount.disabled = crypto || configurationOnly || el.autoTopupEnableOnly.checked;
@@ -898,14 +921,19 @@
       opomConfirmed: state.opomConfirmed,
       cardAllocationSignature: state.cardAllocationSignature,
       skipMatch: el.skipMatch.checked,
+      cryptoRuleMode: state.cryptoRuleMode,
+      cryptoFixedAmount: el.cryptoFixedAmount?.value || '10',
     };
     state.rechargeMode = next;
     const draft = state.modeDrafts[next];
-    state.source = draft?.source || (next === 'crypto' ? 'opom' : 'csv');
+    // 虚拟币手工任务默认从账号 CSV 开始；自动计划回填的 OPOM 行仍由计划状态单独覆盖。
+    state.source = draft?.source || 'csv';
     state.rows = draft?.rows?.map((row) => ({...row})) || [];
     state.fileName = draft?.fileName || '';
     state.opomConfirmed = Boolean(draft?.opomConfirmed);
     state.cardAllocationSignature = draft?.cardAllocationSignature || '';
+    state.cryptoRuleMode = draft?.cryptoRuleMode === 'fixed_amount' ? 'fixed_amount' : 'balance_threshold';
+    if (el.cryptoFixedAmount) el.cryptoFixedAmount.value = draft?.cryptoFixedAmount || '10';
     el.skipMatch.checked = draft ? Boolean(draft.skipMatch) : false;
     if (next === 'crypto') {
       el.opomLoadState.textContent = state.rows.length ? '已获取 ' + state.rows.length + ' 条' : '尚未获取';
@@ -939,6 +967,12 @@
         autoTopupAmount: enableOnly ? '' : String(numericValue(el.autoTopupAmount, 70)),
       }),
     };
+  }
+
+  function setCryptoRuleMode(mode) {
+    state.cryptoRuleMode = mode === 'fixed_amount' ? 'fixed_amount' : 'balance_threshold';
+    invalidatePreparation();
+    renderControls();
   }
 
   async function loadOpom() {
@@ -1003,6 +1037,10 @@
     const preserveExistingPaymentMethod = !configurationOnly && hasCardCsv && el.preserveExistingCard.checked;
     const options = {
       rechargeMode: state.rechargeMode,
+      cryptoRechargeRuleMode: crypto ? cryptoRuleMode() : 'balance_threshold',
+      cryptoFixedAmount: crypto ? String(cryptoFixedAmount()) : '',
+      // 用户已明确要求虚拟币任务自动完成 OKX 的风险继续和付款 Confirm。
+      confirmWalletPayment: crypto,
       scopeBillingAddress: configurationOnly ? false : hasCardCsv,
       scopePaymentMethod: configurationOnly ? false : hasCardCsv,
       scopePurchase: !configurationOnly,
@@ -1178,12 +1216,17 @@
 
   function validateExecutionInput() {
     if (!selectedRows().length) throw new Error('请至少选择一个账号');
-    if (state.rechargeMode === 'crypto' && state.source === 'csv'
-      && selectedRows().some((row) => !cryptoSeedPhrases.has(String(row.login_email || '').trim().toLowerCase()))) {
-      throw new Error('助记词仅保存在当前页面内存，请重新上传虚拟币 CSV');
+    if (state.rechargeMode === 'crypto' && selectedRows().some((row) => !String(row.seed_phrase || '').trim())) {
+      throw new Error('虚拟币任务缺少助记词');
     }
     if (!canStart()) throw new Error('请先完成 AdsPower 匹配，或确认跳过匹配');
     if (isConfigurationOnlyMode()) return;
+    if (state.rechargeMode === 'crypto' && cryptoRuleMode() === 'fixed_amount') {
+      if (!Number.isFinite(cryptoFixedAmount()) || cryptoFixedAmount() <= 0) {
+        throw new Error('固定充值金额必须大于 0');
+      }
+      return;
+    }
     const rule = ruleValues();
     if (!Number.isFinite(rule.threshold) || rule.threshold <= 0) {
       throw new Error('余额阈值必须大于 0');
@@ -1270,22 +1313,11 @@
       if (state.dryRunSignature !== currentSignature()) {
         throw new Error('准备内容已变化，请关闭确认窗口后重新开始');
       }
-      const selectedCryptoRows = selectedRows();
-      const selectedWalletPasswords = selectedCryptoRows.map((row) =>
-        cryptoWalletPasswords.get(String(row.login_email || '').trim().toLowerCase()) || '');
-      const cryptoCredentials = state.rechargeMode === 'crypto' && state.source === 'csv'
-        ? {
-          seedPhrases: selectedCryptoRows.map((row) =>
-            cryptoSeedPhrases.get(String(row.login_email || '').trim().toLowerCase()) || ''),
-          ...(selectedWalletPasswords.every(Boolean) ? {walletPasswords: selectedWalletPasswords} : {}),
-        }
-        : {};
       const data = await requestJson('/api/jobs', {
         method: 'POST',
         body: {
           fileName: state.fileName || `${state.source}-recharge.csv`,
           csvText: canonicalCsv(),
-          ...cryptoCredentials,
           options: optionsPayload(),
           liveConfirmationToken: state.liveConfirmationToken,
         },
@@ -1526,6 +1558,8 @@
     el.balanceThreshold.value = '145';
     el.amountBelow.value = '150';
     el.amountAtOrAbove.value = '20';
+    state.cryptoRuleMode = 'balance_threshold';
+    if (el.cryptoFixedAmount) el.cryptoFixedAmount.value = '10';
     el.autoTopupThreshold.value = '30';
     el.autoTopupAmount.value = '70';
     el.autoTopupEnableOnly.checked = false;
@@ -1562,6 +1596,9 @@
     for (const button of document.querySelectorAll('[data-recharge-mode]')) {
       button.addEventListener('click', () => setRechargeMode(button.dataset.rechargeMode));
     }
+    for (const button of document.querySelectorAll('[data-crypto-rule-mode]')) {
+      button.addEventListener('click', () => setCryptoRuleMode(button.dataset.cryptoRuleMode));
+    }
     bindSourceControl();
     el.accountFileButton.addEventListener('click', () => {
       // 浏览器对同一路径文件不会再次触发 change；清空原选择后允许重复导入同一份账号 CSV。
@@ -1597,7 +1634,7 @@
       el[key].addEventListener('change', markOpomDirty);
     });
 
-    ['balanceThreshold', 'amountBelow', 'amountAtOrAbove', 'autoTopupThreshold', 'autoTopupAmount']
+    ['balanceThreshold', 'amountBelow', 'amountAtOrAbove', 'cryptoFixedAmount', 'autoTopupThreshold', 'autoTopupAmount']
       .forEach((key) => {
         el[key].addEventListener('input', () => {
           state.cardAllocationSignature = '';

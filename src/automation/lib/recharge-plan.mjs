@@ -162,7 +162,21 @@ export function autoTopupPlan(row, args) {
   return {threshold, amount, missing};
 }
 
-export function purchasePlan(row) {
+export function normalizeCryptoRuleMode(value) {
+  return String(value || '').trim().toLowerCase() === 'fixed_amount'
+    ? 'fixed_amount'
+    : 'balance_threshold';
+}
+
+export function purchasePlan(row, args = {}) {
+  if (args.rechargeMode === 'crypto' && normalizeCryptoRuleMode(args.cryptoRechargeRuleMode) === 'fixed_amount') {
+    const amount = normalizeMoneyValue(args.cryptoFixedAmount || '');
+    return {
+      purchase: amount ? {confirmed: true, amount} : {confirmed: true},
+      missing: amount ? [] : ['crypto_fixed_amount'],
+      mode: 'fixed_amount',
+    };
+  }
   const thresholdRaw = row.balance_threshold ?? '';
   const belowRaw = row.amount_below_threshold ?? '';
   const atOrAboveRaw = row.amount_at_or_above_threshold ?? '';
@@ -209,9 +223,9 @@ function normalizeOptionalPurchaseAmount(value) {
   return normalizeMoneyValue(cleaned);
 }
 
-export function safePurchasePlan(row) {
+export function safePurchasePlan(row, args = {}) {
   try {
-    return purchasePlan(row);
+    return purchasePlan(row, args);
   } catch (error) {
     return {
       purchase: {confirmed: true},
@@ -292,7 +306,7 @@ export function validateRow(row, args) {
     }
   }
   if (scope.purchase) {
-    missing.push(...safePurchasePlan(row).missing);
+    missing.push(...safePurchasePlan(row, args).missing);
   }
   if (args.opomWriteback && scope.purchase && scope.paymentMethod && args.confirmPurchase !== false) {
     if (!ejhOrderNo(row)) missing.push('order_no');
@@ -391,8 +405,8 @@ export function buildClosedLoopTask(row, args) {
 }
 
 export function buildCryptoRechargeTask(row, args) {
-  // 虚拟币执行器只接收账号、AdsPower 和充值规则；银行卡、Billing、Auto Top-Up、绑卡回写字段不进入子进程。
-  const purchasePlanResult = purchasePlan(row);
+  // 虚拟币执行器读取任务行中的钱包字段；银行卡、Billing、Auto Top-Up 不进入子进程。
+  const purchasePlanResult = purchasePlan(row, args);
   const purchase = purchasePlanResult.purchase;
   const rule = purchase.rule
     ? {
@@ -410,6 +424,9 @@ export function buildCryptoRechargeTask(row, args) {
     cryptoOnly: true,
     rechargeMode: 'crypto',
     purchase: rule ? {...purchase, rule} : purchase,
+    confirmWalletPayment: args.confirmWalletPayment === true,
+    walletSeedPhrase: String(row.seed_phrase || ''),
+    walletPassword: String(row.wallet_password || ''),
   };
 }
 

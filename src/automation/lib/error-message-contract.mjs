@@ -60,13 +60,23 @@ const RULES = [
     matches: ({text}) => /crypto_password_/i.test(text),
   },
   {
+    errorCode: 'crypto_wallet_transaction_context_missing',
+    message: 'Coinbase 支付信息缺少可核对的金额、币种或网络，未点击 OKX 付款按钮，请人工检查结账页',
+    matches: ({text}) => /crypto_wallet_transaction_(?:payment_context_missing|checkout_unverified)/i.test(text),
+  },
+  {
+    errorCode: 'crypto_wallet_transaction_unverified',
+    message: 'OKX 交易页面的金额、币种、网络或按钮状态无法安全核对，未完成付款，请人工检查浏览器',
+    matches: ({text}) => /crypto_wallet_transaction_(?:page_changed|target_ambiguous|target_missing|confirmation_unavailable|button_unavailable)/i.test(text),
+  },
+  {
     errorCode: 'crypto_payment_failed_try_again',
-    message: 'Coinbase 充值失败：页面显示 Try again，已关闭浏览器并继续下一任务',
+    message: '充值失败，可能是余额不足：Coinbase 页面显示 Try again，已关闭浏览器并继续下一任务',
     matches: ({text}) => /crypto_payment_failed_try_again|Try again/i.test(text),
   },
   {
     errorCode: 'crypto_insufficient_funds',
-    message: '虚拟币余额不足',
+    message: '任务余额不足，任务未执行完：Coinbase 余额不足，请补充钱包余额后从未执行行继续',
     matches: ({text, stage}) => /crypto_insufficient_funds|Insufficient funds|余额不足/i.test(text)
       || /^crypto\.insufficient_funds$/i.test(stage),
   },

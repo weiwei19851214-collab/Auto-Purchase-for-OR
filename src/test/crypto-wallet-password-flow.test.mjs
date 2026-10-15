@@ -21,7 +21,7 @@ function walletFixture(initial, options = {}) {
   const routes = {
     welcome: '#/initialize', method: '#/initialize-import', words: '#/import-with-seed-phrase-and-private-key',
     password_choice: '#/password-type?from=seed&sestheme=light', password_setup: '#/password-type?from=seed&sestheme=light',
-    unlock: '#/unlock', post_password_welcome: '#/show-supported-chains/seed', connect_request: '#/connect/fixture', ready: '#/wallet',
+    unlock: '#/unlock', post_password_welcome: options.newWelcome ? '#/web-onboarding/welcome' : '#/show-supported-chains/seed', connect_request: '#/connect/fixture', ready: '#/wallet',
   };
   const texts = {
     welcome: 'Import wallet',
@@ -66,8 +66,8 @@ function walletFixture(initial, options = {}) {
     words: [button('Confirm', 'password_choice')],
     password_choice: [button('Password Create a password to protect your wallet', 'password_choice'), button('Next', 'password_setup')],
     password_setup: [button('Confirm', options.directConnect ? 'connect_request' : 'post_password_welcome')],
-    unlock: [button('Unlock', 'connect_request')],
-    post_password_welcome: [button('Start your Web3 journey', 'connect_request')],
+    unlock: [button('Unlock', options.newWelcome ? 'post_password_welcome' : 'connect_request')],
+    post_password_welcome: [button(options.newWelcome ? 'Open wallet' : 'Start your Web3 journey', options.newWelcome ? 'ready' : 'connect_request')],
     connect_request: [button('Connect', 'ready'), button('Cancel', 'connect_request')],
     ready: [button('Send', 'ready'), button('Receive', 'ready')],
   })[stage] || [];
@@ -205,4 +205,25 @@ test('connection opt-out and other DApps cannot be silently connected', async ()
   const other = walletFixture('connect_request', {requestOrigin: 'payments.coinbase.com.attacker.test'});
   await assert.rejects(prepareOkxWallet({}, other.adapters), /crypto_wallet_connect_origin_mismatch/);
   assert.deepEqual(other.clicks, []);
+});
+
+
+test('new onboarding welcome opens wallet and reacquires its new surface without reimporting', async () => {
+  const page = walletFixture('post_password_welcome', {newWelcome: true});
+  const result = await prepareOkxWallet({}, page.adapters);
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(page.clicks, ['Open wallet']);
+  assert.deepEqual(page.acquired, ['post_password_welcome', 'ready']);
+  assert.equal(page.typed.length, 0);
+  assert.equal(page.closed, page.acquired.length);
+});
+
+
+test('resuming a locked imported wallet can finish its new welcome page', async () => {
+  const page = walletFixture('unlock', {newWelcome: true});
+  const result = await prepareOkxWallet({walletPassword: password}, page.adapters);
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(page.clicks, ['Unlock', 'Open wallet']);
+  assert.deepEqual(page.acquired, ['unlock', 'post_password_welcome', 'ready']);
+  assert.ok(page.typed.every(stage => stage === 'unlock'));
 });

@@ -46,3 +46,13 @@ test('new mnemonic and password routes still require exact field counts', async 
     text: 'Set password', buttons: ['Confirm'], fields: [{type: 'password'}],
   })).stage, 'unknown');
 });
+
+
+test('new welcome requires matching route, heading and Open wallet action', async () => {
+  const fixture = {text: 'Welcome to OKX Wallet\nExplore the world of Web3', buttons: ['Open wallet']};
+  assert.equal((await stageFor('#/web-onboarding/welcome', fixture)).stage, 'post_password_welcome');
+  assert.equal((await stageFor('#/web-onboarding/welcome?source=seed', fixture)).stage, 'post_password_welcome');
+  assert.equal((await stageFor('#/other', fixture)).stage, 'unknown');
+  assert.equal((await stageFor('#/web-onboarding/welcome', {...fixture, buttons: ['Confirm']})).stage, 'unknown');
+  assert.equal((await stageFor('#/web-onboarding/welcome', {...fixture, pageOrigin: 'https://example.test'})).stage, 'unknown');
+});

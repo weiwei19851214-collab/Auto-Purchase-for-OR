@@ -1046,7 +1046,8 @@ export async function inspectWalletStage(wallet) {
     if (route === '#/unlock' && passwordCount === 1
       && buttons.some((label) => /^Unlock$/i.test(label))) return {stage: 'unlock'};
     if (/Welcome to OKX Wallet/i.test(text)
-      && buttons.some((label) => /^Start your Web3 journey$/i.test(label))) return {stage: 'post_password_welcome'};
+      && ((route.startsWith('#/show-supported-chains') && buttons.some((label) => /^Start your Web3 journey$/i.test(label)))
+        || (route === '#/web-onboarding/welcome' && buttons.some((label) => /^Open wallet$/i.test(label))))) return {stage: 'post_password_welcome'};
     if (/Connect account/i.test(text)
       && buttons.some((label) => /^Connect$/i.test(label))) return {stage: 'connect_request'};
     if (route.startsWith('#/connect/') && /\bConnected\b/i.test(text)) return {stage: 'ready'};
@@ -1089,7 +1090,7 @@ async function clickWalletStep(wallet, stage, label) {
       method: ['#/initialize-import', '#/web-onboarding/import'],
       words: ['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'],
       password_choice: ['#/password-type', '#/web-onboarding/password-setup'],
-      post_password_welcome: '#/show-supported-chains',
+      post_password_welcome: ['#/show-supported-chains', '#/web-onboarding/welcome'],
       unlock: '#/unlock',
       password_setup: ['#/password-type', '#/web-onboarding/password-setup'],
       connect_request: '#/connect/',
@@ -1546,10 +1547,10 @@ export async function prepareOkxWallet(input, adapters = {}) {
           break;
         case 'unlock':
           await completeOkxPasswordUnlock(current.wallet, input.walletPassword);
-          allowed = ['ready', 'connect_request'];
+          allowed = ['post_password_welcome', 'ready', 'connect_request'];
           break;
         case 'post_password_welcome':
-          await clickWalletStep(current.wallet, stage, /^Start your Web3 journey$/i);
+          await clickWalletStep(current.wallet, stage, /^(?:Start your Web3 journey|Open wallet)$/i);
           allowed = ['ready', 'connect_request'];
           break;
         default:

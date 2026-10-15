@@ -16,11 +16,14 @@ export function selectAuthoritativeOkxTargetIndex(candidates) {
     // protocol and authority explicitly instead of using URL.origin.
     if (url.protocol !== 'chrome-extension:' || url.hostname !== TRUSTED_OKX_EXTENSION_ID
       || url.username || url.password || url.port) continue;
-    trusted.push({index, isPage: candidate.type === 'page', isNotification: url.pathname === '/notification.html'});
+    trusted.push({index, isPage: candidate.type === 'page', isNotification: url.pathname === '/notification.html', isSidepanel: url.pathname === '/sidepanel.html' && ['page', 'other'].includes(candidate.type)});
   }
   const notifications = trusted.filter(candidate => candidate.isPage && candidate.isNotification);
   if (notifications.length) return notifications.length === 1 ? notifications[0].index : -1;
   const pages = trusted.filter(candidate => candidate.isPage);
   if (pages.length) return pages.length === 1 ? pages[0].index : -1;
+  // Chromium exposes the side panel as `other`; its SES iframe is only a mirror.
+  const sidepanels = trusted.filter(candidate => candidate.isSidepanel);
+  if (sidepanels.length) return sidepanels.length === 1 ? sidepanels[0].index : -1;
   return trusted.length === 1 ? trusted[0].index : -1;
 }

@@ -46,3 +46,9 @@ test('null or incomplete descriptors cannot create a candidate', () => {
   for (const value of [null, undefined, {}, 'targets']) assert.equal(selectAuthoritativeOkxTargetIndex(value), -1);
   assert.equal(selectAuthoritativeOkxTargetIndex([null, {}, {url: null}, target()]), 3);
 });
+
+test('side panel outer target outranks its SES mirror after onboarding closes', () => {
+  assert.equal(selectAuthoritativeOkxTargetIndex([target('iframe', '/ses.html#/wallet'), target('other', '/sidepanel.html#/wallet')]), 1);
+  assert.equal(selectAuthoritativeOkxTargetIndex([target('other', '/sidepanel.html'), target('other', '/sidepanel.html'), target('iframe', '/ses.html')]), -1);
+  assert.equal(selectAuthoritativeOkxTargetIndex([target('other', '/sidepanel.html'), target('page', '/notification.html')]), 1);
+});

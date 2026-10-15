@@ -339,7 +339,7 @@ test('baseline never accepts a conflicting identity or untrusted origin in the n
     assert.deepEqual(fixture.closes, ['ws://created']);
   }
 });
-test('fresh verification default wait ends at twenty seconds without submitting a code', async t => {
+test('fresh verification default wait ends at forty seconds without submitting a code', async t => {
   const clock = mockPollingClock(t);
   const page = mockPage();
   let closed = false;
@@ -350,7 +350,7 @@ test('fresh verification default wait ends at twenty seconds without submitting 
         return {result: {value: {trustedOrigin: true, isInbox: true, mailboxAccount: null, rows: []}}};
       }}),
     }), /crypto_email_fresh_message_timeout/);
-  assert.equal(clock.elapsed, 20000);
+  assert.equal(clock.elapsed, 40000);
   assert.equal(page.clicks, 0);
   assert.equal(page.calls.some(call => call.method === 'Input.dispatchKeyEvent'), false);
   assert.equal(closed, true);

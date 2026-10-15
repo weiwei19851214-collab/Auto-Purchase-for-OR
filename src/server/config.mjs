@@ -15,11 +15,11 @@ export const CRYPTO_RECHARGE_SCRIPT = join(AUTOMATION_DIR, 'crypto_recharge_open
 export const BATCH_SCRIPT = join(AUTOMATION_DIR, 'batch_recharge_openrouter_cards_cdp.mjs');
 
 export const DEFAULT_SERVER_PORT = Number(process.env.PORT || 4100);
-// 虚拟币单行从 Worker 开始计时最多 180 秒；子进程提前结束，给 AdsPower 回收和结果落库预留时间。
+// 虚拟币单行从 Worker 开始计时最多 240 秒；子进程提前结束，给 AdsPower 回收和结果落库预留时间。
 export const MAX_ROW_TIMEOUT_MS = 175000;
 export const DEFAULT_ROW_TIMEOUT_MS = Math.min(Number(process.env.ROW_TIMEOUT_MS || MAX_ROW_TIMEOUT_MS), MAX_ROW_TIMEOUT_MS);
-export const CRYPTO_TASK_TIMEOUT_MS = 180000;
-export const CRYPTO_CHILD_TIMEOUT_MS = 170000;
+export const CRYPTO_TASK_TIMEOUT_MS = 240000;
+export const CRYPTO_CHILD_TIMEOUT_MS = 230000;
 export const AUTOMATION_LOG_RETENTION_HOURS = Number(process.env.AUTOMATION_LOG_RETENTION_HOURS || 48);
 
 export const LIVE_STATUSES = new Set([

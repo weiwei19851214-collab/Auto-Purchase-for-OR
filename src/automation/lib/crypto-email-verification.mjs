@@ -109,7 +109,7 @@ export async function submitEmailCode(page, expectedAccount, code) {
   return {submitted:true};
 }
 
-export async function completeEmailVerification(input,page,context,{getTargets,cdp,timeoutMs=20000}){
+export async function completeEmailVerification(input,page,context,{getTargets,cdp,timeoutMs=40000}){
   if(!context || context.submitted || context.inProgress) throw new Error('manual_security_blocker: crypto_email_baseline_missing_or_used');
   context.inProgress=true;
   const challenge=await inspectEmailChallenge(page,input.expectedAccount);

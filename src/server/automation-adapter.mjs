@@ -115,7 +115,7 @@ export function runnerArgs(options = {}) {
     cardProvider: normalizeCardProvider(options.cardProvider),
     rowTimeoutMs: Math.min(
       normalizeRechargeMode(options.rechargeMode) === 'crypto' ? CRYPTO_CHILD_TIMEOUT_MS : MAX_ROW_TIMEOUT_MS,
-      Math.max(1000, Number(options.rowTimeoutMs || DEFAULT_ROW_TIMEOUT_MS)),
+      Math.max(1000, Number(options.rowTimeoutMs || (normalizeRechargeMode(options.rechargeMode) === 'crypto' ? CRYPTO_CHILD_TIMEOUT_MS : DEFAULT_ROW_TIMEOUT_MS))),
     ),
     verbose: !!options.verbose,
     adspowerApiBase: options.adspowerApiBase || process.env.ADSPOWER_API_BASE || 'http://127.0.0.1:50325',

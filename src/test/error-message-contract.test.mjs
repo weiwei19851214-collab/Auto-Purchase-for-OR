@@ -103,10 +103,10 @@ test('simplifyError distinguishes missing OKX wallet password from generic authe
   assert.match(missing.message, /第 5 列/);
 });
 
-test('simplifyError maps crypto three-minute timeout to a resumable failure', () => {
+test('simplifyError maps crypto four-minute timeout to a resumable failure', () => {
   const timeout = simplifyError('crypto_task_timeout');
   assert.equal(timeout.errorCode, 'crypto_task_timeout');
-  assert.match(timeout.message, /3 分钟/);
+  assert.match(timeout.message, /4 分钟/);
 });
 
 test('simplifyError distinguishes payment decline from frequency or amount limit', () => {

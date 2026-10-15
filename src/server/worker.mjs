@@ -221,7 +221,7 @@ export class JobWorker {
             status: 'failed',
             stage: 'crypto.timeout',
             errorCode: 'crypto_task_timeout',
-            message: '虚拟币充值单行流程超过 3 分钟，已强制关闭浏览器并继续下一任务',
+            message: '虚拟币充值单行流程超过 4 分钟，已强制关闭浏览器并继续下一任务',
             errorDetail: 'crypto task timeout after ' + CRYPTO_TASK_TIMEOUT_MS + 'ms',
             details: {profileStop},
             safeToContinue: true,

@@ -10,7 +10,7 @@ const UNKNOWN_ERROR = Object.freeze({
 const RULES = [
   {
     errorCode: 'crypto_task_timeout',
-    message: '虚拟币充值单行流程超过 3 分钟，已强制关闭浏览器并继续下一任务',
+    message: '虚拟币充值单行流程超过 4 分钟，已强制关闭浏览器并继续下一任务',
     matches: ({text, stage}) => /crypto_task_timeout|crypto\.timeout/i.test(text)
       || /^crypto\.timeout$/i.test(stage),
   },

@@ -12,6 +12,7 @@ import {executeRowWithAdapters, parsePlan, runnerArgs, writeResultCsv} from '../
 import {readFileSync, existsSync} from 'node:fs';
 import * as rechargePlan from '../automation/lib/recharge-plan.mjs';
 import * as csv from '../automation/lib/csv.mjs';
+import {CRYPTO_TASK_TIMEOUT_MS} from '../server/config.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,10 +83,13 @@ test('runnerArgs clamps concurrency to a safe local range', () => {
   assert.equal(runnerArgs({concurrency: 'bad'}).concurrency, 1);
 });
 
-test('runnerArgs caps a row timeout below the three-minute total budget', () => {
+test('runnerArgs caps row timeouts below their mode-specific total budgets', () => {
+  assert.equal(CRYPTO_TASK_TIMEOUT_MS, 240000);
   assert.equal(runnerArgs({rowTimeoutMs: 999999}).rowTimeoutMs, 175000);
   assert.equal(runnerArgs({rowTimeoutMs: 30000}).rowTimeoutMs, 30000);
-  assert.equal(runnerArgs({rechargeMode: 'crypto', rowTimeoutMs: 999999}).rowTimeoutMs, 170000);
+  assert.equal(runnerArgs({rechargeMode: 'crypto', rowTimeoutMs: 999999}).rowTimeoutMs, 230000);
+  assert.equal(runnerArgs({rechargeMode: 'crypto'}).rowTimeoutMs, 230000);
+  assert.equal(runnerArgs({rechargeMode: 'crypto', rowTimeoutMs: 30000}).rowTimeoutMs, 30000);
 });
 
 test('runnerArgs carries OPOM card provider selection', () => {

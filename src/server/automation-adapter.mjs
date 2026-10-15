@@ -751,7 +751,12 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     };
   }
 
-  const contract = status.classifyError(outcome.error);
+  const classified = status.classifyError(outcome.error);
+  // A clicked wallet confirmation may still be pending. Preserve its UI and
+  // stop the batch until this exact payment has been reconciled.
+  const contract = args.rechargeMode === 'crypto' && classified.status === status.STATUSES.PURCHASE_UNVERIFIED
+    ? {...classified, stopProfile: false, safeToContinueBatch: false}
+    : classified;
   const error = simplifyError(outcome.error, {
     status: contract.status,
     stage: contract.stage,

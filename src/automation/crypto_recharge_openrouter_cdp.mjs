@@ -953,42 +953,74 @@ export async function readCheckoutState(checkout, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let state = null;
   let paymentFailureSeenAt = 0;
-  while (Date.now() < deadline) {
-    state = await evaluate(checkout, () => {
-      const text = document.body?.innerText || '';
-      const match = text.match(/You need\s+([0-9,.]+)\s+([A-Z0-9_]+)\s+to complete your payment/i);
-      const trusted = location.origin === 'https://payments.coinbase.com'
-        && /^\/payment-sessions\/[^/]+\/?$/.test(location.pathname);
-      return {
-        origin: location.origin,
-        pathname: location.pathname,
-        insufficientFunds: /Insufficient funds/i.test(text),
-        paymentFailed: /Try again/i.test(text),
-        walletConnected: /OKX Wallet connected/i.test(text),
-        paymentCompleted: trusted && /Payment complete|Payment successful|Paid successfully|Your payment of\s+[0-9,.]+\s+[A-Z0-9_]+\s+was successful/i.test(text),
-        requiredAmount: match?.[1] || '',
-        requiredAsset: match?.[2] || '',
-        network: (text.match(/\bNetwork\s*:?\s*([^\n]+)/i) || [])[1]?.trim() || '',
-        tail: text.slice(-1800),
-      };
+  const recordUnverified = (reason) => {
+    if (options.requirePaymentCompleted !== true) return;
+    // Only structural state is logged: no arbitrary page text or authentication values.
+    writeDiagnostic(options.confirmationDebugDir, 'crypto-coinbase-payment-unverified', {
+      reason,
+      url: state?.origin === 'https://payments.coinbase.com'
+        && /^\/payment-sessions\/[A-Za-z0-9_-]+\/?$/.test(state?.pathname || '')
+        ? state.origin + state.pathname : (state?.origin === 'https://openrouter.ai' ? 'https://openrouter.ai' : ''),
+      paymentCompleted: state?.paymentCompleted === true,
+      paymentFailed: state?.paymentFailed === true,
+      insufficientFunds: state?.insufficientFunds === true,
+      walletConnected: state?.walletConnected === true,
+      readError: reason === 'read_error',
+      waitTimeoutMs: timeoutMs,
+      observedAt: new Date().toISOString(),
     });
-    if (state.paymentCompleted) {
-      state.completedAt = new Date().toISOString();
-      completedCheckoutSnapshots.set(checkout, state);
-      writeDiagnostic(options.confirmationDebugDir, 'crypto-coinbase-payment-completed', state);
-      return state;
+  };
+  try {
+    while (Date.now() < deadline) {
+      state = await evaluate(checkout, () => {
+        const text = document.body?.innerText || '';
+        const match = text.match(/You need\s+([0-9,.]+)\s+([A-Z0-9_]+)\s+to complete your payment/i);
+        const trusted = location.origin === 'https://payments.coinbase.com'
+          && /^\/payment-sessions\/[^/]+\/?$/.test(location.pathname);
+        return {
+          origin: location.origin,
+          pathname: location.pathname,
+          insufficientFunds: /Insufficient funds/i.test(text),
+          paymentFailed: /Try again/i.test(text),
+          walletConnected: /OKX Wallet connected/i.test(text),
+          paymentCompleted: trusted && /Payment complete|Payment successful|Paid successfully|Your payment of\s+[0-9,.]+\s+[A-Z0-9_]+\s+was successful/i.test(text),
+          requiredAmount: match?.[1] || '',
+          requiredAsset: match?.[2] || '',
+          network: (text.match(/\bNetwork\s*:?\s*([^\n]+)/i) || [])[1]?.trim() || '',
+          tail: text.slice(-1800),
+        };
+      });
+      if (state.paymentCompleted) {
+        state.completedAt = new Date().toISOString();
+        completedCheckoutSnapshots.set(checkout, state);
+        writeDiagnostic(options.confirmationDebugDir, 'crypto-coinbase-payment-completed', state);
+        return state;
+      }
+      if (state.paymentFailed) {
+        paymentFailureSeenAt ||= Date.now();
+        if (Date.now() - paymentFailureSeenAt >= COINBASE_FAILURE_STABLE_MS) {
+          recordUnverified('failure');
+          return state;
+        }
+      } else {
+        paymentFailureSeenAt = 0;
+        if (state.insufficientFunds) {
+          recordUnverified('failure');
+          return state;
+        }
+        if (state.walletConnected && options.requirePaymentCompleted !== true) return state;
+      }
+      await sleep(500);
     }
-    if (state.paymentFailed) {
-      paymentFailureSeenAt ||= Date.now();
-      if (Date.now() - paymentFailureSeenAt >= COINBASE_FAILURE_STABLE_MS) return state;
-    } else {
-      paymentFailureSeenAt = 0;
-      if (state.insufficientFunds || state.paymentCompleted
-        || (state.walletConnected && options.requirePaymentCompleted !== true)) return state;
+    recordUnverified('timeout');
+    return state || {};
+  } catch (error) {
+    recordUnverified('read_error');
+    if (options.requirePaymentCompleted === true) {
+      throw new Error('purchase_unverified: Coinbase completion read unavailable');
     }
-    await sleep(500);
+    throw error;
   }
-  return state || {};
 }
 
 export async function inspectWalletStage(wallet) {
@@ -1585,7 +1617,10 @@ async function inspectOkxTransactionStage(wallet, expected = {}) {
       };
     }).filter((button) => button.visible),
   }));
-  return classifyOkxTransactionSnapshot(snapshot, expected);
+  const progress = String(snapshot.text || '').match(/\b([1-9]\d?) of ([1-9]\d?) confirmations\b/i);
+  return {...classifyOkxTransactionSnapshot(snapshot, expected),
+    confirmationStep: progress ? Number(progress[1]) : null,
+    confirmationTotal: progress ? Number(progress[2]) : null};
 }
 
 export async function clickOkxTransactionButton(wallet, expectedStage, label, expected) {
@@ -1704,10 +1739,13 @@ export async function acquireOkxTransactionTarget(input, expected, stages = ['ri
   throw new Error('manual_security_blocker: ' + errorCode + fingerprint);
 }
 
-export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '', options = {}) {
+export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '', options = {}, adapters = {}) {
   const expected = {amount, asset, network};
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
-  let current = await acquireOkxTransactionTarget(input, expected, ['risk_warning', 'confirm_send'], timeoutMs);
+  const acquire = adapters.acquire || acquireOkxTransactionTarget;
+  const click = adapters.click || clickOkxTransactionButton;
+  const inspect = adapters.inspect || inspectOkxTransactionStage;
+  let current = await acquire(input, expected, ['risk_warning', 'confirm_send'], timeoutMs);
   let wallet = current.wallet;
   try {
     const riskWarningClicked = current.state.stage === 'risk_warning';
@@ -1717,14 +1755,14 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
         amountMatched: current.state.hasAmount,
         network: current.state.network,
       });
-      await clickOkxTransactionButton(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
+      await click(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
       writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-clicked', {
         label: 'Continue (Unsafe)',
         stage: current.state.stage,
       });
       wallet.close();
       wallet = null;
-      current = await acquireOkxTransactionTarget(input, expected, ['confirm_send'], Math.min(timeoutMs, 15000));
+      current = await acquire(input, expected, ['confirm_send'], Math.min(timeoutMs, 15000));
       wallet = current.wallet;
     }
     const state = current.state;
@@ -1734,11 +1772,31 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
       networkMatched: state.hasNetwork,
       network: state.network,
     });
-    await clickOkxTransactionButton(wallet, 'confirm_send', 'Confirm', expected);
+    await click(wallet, 'confirm_send', 'Confirm', expected);
     writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-confirm-clicked', {
       label: 'Confirm',
       stage: state.stage,
       network: state.network,
+      confirmationClicked: true,
+      paymentCompleted: false,
+      meaning: 'click_dispatched_only',
+    });
+    let afterClick;
+    try {
+      const observed = await inspect(wallet, expected);
+      afterClick = {stage: observed.stage, originOk: observed.originOk === true,
+        amountMatched: observed.hasAmount === true, networkMatched: observed.hasNetwork === true,
+        buttonCount: Number(observed.buttonCount || 0), readError: false,
+        confirmationStep: Number.isInteger(observed.confirmationStep) ? observed.confirmationStep : null,
+        confirmationTotal: Number.isInteger(observed.confirmationTotal) ? observed.confirmationTotal : null};
+    } catch {
+      // A popup closing after click is not itself proof of transaction success.
+      afterClick = {stage: 'unavailable', readError: true};
+    }
+    writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-after-confirm-click', {
+      ...afterClick, confirmationClicked: true, paymentCompleted: false,
+      observationTiming: 'immediate', observedAt: new Date().toISOString(),
+      meaning: 'read_only_observation_requires_checkout_verification',
     });
     return {confirmed: true, riskWarningClicked, confirmationClicked: true, network: state.network};
   } finally {
@@ -2042,9 +2100,8 @@ async function runCryptoRecharge(rawInput) {
     checkout = continued.checkout;
     const cryptoPurchase = continued.cryptoPurchase;
     if (cryptoPurchase.walletPaymentConfirmation?.confirmed === true) {
-      const checkoutState = cryptoPurchase.checkoutState?.paymentCompleted === true
-        ? cryptoPurchase.checkoutState
-        : await readCheckoutState(checkout, {timeoutMs: 60000, requirePaymentCompleted: true, confirmationDebugDir: input.confirmationDebugDir});
+      // Continuation has already spent the payment observation window. Never restart it or submit again.
+      const checkoutState = cryptoPurchase.checkoutState || {};
       if (checkoutState.paymentCompleted !== true) {
         throw new Error('purchase_unverified: Coinbase did not show payment completion after wallet Confirm');
       }

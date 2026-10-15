@@ -480,3 +480,22 @@ test('crypto transaction risk page appearing after wallet-page inspection error 
   assert.equal(result.cryptoPurchase.walletPaymentConfirmation.confirmed, true);
   result.checkout.close();
 });
+
+
+test('unverified crypto payment preserves the browser and pauses without a payment retry', async () => {
+  let stops = 0;
+  let submissions = 0;
+  const result = await executeRowWithAdapters(CRYPTO_CSV, 0, {...CRYPTO_OPTIONS, stopProfiles: true}, {
+    common: {cardLast4: () => ''},
+    runClosedLoopChildAsync: async () => {
+      submissions++;
+      return {ok: false, error: 'purchase_unverified: Coinbase did not show payment completion after wallet Confirm'};
+    },
+    adspower: {stopProfile: async () => {stops++; return {attempted: true, ok: true};}},
+  });
+  assert.equal(result.status, 'purchase_unverified');
+  assert.equal(result.stopProfile, false);
+  assert.equal(result.safeToContinue, false);
+  assert.equal(stops, 0);
+  assert.equal(submissions, 1);
+});

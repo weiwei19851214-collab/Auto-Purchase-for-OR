@@ -165,6 +165,7 @@ Insufficient funds 时，沿用余额不足分支，不进入 OKX 交易确认�
 或普通标签页，也不会创建 `sidepanel.html` 全屏标签或修改浏览器窗口布局。找不到可控的
 OKX 扩展页面时不会点击 `Purchase`，由操作者先在当前 Profile 中打开钱包扩展。
 即使 Coinbase 已发起 `Launch extension`，也不能据此断言钱包已连接或已付款。
+钱包 Confirm 点击仅代表操作已执行，不代表链上支付成功。若 Coinbase 完成状态未能核验，保留 `purchase_unverified`、暂停批次并保留浏览器现场；不得直接重跑充值。失败/超时会保存结账最终状态及钱包点击后状态供排查。
 虚拟币 CSV 上传表头为 `login_email`、`ads_power_serial_number`、`ads_power_user_id`、
 `seed_phrase`，可选第 5 列钱包密码；`seed_phrase` 必须是 12 个空格分隔的英文单词。这里只检查词数和字符，
 不验证词表、校验和或钱包归属。页面读取后将 D/E 列写入本地任务源 CSV，失败行重试直接复用；

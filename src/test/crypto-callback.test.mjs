@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {buildCryptoCallbackPayload} from '../server/crypto-callback.mjs';
+import {buildCryptoCallbackPayload, validateCryptoCallbackPayload} from '../server/crypto-callback.mjs';
 import {writeCryptoCompletedRow} from '../server/opom-client.mjs';
 
 const row = {opom_account_id: 'account-1', login_email: 'fixture@example.com'};
@@ -17,10 +17,18 @@ test('crypto callback keeps all three USD amounts separate with exact decimal pr
   assert.equal(result.PaidAmount, '155.123456789123456789');
   assert.equal(result.networkFee, '0.01');
   assert.equal(result.amountCurrency, 'USD');
+  assert.equal(result.paidAmountCurrency, 'USD');
   assert.equal(result.networkFeeCurrency, 'USD');
   assert.match(result.remark, /<\$0.01/);
   assert.equal(result.fee, undefined);
   assert.equal(result.feeCurrency, undefined);
+});
+
+test('paidAmountCurrency is required and must be USD', () => {
+  const payload = buildCryptoCallbackPayload(row, details, context);
+  for (const currency of [undefined, '', 'USDC', 'usd']) {
+    assert.throws(() => validateCryptoCallbackPayload({...payload, paidAmountCurrency: currency}, row.opom_account_id), /currency must be USD/);
+  }
 });
 
 for (const change of [{cryptoPaymentAmount: ''}, {cryptoPaymentAmount: 155}, {cryptoPaymentAmount: '1e2'},

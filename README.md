@@ -135,7 +135,7 @@ Coinbase 的普通 Fee 可能是税费，不将它冒充网络费用。
 | 回调字段 | 取值 |
 | --- | --- |
 | `amount` / `amountCurrency` | 已核验成功的充值面额 / `USD`；不使用可能受同时消费影响的余额差替代 |
-| `PaidAmount` | Coinbase 实读并经过钱包核对的支付金额；保留字段大小写，不用目标充值额替代 |
+| `PaidAmount` / `paidAmountCurrency` | Coinbase 实读并经过钱包核对的支付金额 / `USD`；保留字段大小写，不用目标充值额替代 |
 | `networkFee` / `networkFeeCurrency` | 页面读取的网络费美元值 / `USD`；不把 ETH 数量当美元，不自行换算 |
 
 不发送 `fee`、`feeCurrency`。当前支持 USD/USDC 名义支付金额，不根据汇率推算其他币种。

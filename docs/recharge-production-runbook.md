@@ -247,7 +247,7 @@ UI 开发验收运行 `node scripts/ui-crypto-scheduler-smoke.mjs`（全模拟�
 ### 虚拟币财务回调
 
 手动与自动充值统一向当前 OPOM 地址的 `/api/v1/recharge/virtual-currency/callback`
-发送已核验充值面额 `amount`、`amountCurrency=USD`、实读支付金额 `PaidAmount` 和
+发送已核验充值面额 `amount`、`amountCurrency=USD`、实读支付金额 `PaidAmount`、必填 `paidAmountCurrency=USD` 和
 美元网络费 `networkFee`（`networkFeeCurrency=USD`）；不发送 `fee` 或 `feeCurrency`。
 `PaidAmount` 大小写不可改。网络费缺少美元值时不得用原币数量代替，也不得将未知费用写为零。
 当前来源为 USD/USDC 的支付页面金额及网络费美元估值；小于阈值的显示值会在备注保留原文。

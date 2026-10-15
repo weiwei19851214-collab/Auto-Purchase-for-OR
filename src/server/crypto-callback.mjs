@@ -27,6 +27,7 @@ export function buildCryptoCallbackPayload(row, details, context = {}) {
     amount: decimal(details.cryptoCreditAmount || details.purchaseAmount, 'amount'),
     amountCurrency: 'USD',
     PaidAmount: decimal(details.cryptoPaymentAmount, 'PaidAmount'),
+    paidAmountCurrency: 'USD',
     networkFee: decimal(networkFee, 'networkFee in USD'),
     networkFeeCurrency: 'USD',
     assetSymbol: asset,
@@ -51,8 +52,9 @@ export function validateCryptoCallbackPayload(payload, accountId) {
   if (clean.accountId !== accountId) throw new Error('Crypto callback account identity mismatch');
   if (!/^\d{4}-\d{2}-\d{2}T/.test(clean.occurredAt) || !Number.isFinite(Date.parse(clean.occurredAt))) throw new Error('Crypto callback requires ISO occurredAt');
   for (const key of ['amount', 'PaidAmount', 'networkFee']) clean[key] = decimal(payload[key], key);
-  if (payload.amountCurrency !== 'USD' || payload.networkFeeCurrency !== 'USD') throw new Error('Crypto callback currency must be USD');
+  if (payload.amountCurrency !== 'USD' || payload.paidAmountCurrency !== 'USD' || payload.networkFeeCurrency !== 'USD') throw new Error('Crypto callback currency must be USD');
   clean.amountCurrency = 'USD';
+  clean.paidAmountCurrency = 'USD';
   clean.networkFeeCurrency = 'USD';
   if (payload.assetSymbol !== 'USD' && payload.assetSymbol !== 'USDC') throw new Error('Crypto callback unsupported payment asset');
   clean.assetSymbol = payload.assetSymbol;

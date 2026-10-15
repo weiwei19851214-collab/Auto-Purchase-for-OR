@@ -170,9 +170,9 @@ test('ready wallet can proceed; locked and unknown screens never re-import', asy
   await assert.rejects(importOkxWallet(unknown, phrase), /crypto_wallet_import_unknown_page/);
   assert.deepEqual(unknown.clicks, []);
   const status = classifyError('manual_security_blocker: crypto_wallet_import_page_changed');
-  assert.equal(status.status, 'failed');
+  assert.equal(status.status, 'manual_security_blocker');
   assert.equal(status.stopProfile, true);
-  assert.equal(status.safeToContinueBatch, true);
+  assert.equal(status.safeToContinueBatch, false);
 });
 
 test('wallet discovery waits for any OKX extension target and never opens a full tab', async () => {

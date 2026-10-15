@@ -888,11 +888,13 @@ function completionMessage(args) {
   return 'completed';
 }
 
-async function runClosedLoopChildAsync(bindScript, task, args, childRunner, common) {
+export async function runClosedLoopChildAsync(bindScript, task, args, childRunner, common) {
   const childArgs = [bindScript, '--stdin'];
-  if (args.scopeAutoTopup) childArgs.push('--configure-auto-topup');
-  if (args.scopePurchase && args.confirmPurchase) childArgs.push('--confirm-purchase');
-  if (args.scopePaymentMethod && args.removeExisting) childArgs.push('--remove-existing');
+  if (args.rechargeMode !== 'crypto') {
+    if (args.scopeAutoTopup) childArgs.push('--configure-auto-topup');
+    if (args.scopePurchase && args.confirmPurchase) childArgs.push('--confirm-purchase');
+    if (args.scopePaymentMethod && args.removeExisting) childArgs.push('--remove-existing');
+  }
 
   return new Promise((resolve) => {
     let stdout = '';

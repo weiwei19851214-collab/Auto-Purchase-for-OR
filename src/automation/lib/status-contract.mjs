@@ -13,6 +13,14 @@ export const STATUSES = Object.freeze({
 
 export function classifyError(message) {
   const text = String(message || '');
+  if (/crypto_email_/i.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.email_verification',
+      safeToContinueBatch: false,
+      stopProfile: true,
+      message: text,
+    });
+  }
   if (/crypto_insufficient_funds|Insufficient funds|余额不足/i.test(text)) {
     return statusRecord(STATUSES.FAILED, {
       stage: 'crypto.insufficient_funds',

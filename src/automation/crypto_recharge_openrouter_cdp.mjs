@@ -10,7 +10,9 @@
 import {execFileSync} from 'node:child_process';
 import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
+import {selectAuthoritativeOkxTargetIndex} from './lib/crypto-wallet-target.mjs';
 import {readCryptoAccountPassword} from './lib/crypto-account-password.mjs';
+import {captureGmailBaseline, completeEmailVerification, inspectEmailChallenge} from './lib/crypto-email-verification.mjs';
 import {
   checkoutPaymentFingerprint,
   classifyOkxTransactionSnapshot,
@@ -101,6 +103,7 @@ function validateInput(input) {
 function redact(value) {
   return String(value || '')
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\b\d{6}\b/g, '[verification-code]')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[account]')
     .slice(0, 1200);
 }
@@ -315,9 +318,14 @@ async function clearFocusedInput(client, length) {
   }
 }
 
-async function navigate(client, url) {
+export async function navigate(client, url) {
   await client.send('Page.enable').catch(() => {});
-  await client.send('Page.navigate', {url}, DEFAULT_TIMEOUT_MS);
+  const navigation = await client.send('Page.navigate', {url}, DEFAULT_TIMEOUT_MS);
+  if (navigation?.errorText) {
+    // Keep the Chromium network code, never echo arbitrary browser error text or URLs with secrets.
+    const code = String(navigation.errorText).match(/\bERR_[A-Z0-9_]+\b/)?.[0] || 'ERR_NAVIGATION_FAILED';
+    throw new Error('Credits navigation failed: ' + code + ' (' + new URL(url).origin + ')');
+  }
   const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = await evaluate(client, () => ({href: location.href, readyState: document.readyState})).catch(() => ({}));
@@ -327,28 +335,58 @@ async function navigate(client, url) {
   throw new Error('Credits navigation ready timeout');
 }
 
-async function ensureCreditsPage(input) {
-  input.browserWs ||= getBrowserWs(input.debugPort);
-  let targets = getTargets(input.debugPort);
+export function selectOpenRouterTarget(targets) {
+  const trusted = targets.filter((item) => {
+    try { return item.type === 'page' && new URL(item.url).origin === 'https://openrouter.ai'; } catch { return false; }
+  });
+  return trusted.find((item) => new URL(item.url).pathname === '/settings/credits') || trusted[0];
+}
+
+export function coinbaseSessionUrl(target) {
+  try {
+    const url = new URL(target.url);
+    return target.type === 'page' && url.origin === 'https://payments.coinbase.com'
+      && /^\/payment-sessions\/[^/]+\/?$/.test(url.pathname) ? url.origin + url.pathname.replace(/\/$/, '') : '';
+  } catch { return ''; }
+}
+
+export function selectNewCoinbaseTarget(targets, previousSessions = []) {
+  const previous = new Set(previousSessions);
+  const fresh = targets.filter((target) => coinbaseSessionUrl(target)
+    && !previous.has(coinbaseSessionUrl(target)) && target.webSocketDebuggerUrl);
+  if (fresh.length > 1) throw new Error('manual_security_blocker: crypto_checkout_target_ambiguous');
+  return fresh[0];
+}
+
+export async function ensureCreditsPage(input, adapters = {}) {
+  const listTargets = adapters.getTargets || getTargets;
+  const connect = adapters.cdp || cdp;
+  input.browserWs ||= (adapters.getBrowserWs || getBrowserWs)(input.debugPort);
+  let targets = listTargets(input.debugPort);
   let target = targets.find((item) => item.type === 'page' && String(item.url || '').startsWith(OPENROUTER_CREDITS_URL));
   if (!target) {
-    const existing = targets.find((item) => item.type === 'page' && /^https?:/i.test(item.url || ''));
+    const existing = selectOpenRouterTarget(targets);
     if (existing) {
-      const client = await cdp(existing.webSocketDebuggerUrl);
+      const client = await connect(existing.webSocketDebuggerUrl);
       try { await navigate(client, OPENROUTER_CREDITS_URL); } finally { client.close(); }
     } else {
-      const browser = await cdp(input.browserWs);
+      const browser = await connect(input.browserWs);
       try { await browser.send('Target.createTarget', {url: OPENROUTER_CREDITS_URL}); } finally { browser.close(); }
     }
     await sleep(1500);
-    targets = getTargets(input.debugPort);
+    targets = listTargets(input.debugPort);
     target = targets.find((item) => item.type === 'page' && String(item.url || '').startsWith(OPENROUTER_CREDITS_URL));
   }
   if (!target?.webSocketDebuggerUrl) throw new Error('OpenRouter Credits page target not found');
-  const page = await cdp(target.webSocketDebuggerUrl);
-  await page.send('Runtime.enable');
-  await navigate(page, OPENROUTER_CREDITS_URL);
-  return page;
+  const page = await connect(target.webSocketDebuggerUrl);
+  try {
+    await page.send('Runtime.enable');
+    await navigate(page, OPENROUTER_CREDITS_URL);
+    return page;
+  } catch (error) {
+    page.close();
+    throw error;
+  }
 }
 
 async function waitForAccount(page, expectedAccount) {
@@ -383,7 +421,7 @@ function money(value) {
   return String(Math.round(number * 100) / 100);
 }
 
-async function readBalance(page, options = {}) {
+export async function readBalance(page, options = {}) {
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 20000;
   const deadline = Date.now() + timeoutMs;
   let state = null;
@@ -392,24 +430,32 @@ async function readBalance(page, options = {}) {
       const text = (document.body?.innerText || '').replace(/\u00a0/g, ' ');
       const match = text.match(/TOTAL AVAILABLE[\s\S]{0,120}?\$\s*([-+]?\s*[0-9][\d,]*(?:\.\d+)?)/i)
         || text.match(/Total available credits[\s\S]{0,120}?\$\s*([-+]?\s*[0-9][\d,]*(?:\.\d+)?)/i);
-      return {raw: match?.[1] || '', tail: text.slice(-1800)};
+      return {origin: location.origin, raw: match?.[1] || ''};
     });
+    if (state.origin !== 'https://openrouter.ai') throw new Error('purchase_unverified: credit balance page origin mismatch');
     const value = Number(String(state.raw || '').replace(/[,$\s]/g, ''));
-    if (Number.isFinite(value)) return {balance: value, raw: state.raw};
+    if (String(state.raw || '').trim() && Number.isFinite(value)) return {balance: value, raw: state.raw};
     await sleep(POLL_MS);
   }
   throw new Error('Could not parse current OpenRouter credit balance');
 }
 
-async function waitForBalanceIncrease(page, beforeBalance, timeoutMs = 45000) {
+export async function waitForBalanceIncrease(page, beforeBalance, timeoutMs = 45000, options = {}) {
+  if (beforeBalance === null || beforeBalance === undefined || String(beforeBalance).trim() === ''
+    || !Number.isFinite(Number(beforeBalance))) {
+    throw new Error('purchase_unverified: missing pre-purchase credit balance');
+  }
   const deadline = Date.now() + timeoutMs;
   let lastBalance = null;
   while (Date.now() < deadline) {
+    // Checkout may have replaced this tab. Reload only Credits; never repeat Purchase.
+    await navigate(page, OPENROUTER_CREDITS_URL);
+    if (options.expectedAccount) await waitForAccount(page, options.expectedAccount);
     try {
       lastBalance = await readBalance(page, {timeoutMs: 3000});
       if (Number(lastBalance.balance) > Number(beforeBalance)) return lastBalance;
     } catch {}
-    await sleep(500);
+    await sleep(2000);
   }
   throw new Error('purchase_unverified: crypto balance did not increase after wallet confirmation');
 }
@@ -659,6 +705,20 @@ async function openCheckout(input, page) {
   let verificationSubmitted = false;
   let lastTargets = [];
   while (Date.now() < deadline) {
+    const emailChallenge = await inspectEmailChallenge(page, input.expectedAccount);
+    if (emailChallenge) {
+      if (!emailChallenge.identityMatches || emailChallenge.rejected) {
+        throw new Error('manual_security_blocker: crypto_email_verification_rejected');
+      }
+      if (!input.gmailVerification?.submitted) {
+        await completeEmailVerification(input, page, input.gmailVerification, {getTargets, cdp});
+        deadline = Date.now() + DEFAULT_TIMEOUT_MS;
+      }
+      // A click is not verification success. Wait for the dialog to disappear
+      // and the Coinbase checkout to load; never reuse or resubmit the code.
+      await sleep(POLL_MS);
+      continue;
+    }
     if (await cryptoPasswordRejected(page).catch(() => false)) {
       throw new Error('manual_security_blocker: crypto_password_invalid_credentials');
     }
@@ -683,7 +743,7 @@ async function openCheckout(input, page) {
     }
     const targets = getTargets(input.debugPort);
     lastTargets = targets.filter((target) => target.type === 'page').map((target) => ({title: target.title || '', url: String(target.url || '').split('?')[0]}));
-    const target = targets.find((item) => item.type === 'page' && /payments\.coinbase\.com\/payment-sessions\//i.test(item.url || ''));
+    const target = selectNewCoinbaseTarget(targets, input.previousCoinbaseSessions);
     if (target?.webSocketDebuggerUrl) {
       const checkout = await cdp(target.webSocketDebuggerUrl);
       await checkout.send('Runtime.enable');
@@ -692,6 +752,7 @@ async function openCheckout(input, page) {
     await sleep(POLL_MS);
   }
   if (verificationSubmitted) throw new Error('manual_security_blocker: crypto_password_verification_pending');
+  if (input.gmailVerification?.submitted) throw new Error('manual_security_blocker: crypto_email_verification_pending');
   throw new Error('Coinbase crypto checkout target not found: ' + JSON.stringify(lastTargets));
 }
 
@@ -869,7 +930,10 @@ async function launchOkxExtension(checkout, input = {}) {
   throw new Error('OKX extension did not open after Launch extension click');
 }
 
-async function readCheckoutState(checkout, options = {}) {
+const completedCheckoutSnapshots = new WeakMap();
+
+export async function readCheckoutState(checkout, options = {}) {
+  if (completedCheckoutSnapshots.has(checkout)) return completedCheckoutSnapshots.get(checkout);
   // 钱包连接阶段的 Coinbase 错误可能晚于首屏出现，调用方可按当前阶段延长观察窗口。
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 10000;
   const deadline = Date.now() + timeoutMs;
@@ -879,17 +943,27 @@ async function readCheckoutState(checkout, options = {}) {
     state = await evaluate(checkout, () => {
       const text = document.body?.innerText || '';
       const match = text.match(/You need\s+([0-9,.]+)\s+([A-Z0-9_]+)\s+to complete your payment/i);
+      const trusted = location.origin === 'https://payments.coinbase.com'
+        && /^\/payment-sessions\/[^/]+\/?$/.test(location.pathname);
       return {
+        origin: location.origin,
+        pathname: location.pathname,
         insufficientFunds: /Insufficient funds/i.test(text),
         paymentFailed: /Try again/i.test(text),
         walletConnected: /OKX Wallet connected/i.test(text),
-        paymentCompleted: /Payment complete|Payment successful|Paid successfully/i.test(text),
+        paymentCompleted: trusted && /Payment complete|Payment successful|Paid successfully|Your payment of\s+[0-9,.]+\s+[A-Z0-9_]+\s+was successful/i.test(text),
         requiredAmount: match?.[1] || '',
         requiredAsset: match?.[2] || '',
         network: (text.match(/\bNetwork\s*:?\s*([^\n]+)/i) || [])[1]?.trim() || '',
         tail: text.slice(-1800),
       };
     });
+    if (state.paymentCompleted) {
+      state.completedAt = new Date().toISOString();
+      completedCheckoutSnapshots.set(checkout, state);
+      writeDiagnostic(options.confirmationDebugDir, 'crypto-coinbase-payment-completed', state);
+      return state;
+    }
     if (state.paymentFailed) {
       paymentFailureSeenAt ||= Date.now();
       if (Date.now() - paymentFailureSeenAt >= COINBASE_FAILURE_STABLE_MS) return state;
@@ -919,9 +993,9 @@ export async function inspectWalletStage(wallet) {
     // 只回传阶段、计数与布尔值，不回传页面文本、输入值或助记词。
     // 设置页说明包含 “when unlocking”，不能靠正文子串判断解锁；按路由、字段数量和精确按钮分支。
     const passwordCount = fields.filter((field) => field.type === 'password').length;
-    if (route === '#/password-type' && /Set password|Create password/i.test(text)
+    if (['#/password-type', '#/web-onboarding/password-setup'].includes(route) && /Set password|Create password/i.test(text)
       && passwordCount === 2 && buttons.some((label) => /^Confirm$/i.test(label))) return {stage: 'password_setup'};
-    if (route === '#/password-type' && /Secure your wallet/i.test(text) && passwordCount === 0
+    if (['#/password-type', '#/web-onboarding/password-setup'].includes(route) && /Secure your wallet/i.test(text) && passwordCount === 0
       && buttons.some((label) => /^Next$/i.test(label))) return {stage: 'password_choice'};
     if (route === '#/unlock' && passwordCount === 1
       && buttons.some((label) => /^Unlock$/i.test(label))) return {stage: 'unlock'};
@@ -932,14 +1006,14 @@ export async function inspectWalletStage(wallet) {
     if (route.startsWith('#/connect/') && /\bConnected\b/i.test(text)) return {stage: 'ready'};
     if (/Transaction|Gas fee|Sign request|Approve payment/i.test(text)) return {stage: 'unknown'};
     // Confirm 在空表单上是 disabled，仍是识别此路由的必要控件。
-    if (route === '#/import-with-seed-phrase-and-private-key' && fields.length === 12
+    if (['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'].includes(route) && fields.length === 12
       && /Seed phrase or private key/i.test(text)
       && buttons.some((label) => /^Confirm$/i.test(label))) {
       return {stage: 'words', empty: fields.every((field) => !field.value)};
     }
-    if (route === '#/initialize-import' && /Seed phrase or private key/i.test(text)
+    if (['#/initialize-import', '#/web-onboarding/import'].includes(route) && /Seed phrase or private key/i.test(text)
       && /Social login/i.test(text) && /Hardware wallet/i.test(text)) return {stage: 'method'};
-    if (route === '#/initialize' && buttons.some((label) => /^Import(?: existing)? wallet$/i.test(label))) return {stage: 'welcome'};
+    if (['#/initialize', '#/web-onboarding'].includes(route) && buttons.some((label) => /^Import(?: existing)? wallet$/i.test(label))) return {stage: 'welcome'};
     if (/Assets|Tokens/i.test(text) && buttons.some((label) => /^Send$/i.test(label))
       && buttons.some((label) => /^Receive$/i.test(label))) return {stage: 'ready'};
     return {stage: 'unknown'};
@@ -965,18 +1039,18 @@ async function clickWalletStep(wallet, stage, label) {
   }
   const target = await evaluate(wallet, (expectedStage, expectedLabelSource, extensionId) => {
     const routes = {
-      welcome: '#/initialize',
-      method: '#/initialize-import',
-      words: '#/import-with-seed-phrase-and-private-key',
-      password_choice: '#/password-type',
+      welcome: ['#/initialize', '#/web-onboarding'],
+      method: ['#/initialize-import', '#/web-onboarding/import'],
+      words: ['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'],
+      password_choice: ['#/password-type', '#/web-onboarding/password-setup'],
       post_password_welcome: '#/show-supported-chains',
       unlock: '#/unlock',
-      password_setup: '#/password-type',
+      password_setup: ['#/password-type', '#/web-onboarding/password-setup'],
       connect_request: '#/connect/',
     };
     if (location.origin !== 'chrome-extension://' + extensionId
       || !routes[expectedStage]
-      || !String(location.hash || '').startsWith(routes[expectedStage])) return null;
+      || ![routes[expectedStage]].flat().some(route => String(location.hash || '').startsWith(route))) return null;
     const expectedLabel = new RegExp(expectedLabelSource, 'i');
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
     const selectors = ['method', 'password_choice'].includes(expectedStage)
@@ -1036,7 +1110,7 @@ export async function importOkxWallet(wallet, phrase, options = {}) {
   for (let index = 0; index < words.length; index += 1) {
     const fieldTarget = await evaluate(wallet, (fieldIndex, extensionId) => {
       if (location.origin !== 'chrome-extension://' + extensionId
-        || location.hash !== '#/import-with-seed-phrase-and-private-key') return null;
+        || !['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'].includes(location.hash)) return null;
       const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
@@ -1098,7 +1172,7 @@ export async function importOkxWallet(wallet, phrase, options = {}) {
     do {
       verified = await evaluate(wallet, (fieldIndex, length, extensionId) => {
         if (location.origin !== 'chrome-extension://' + extensionId
-          || location.hash !== '#/import-with-seed-phrase-and-private-key') return false;
+          || !['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'].includes(location.hash)) return false;
         const fields = [...document.querySelectorAll('input,textarea')].filter((node) => {
           const rect = node.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0 && !node.disabled && !['hidden', 'checkbox', 'radio'].includes(node.type);
@@ -1118,7 +1192,7 @@ export async function importOkxWallet(wallet, phrase, options = {}) {
   }
   const confirmReady = await evaluate(wallet, (extensionId) => {
     if (location.origin !== 'chrome-extension://' + extensionId
-      || location.hash !== '#/import-with-seed-phrase-and-private-key') return false;
+      || !['#/import-with-seed-phrase-and-private-key', '#/web-onboarding/import-mnemonic-or-private-key'].includes(location.hash)) return false;
     const buttons = [...document.querySelectorAll('button,[role="button"]')].filter((node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && /^Confirm$/i.test((node.innerText || node.textContent || '').trim());
@@ -1223,7 +1297,7 @@ export async function completeOkxPasswordSetup(wallet, password, expectedStage =
   const submitted = await evaluate(wallet, (extensionId, count, length, label, stage) => {
     if (location.origin !== 'chrome-extension://' + extensionId) return null;
     const route = (location.hash || '').split('?')[0];
-    if (route !== (stage === 'unlock' ? '#/unlock' : '#/password-type')) return null;
+    if (!(stage === 'unlock' ? ['#/unlock'] : ['#/password-type', '#/web-onboarding/password-setup']).includes(route)) return null;
     const fields = [...document.querySelectorAll('input[type="password"]')].filter((node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && !node.disabled;
@@ -1336,11 +1410,12 @@ async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
         })),
       });
       const matches = stages.flatMap((state, index) => allowed.includes(state.stage) ? [index] : []);
-      if (matches.length > 1) {
+      const authoritative = selectAuthoritativeOkxTargetIndex(matches.map((index) => targets[index]));
+      if (matches.length && authoritative < 0) {
         throw new Error('manual_security_blocker: crypto_wallet_import_target_ambiguous');
       }
-      if (matches.length === 1) {
-        selectedIndex = matches[0];
+      if (authoritative >= 0) {
+        selectedIndex = matches[authoritative];
         const wallet = clients[selectedIndex];
         for (let index = 0; index < clients.length; index += 1) {
           if (index !== selectedIndex) clients[index].close();
@@ -1499,13 +1574,17 @@ async function inspectOkxTransactionStage(wallet, expected = {}) {
   return classifyOkxTransactionSnapshot(snapshot, expected);
 }
 
-async function clickOkxTransactionButton(wallet, expectedStage, label, expected) {
-  const state = await inspectOkxTransactionStage(wallet, expected);
-  if (state.stage !== expectedStage || state.originOk !== true
-    || (expectedStage === 'confirm_send' && (state.hasAmount !== true || state.hasNetwork !== true))) {
-    throw new Error('manual_security_blocker: crypto_wallet_transaction_page_changed');
-  }
-  const target = await evaluate(wallet, (extensionId, expectedLabel) => {
+export async function clickOkxTransactionButton(wallet, expectedStage, label, expected) {
+  await wallet.send('Page.bringToFront');
+  const deadline = Date.now() + 2000;
+  let target = null;
+  do {
+    const state = await inspectOkxTransactionStage(wallet, expected);
+    if (state.stage !== expectedStage || state.originOk !== true
+      || (expectedStage === 'confirm_send' && (state.hasAmount !== true || state.hasNetwork !== true))) {
+      throw new Error('manual_security_blocker: crypto_wallet_transaction_page_changed');
+    }
+    target = await evaluate(wallet, (extensionId, expectedLabel) => {
     if (location.origin !== 'chrome-extension://' + extensionId) return null;
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
@@ -1518,31 +1597,47 @@ async function clickOkxTransactionButton(wallet, expectedStage, label, expected)
         && labelText === expectedLabel && rect.width > 0 && rect.height > 0;
     });
     if (matches.length !== 1) return null;
-    matches[0].scrollIntoView({block: 'center', inline: 'center'});
+    matches[0].scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'instant'});
     const rect = matches[0].getBoundingClientRect();
-    return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+    const point = {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+    const hit = document.elementFromPoint(point.x, point.y);
+    if (!hit || !matches[0].contains(hit)) return null;
+    return point;
   }, OKX_EXTENSION_ID, label);
+    if (target || Date.now() >= deadline) break;
+    await sleep(Math.min(100, deadline - Date.now()));
+  } while (Date.now() < deadline);
   if (!target) throw new Error('manual_security_blocker: crypto_wallet_transaction_button_unavailable');
   await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
   await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
   await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
 }
 
-async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warning'], timeoutMs = 30000) {
+export async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warning'], timeoutMs = 30000, adapters = {}) {
+  const findTargets = adapters.findTargets || findOkxWalletTargets;
+  const connect = adapters.cdp || cdp;
+  const pause = adapters.sleep || sleep;
   const deadline = Date.now() + timeoutMs;
   let lastState = {stage: 'unknown'};
   do {
     let targets;
     try {
-      targets = await findOkxWalletTargets(input, getTargets, sleep, Math.min(timeoutMs, 1000));
+      targets = await findTargets(input, getTargets, pause, Math.min(timeoutMs, 1000));
     } catch {
       targets = [];
     }
+    // Select the authoritative surface BEFORE checking its current stage. A
+    // loading notification must never fall back to a stale fullscreen mirror.
+    const authoritativeIndex = selectAuthoritativeOkxTargetIndex(targets);
+    if (targets.length && authoritativeIndex < 0) {
+      throw new Error('manual_security_blocker: crypto_wallet_transaction_target_ambiguous');
+    }
+    targets = authoritativeIndex >= 0 ? [targets[authoritativeIndex]] : [];
     const matches = [];
     for (const target of targets) {
       let wallet;
       try {
-        wallet = await cdp(target.webSocketDebuggerUrl);
+        wallet = await connect(target.webSocketDebuggerUrl);
         await wallet.send('Runtime.enable');
         const state = await inspectOkxTransactionStage(wallet, expected);
         lastState = state;
@@ -1553,23 +1648,14 @@ async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warn
       }
     }
     if (matches.length) {
-      // OKX notification page 与承载 UI 的 SES iframe 可能同时暴露同一笔交易；按同一指纹去重后优先使用顶层 page。
-      const uniqueFingerprints = new Set(matches.map(({state}) => [
-        state.stage,
-        state.network,
-        state.asset,
-        state.hasAmount === true,
-      ].join('|')));
-      if (uniqueFingerprints.size > 1) {
+      // Use the unique extension notification, never infer transaction identity from amount.
+      const selectedIndex = selectAuthoritativeOkxTargetIndex(matches.map(({target}) => target));
+      if (selectedIndex < 0) {
         for (const match of matches) match.wallet.close();
         throw new Error('manual_security_blocker: crypto_wallet_transaction_target_ambiguous');
       }
-      matches.sort((left, right) => {
-        const rank = (type) => type === 'page' ? 0 : type === 'other' ? 1 : 2;
-        return rank(left.target.type) - rank(right.target.type);
-      });
-      const selected = matches[0];
-      for (const duplicate of matches.slice(1)) duplicate.wallet.close();
+      const selected = matches[selectedIndex];
+      for (const candidate of matches) if (candidate !== selected) candidate.wallet.close();
       writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-transaction-detected', {
         stage: selected.state.stage,
         targetType: selected.target.type || '',
@@ -1581,7 +1667,7 @@ async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warn
       });
       return selected;
     }
-    await sleep(250);
+    await pause(250);
   } while (Date.now() < deadline);
   const fingerprint = [
     lastState.stage || 'unknown',
@@ -1656,6 +1742,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
   const inspectTargets = adapters.inspectTargets || inspectOkxTargets;
   const confirmWalletPaymentFn = adapters.confirmWalletPayment || confirmOkxWalletPayment;
   // Purchase 创建 Coinbase checkout；钱包风险提示和交易 Confirm 仅在任务显式开启时自动点击。
+  if (input.gmailVerification) input.gmailVerification.challengeStartedAt = Date.now();
   const purchaseClick = await submitPurchase(page);
   const checkoutTarget = await openPaymentCheckout(input, page);
   const checkout = checkoutTarget.checkout;
@@ -1691,16 +1778,17 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       };
     }
     const checkoutDetails = await checkoutFingerprint(checkout).catch(() => ({}));
-    const expectedPaymentAmount = checkoutDetails.amount
+    const displayedPayment = checkoutPaymentFingerprint(checkoutDetails.text || '');
+    const expectedPaymentAmount = displayedPayment.amount
       || purchaseContext.totalDue
       || purchaseContext.amount
       || purchaseContext.ruleDecision?.selectedAmount
       || '';
-    const expectedPaymentAsset = checkoutDetails.asset
+    const expectedPaymentAsset = displayedPayment.asset
       || purchaseContext.checkoutState?.requiredAsset
       || purchaseContext.requiredAsset
       || 'USDC';
-    const expectedPaymentNetwork = paymentNetworkFromContext(purchaseContext);
+    const expectedPaymentNetwork = paymentNetworkFromContext(purchaseContext) || displayedPayment.network;
     input.expectedCryptoPayment = {
       amount: expectedPaymentAmount,
       asset: expectedPaymentAsset,
@@ -1891,7 +1979,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         {timeoutMs: 30000},
       );
     }
-    const checkoutState = await inspectCheckout(checkout, {timeoutMs: walletPaymentConfirmation.confirmed ? 60000 : 10000, requirePaymentCompleted: walletPaymentConfirmation.confirmed});
+    const checkoutState = await inspectCheckout(checkout, {timeoutMs: walletPaymentConfirmation.confirmed ? 60000 : 10000, requirePaymentCompleted: walletPaymentConfirmation.confirmed, confirmationDebugDir: input.confirmationDebugDir});
     const okxTargets = await inspectTargets(input.debugPort);
     return {
       checkout,
@@ -1931,17 +2019,29 @@ async function runCryptoRecharge(rawInput) {
     const purchaseForm = await waitForCryptoPurchaseForm(page);
     writeDiagnostic(input.confirmationDebugDir, 'crypto-purchase-form-ready', purchaseForm);
     const amountInput = await fillAmount(page, purchase.amount);
+    // Capture inbox IDs before this Purchase can send an email. Missing Gmail
+    // only blocks an actual email challenge, not an otherwise verified session.
+    input.gmailVerification = await captureGmailBaseline(input, {getTargets, cdp}).catch(() => null);
+    input.previousCoinbaseSessions = getTargets(input.debugPort).map(coinbaseSessionUrl).filter(Boolean);
     const continued = await continueCryptoAfterAmount(input, page, {...purchase, useCrypto, purchaseForm, amountInput});
     checkout = continued.checkout;
     const cryptoPurchase = continued.cryptoPurchase;
     if (cryptoPurchase.walletPaymentConfirmation?.confirmed === true) {
-      const checkoutState = await readCheckoutState(checkout, {timeoutMs: 60000, requirePaymentCompleted: true});
+      const checkoutState = cryptoPurchase.checkoutState?.paymentCompleted === true
+        ? cryptoPurchase.checkoutState
+        : await readCheckoutState(checkout, {timeoutMs: 60000, requirePaymentCompleted: true, confirmationDebugDir: input.confirmationDebugDir});
       if (checkoutState.paymentCompleted !== true) {
         throw new Error('purchase_unverified: Coinbase did not show payment completion after wallet Confirm');
       }
       checkout.close();
       checkout = null;
-      const afterBalance = await waitForBalanceIncrease(page, purchase.beforeBalance?.balance, 45000);
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-coinbase-payment-completed', checkoutState);
+      let afterBalance;
+      try {
+        afterBalance = await waitForBalanceIncrease(page, purchase.beforeBalance?.balance, 45000, {expectedAccount: input.expectedAccount});
+      } catch (error) {
+        throw new Error('purchase_unverified: payment confirmed by Coinbase; Credits verification failed: ' + redact(error.message || error));
+      }
       cryptoPurchase.checkoutState = checkoutState;
       cryptoPurchase.afterBalance = afterBalance;
       cryptoPurchase.balanceAfter = afterBalance.balance;

@@ -31,7 +31,7 @@ function fakeAmountPage(initialValue, {clearWorks = true, resetOnBlur = false, b
   };
   const page = {async send(method, params) {
     if (method === 'Runtime.evaluate') {
-      return {result: {value: runInNewContext(params.expression, {document})}};
+      return {result: {value: runInNewContext(params.expression, {document, location: {origin: 'https://openrouter.ai'}})}};
     }
     assert.equal(method, 'Input.dispatchKeyEvent');
     events.push(params);

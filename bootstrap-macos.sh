@@ -80,6 +80,10 @@ export PORT="$port"
 ensure_git_and_node
 clone_if_missing
 
+if [[ -f "$PROJECT_DIR/package-lock.json" && ! -f "$PROJECT_DIR/node_modules/playwright-core/index.mjs" ]]; then
+  (cd "$PROJECT_DIR" && npm ci --ignore-scripts --no-audit --no-fund)
+fi
+
 if [[ ! -x "$PROJECT_DIR/start-local.sh" ]]; then
   echo "ERROR: The cloned branch does not contain start-local.sh: $BRANCH" >&2
   exit 1

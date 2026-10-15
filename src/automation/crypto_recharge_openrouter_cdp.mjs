@@ -13,6 +13,8 @@ import {pathToFileURL} from 'node:url';
 import {selectAuthoritativeOkxTargetIndex} from './lib/crypto-wallet-target.mjs';
 import {readCryptoAccountPassword} from './lib/crypto-account-password.mjs';
 import {captureGmailBaseline, completeEmailVerification, inspectEmailChallenge} from './lib/crypto-email-verification.mjs';
+import {continueRiskWarning} from './lib/crypto-risk-continue.mjs';
+import {captureRiskEvidence, clickRiskDom, clickRiskPlaywright} from './lib/crypto-risk-browser.mjs';
 import {
   checkoutPaymentFingerprint,
   classifyOkxTransactionSnapshot,
@@ -1658,9 +1660,72 @@ export async function clickOkxTransactionButton(wallet, expectedStage, label, ex
     await sleep(Math.min(100, deadline - Date.now()));
   } while (Date.now() < deadline);
   if (!target) throw new Error('manual_security_blocker: crypto_wallet_transaction_button_unavailable');
-  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y});
-  await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: 1});
-  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: 1});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseMoved', x: target.x, y: target.y, buttons: 0});
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mousePressed', x: target.x, y: target.y, button: 'left', buttons: 1, clickCount: 1});
+  await sleep(100);
+  await wallet.send('Input.dispatchMouseEvent', {type: 'mouseReleased', x: target.x, y: target.y, button: 'left', buttons: 0, clickCount: 1});
+}
+
+export async function continueOkxRiskWarning(input, initial, expected, adapters = {}) {
+  if (input.confirmWalletPayment !== true) {
+    throw new Error('manual_security_blocker: crypto_wallet_transaction_confirmation_not_authorized');
+  }
+  let active = initial;
+  let needsReconnect = false;
+  const inspect = adapters.inspect || inspectOkxTransactionStage;
+  const inspectCurrent = async () => {
+    try {
+      // Re-read the authoritative target every time: popup replacement must not
+      // turn an old page's DOM into permission to click a different window.
+      const targets = (adapters.targets || getTargets)(input.debugPort)
+        .filter(target => String(target.url || '').startsWith('chrome-extension://' + OKX_EXTENSION_ID + '/'));
+      const index = selectAuthoritativeOkxTargetIndex(targets);
+      if (index < 0) return {stage: 'unknown', originOk: false, targetAmbiguous: true};
+      const target = targets[index];
+      if (needsReconnect || target.id !== active.target?.id) {
+        active.wallet.close();
+        const wallet = await (adapters.connect || cdp)(target.webSocketDebuggerUrl);
+        active = {wallet, target};
+        await wallet.send('Runtime.enable');
+        needsReconnect = false;
+      }
+      active.state = {...await inspect(active.wallet, expected), targetId: target.id};
+      return active.state;
+    } catch {
+      needsReconnect = true;
+      return {stage: 'unknown', originOk: false, readError: true};
+    }
+  };
+  try {
+    const result = await continueRiskWarning({
+      inspect: inspectCurrent,
+      capture: entry => captureRiskEvidence(active.wallet, input.confirmationDebugDir, {...entry, targetId: active.target?.id}),
+      trigger: async method => {
+        if (input.confirmWalletPayment !== true) throw new Error('risk_confirmation_not_authorized');
+        if (method === 'dom') return clickRiskDom(active.wallet);
+        if (method === 'cdp') return clickOkxTransactionButton(active.wallet, 'risk_warning', 'Continue (Unsafe)', expected);
+        return clickRiskPlaywright(input, active.target.id, inspectCurrent);
+      },
+      sleep: adapters.sleep || sleep,
+      now: adapters.now || Date.now,
+    });
+    try {
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-resolved', {
+        ...result, transitionVerified: true, observedAt: new Date().toISOString(),
+      });
+    } catch { result.evidenceFailures += 1; }
+    active.riskContinuation = result;
+    return active;
+  } catch (error) {
+    try {
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-failed', {
+        attempts: error.attempts || [], evidenceFailures: error.evidenceFailures || 0,
+        transitionVerified: false, observedAt: new Date().toISOString(),
+      });
+    } catch { error.evidenceFailures = (error.evidenceFailures || 0) + 1; }
+    finally { active.wallet.close(); }
+    throw error;
+  }
 }
 
 export async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warning'], timeoutMs = 30000, adapters = {}) {
@@ -1756,19 +1821,7 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
   try {
     const riskWarningClicked = current.state.stage === 'risk_warning';
     if (riskWarningClicked) {
-      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-before-click', {
-        stage: current.state.stage,
-        amountMatched: current.state.hasAmount,
-        network: current.state.network,
-      });
-      await click(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
-      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-clicked', {
-        label: 'Continue (Unsafe)',
-        stage: current.state.stage,
-      });
-      wallet.close();
-      wallet = null;
-      current = await acquire(input, expected, ['confirm_send'], Math.min(timeoutMs, 15000));
+      current = await (adapters.continueRisk || continueOkxRiskWarning)(input, current, expected);
       wallet = current.wallet;
     }
     const state = current.state;
@@ -1804,7 +1857,9 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
       observationTiming: 'immediate', observedAt: new Date().toISOString(),
       meaning: 'read_only_observation_requires_checkout_verification',
     });
-    return {confirmed: true, riskWarningClicked, confirmationClicked: true, network: state.network};
+    return {confirmed: true, riskWarningClicked, confirmationClicked: true, network: state.network,
+      riskWarningAttempts: current.riskContinuation?.attempts || [],
+      riskEvidenceFailures: current.riskContinuation?.evidenceFailures || 0};
   } finally {
     wallet?.close();
   }

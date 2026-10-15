@@ -39,6 +39,7 @@ AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Aut
 ## 快速开始
 
 ```bash
+npm ci --ignore-scripts
 npm run check
 npm test
 npm start
@@ -57,7 +58,8 @@ powershell -ExecutionPolicy Bypass -File .\bootstrap-windows.ps1
 仓库需要权限时，Git 会要求操作者完成 GitHub 登录。它不会安装 AdsPower，也不会写入 OPOM Token
 等业务配置。
 
-当前项目没有第三方 npm 依赖，无需因 `node_modules` 不存在而执行 `npm install`。
+虚拟币风险提示的第三级点击使用锁定版本的 `playwright-core`，首次运行或更新依赖后执行
+`npm ci --ignore-scripts`。它只连接现有 AdsPower 浏览器，不下载或启动额外浏览器。
 
 全新 macOS 电脑同样只需下载一个文件 `bootstrap-macos.sh`，在 Terminal 执行：
 
@@ -97,6 +99,18 @@ Credits 页后，按下面顺序处理单个账号：
 11. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
 
 ## 虚拟币充值流程
+
+### 风险提示三级触发与留证
+
+仅对 OKX `Continue (Unsafe)` 使用 DOM → CDP → Playwright 的顺序，每种方式只触发一次，
+触发后各观察最多 20 秒。只有仍明确处于同一权威钱包风险页时才升级；页面未知、来源变化、
+金额或网络无法核验时停止，不能把其他页面当成可继续点击的风险页。成功必须看到来源、金额、
+币种和网络校验通过的交易确认页；事件发送成功不表示风险提示已处理。
+
+每级保存 `crypto-risk-<方式>-<阶段>.json`，包含焦点、窗口可见性、按钮矩形/中心坐标、
+按钮可用状态、命中元素及遮挡层结构；可确认无凭据输入的风险/交易页同时保存 PNG。
+截图失败或敏感/未知页面不截图时，在 JSON 写明原因。不记录密码、助记词、输入值或完整页面文本。
+三级仍失败则暂停批次并保留现场。最终交易 `Confirm` 保持单次点击，不应用这套重试。
 
 ### Gmail 邮件验证码
 

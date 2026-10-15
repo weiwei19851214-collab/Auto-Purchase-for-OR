@@ -167,6 +167,11 @@ OPOM 生产只读验证通过后，按以下顺序执行：
 11. 获得明确授权后，运行一行小额真实充值。
 12. 确认该行拥有所有完成证据：OPOM 账号已匹配、AdsPower profile 已匹配、OpenRouter 账号已匹配、新卡绑定已写入 OPOM、余额增长已验证、Auto top-up 回读匹配、result CSV 已生成、AdsPower 状态处理已记录。
 
+OKX 风险继续仅按 DOM、CDP、Playwright 各一次触发，每级等待最多 20 秒。
+只有风险页仍明确可核验时才升级；必须读到金额/币种/网络匹配的交易确认页才算推进成功。
+最终交易 Confirm 不做三级重试。风险步骤 JSON 保存焦点、按钮坐标、命中/遮挡结构及截图路径；
+无法截图或页面有敏感输入时记录失败/跳过原因。三级无效则暂停并保留现场，不重新创建 Purchase。
+
 在 result CSV 中，`completion_evidence_status=production_complete` 是真实闭环行的交付信号。`test_mode_complete` 只表示 no-purchase 演练，`incomplete` 必须通过 `completion_evidence_missing` 解决。OPOM 来源行在 confirmed purchase mode 中，必须启用 OPOM writeback，preflight 才能把它们标记为可执行。
 
 ## AdsPower 状态处理

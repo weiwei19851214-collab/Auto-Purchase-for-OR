@@ -83,6 +83,15 @@ if (Test-Path $projectPath) {
 
 Ensure-Node
 
+if ((Test-Path (Join-Path $projectPath 'package-lock.json')) -and
+    -not (Test-Path (Join-Path $projectPath 'node_modules\playwright-core\index.mjs'))) {
+  Push-Location $projectPath
+  try {
+    & npm.cmd ci --ignore-scripts --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to install project dependencies.' }
+  } finally { Pop-Location }
+}
+
 $port = if ($env:PORT) { $env:PORT } else { '4100' }
 $env:PORT = $port
 $env:OR_RUNNER_DB = Join-Path $projectPath 'data\runner.sqlite'

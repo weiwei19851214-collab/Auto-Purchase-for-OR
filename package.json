@@ -20,5 +20,8 @@
     "smoke:ui:opom-flow": "node scripts/ui-opom-flow-smoke.mjs",
     "smoke:ui:identity-mismatch": "node scripts/ui-identity-mismatch-smoke.mjs",
     "verify:integration": "node scripts/verify-integration.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.64.1"
   }
 }

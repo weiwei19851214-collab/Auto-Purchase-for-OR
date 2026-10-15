@@ -5,12 +5,15 @@ import {nowIso} from './ids.mjs';
 import {redact} from './redact.mjs';
 import {executeRow, runnerArgs, writeResultCsv, automationLogDirForRow} from './automation-adapter.mjs';
 import {writeAdsPowerStatus} from './adspower-status.mjs';
-import {writeRowResult} from './opom-client.mjs';
+import {writeRowResult, writeCryptoCompletedRow} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {CRYPTO_TASK_TIMEOUT_MS} from './config.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
 import {CRYPTO_AMOUNT_FIELDS, cryptoAmountsWithCheckpoint} from '../automation/lib/crypto-amount-fields.mjs';
+
+import {walletPasswordForRow, walletSeedForRow} from './crypto-wallet-secrets.mjs';
+import {getCryptoPayment, beginCryptoPayment, updateCryptoPayment} from './crypto-payment-ledger.mjs';
 
 // Store observed accounting values as text; never infer missing amounts.
 const CRYPTO_ACCOUNTING_FIELDS = Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [column, key]);
@@ -56,7 +59,9 @@ export class JobWorker {
     this.db = db;
     this.intervalMs = options.intervalMs || 1500;
     this.heartbeatMs = options.heartbeatMs || 10000;
+    this.cryptoTaskTimeoutMs = options.cryptoTaskTimeoutMs || CRYPTO_TASK_TIMEOUT_MS;
     this.executeRowFn = options.executeRowFn || executeRow;
+    this.writeRowResultFn = options.writeRowResultFn || writeCryptoCompletedRow;
     this.adsPowerStatusFetch = options.adsPowerStatusFetch || globalThis.fetch?.bind(globalThis);
     this.timer = null;
     this.running = false;
@@ -142,7 +147,7 @@ export class JobWorker {
     const options = JSON.parse(getJob(this.db, jobId)?.options_json || '{}');
     const args = runnerArgs(options);
     // 本批按创建任务时保存的并发数执行；恢复任务不读取页面临时状态。
-    const concurrency = Math.min(rows.length, args.concurrency || 1);
+    const concurrency = options.cryptoScheduled ? 1 : Math.min(rows.length, args.concurrency || 1);
     addEvent(this.db, jobId, 'job.concurrency', `worker concurrency ${concurrency}/${args.concurrency}`, {
       requested: args.concurrency,
       effective: concurrency,
@@ -159,6 +164,14 @@ export class JobWorker {
         }
         const row = takeNextRow();
         if (!row) break;
+        if (options.cryptoScheduled) {
+          const schedule = this.db.prepare("SELECT enabled FROM scheduler_state WHERE id='auto-recharge:crypto'").get();
+          if (!schedule?.enabled || !walletPasswordForRow(job.id, row.raw_index)) {
+            this.db.prepare("UPDATE jobs SET status='blocked',error='crypto_schedule_paused',updated_at=? WHERE id=?").run(nowIso(), job.id);
+            addEvent(this.db, job.id, 'job.blocked', '虚拟币计划已停用或钱包密码缺失，尚未开始的行保持排队');
+            break;
+          }
+        }
         await this.runRow(job, row, csvText);
         const afterRow = getJob(this.db, jobId);
         if (!afterRow || ['blocked', 'failed'].includes(afterRow.status)) break;
@@ -195,58 +208,114 @@ export class JobWorker {
     let unexpectedError = false;
     const runtimeLog = {jobId: job.id, rowId: row.id, rowNumber: row.row_number};
     const cryptoAccountingAttemptId = rowArgs.rechargeMode === 'crypto' ? randomUUID() : '';
+    const accountKey = row.opom_account_id || row.ads_power_user_id || row.profile_id || '';
+    const guardedCrypto = rowArgs.rechargeMode === 'crypto' && options.confirmWalletPayment === true;
+    const previousPayment = guardedCrypto ? getCryptoPayment(this.db, accountKey) : null;
+    const executionAbort = new AbortController();
     try {
-      const executionPromise = this.executeRowFn(csvText, row.raw_index, {
+      if (guardedCrypto && !accountKey) throw new Error('manual_security_blocker: missing crypto account identity');
+      if (guardedCrypto && previousPayment?.phase !== 'credited') {
+        beginCryptoPayment(this.db, accountKey, job.id, row.id, options.cryptoCycleId || '');
+      }
+      const executionPromise = previousPayment?.phase === 'credited'
+        ? Promise.resolve({status: 'completed', details: JSON.parse(previousPayment.details_json), safeToContinue: true})
+        : this.executeRowFn(csvText, row.raw_index, {
         ...options,
         runtimeLog,
+        runtimeAbortSignal: executionAbort.signal,
+        runtimeWalletPassword: walletPasswordForRow(job.id, row.raw_index) || options.runtimeWalletPassword || '',
+        runtimeSeedPhrase: options.cryptoScheduled ? '' : walletSeedForRow(job.id, row.raw_index) || options.runtimeSeedPhrase || '',
         ...(cryptoAccountingAttemptId ? {cryptoAccountingAttemptId} : {}),
       });
       if (rowArgs.rechargeMode !== 'crypto') {
         result = await executionPromise;
       } else {
         const elapsedMs = Date.now() - current.startedAtMs;
-        const remainingMs = Math.max(1, CRYPTO_TASK_TIMEOUT_MS - elapsedMs);
+        const remainingMs = Math.max(1, this.cryptoTaskTimeoutMs - elapsedMs);
         let timeoutHandle;
         const timeoutPromise = new Promise((resolve) => {
           timeoutHandle = setTimeout(() => resolve({timedOut: true}), remainingMs);
         });
-        const outcome = await Promise.race([executionPromise, timeoutPromise]);
-        clearTimeout(timeoutHandle);
+        let outcome;
+        try {
+          outcome = await Promise.race([executionPromise, timeoutPromise]);
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
         if (!outcome?.timedOut) {
           result = outcome;
         } else {
-          // 超时必须先关闭当前 AdsPower profile，再把结果标成可继续，避免批次卡死在这一行。
-          const profileStop = await adspower.stopProfile(rowArgs, {
-            userId: row.ads_power_user_id || row.profile_id || '',
-            serialNumber: row.ads_power_serial_number || '',
-          });
+          executionAbort.abort();
           executionPromise.catch(() => {});
           result = {
-            status: 'failed',
-            stage: 'crypto.timeout',
-            errorCode: 'crypto_task_timeout',
-            message: '虚拟币充值单行流程超过 4 分钟，已强制关闭浏览器并继续下一任务',
-            errorDetail: 'crypto task timeout after ' + CRYPTO_TASK_TIMEOUT_MS + 'ms',
-            details: {
-              profileStop,
-              ...cryptoAmountsWithCheckpoint({
-                confirmationDebugDir: automationLogDirForRow(runtimeLog, row.raw_index),
-                cryptoAccountingAttemptId,
-              }),
-            },
-            safeToContinue: true,
-            stopProfile: true,
-            profileStop,
+            status: 'purchase_unverified', stage: 'crypto.timeout', errorCode: 'crypto_task_timeout',
+            message: '虚拟币流程超时，已暂停并保留浏览器，请核验本次付款后再处理',
+            details: cryptoAmountsWithCheckpoint({confirmationDebugDir: automationLogDirForRow(runtimeLog, row.raw_index), cryptoAccountingAttemptId}),
+            safeToContinue: false, stopProfile: false,
           };
         }
       }
     } catch (error) {
       unexpectedError = true;
       result = this.resultFromUnexpectedRowError(error, row);
+      if (guardedCrypto) result = {...result, status: 'purchase_unverified', safeToContinue: false, stopProfile: false};
     } finally {
       clearInterval(heartbeat);
     }
+    if (guardedCrypto) {
+      const owned = getCryptoPayment(this.db, accountKey);
+      const canUpdate = owned?.row_id === row.id || previousPayment?.phase === 'credited';
+      if (result.status === 'completed' && canUpdate) {
+        const details = result.details || {};
+        const verified = Number.isFinite(Number(details.balanceAfter)) && details.balanceAfter !== ''
+          && Number.isFinite(Number(details.balanceBefore)) && details.balanceBefore !== ''
+          && Number(details.balanceAfter) > Number(details.balanceBefore);
+        if (!verified) {
+          result = {...result, status: 'purchase_unverified', message: '虚拟币到账余额未验证', safeToContinue: false, stopProfile: false};
+          updateCryptoPayment(this.db, accountKey, 'unverified', details);
+        } else {
+          updateCryptoPayment(this.db, accountKey, 'credited', details);
+          try {
+            if (options.opomWriteback && row.opom_account_id) {
+              const written = await (this.writeRowResultFn || writeCryptoCompletedRow)({...options, runId: owned.job_id}, {
+                opom_account_id: row.opom_account_id, ads_power_user_id: row.ads_power_user_id,
+                ads_power_serial_number: row.ads_power_serial_number,
+                result_idempotency_key: 'crypto:' + owned.job_id + ':' + owned.row_id,
+              }, details, {runId: owned.job_id, rowNumber: row.row_number, status: 'completed', stage: 'closed_loop.complete'});
+              if (written.resultStatus !== 'written') throw new Error('OPOM result not written');
+              result.details = {...details, opomResultWritebackStatus: 'written'};
+            } else if (options.cryptoScheduled) throw new Error('scheduled crypto requires OPOM writeback');
+            updateCryptoPayment(this.db, accountKey, 'completed', details);
+          } catch (error) {
+            result = {...result, status: 'failed', stage: 'opom.writeback',
+              errorCode: /^OPOM network failed/i.test(error.message || '') ? 'opom_writeback_network_failed' : 'opom_writeback_failed',
+              errorDetail: redact(error.message || String(error)),
+              message: '充值已到账，OPOM 写回待重试；禁止再次付款',
+              details: {...details, opomResultWritebackStatus: 'failed'}, safeToContinue: false, stopProfile: false};
+          }
+        }
+      } else if (canUpdate && !['completed', 'credited'].includes(owned.phase)) {
+        const confirmationSubmitted = result.details?.cryptoPurchase?.walletPaymentConfirmation?.confirmed === true
+          || result.details?.cryptoPurchase?.walletPaymentConfirmation?.confirmationClicked === true
+          || result.details?.walletPaymentConfirmation?.confirmed === true || result.details?.walletPaymentConfirmation?.confirmationClicked === true;
+        const unpaid = !confirmationSubmitted && result.details?.cryptoPaymentNotStarted === true;
+        updateCryptoPayment(this.db, accountKey, unpaid ? 'not_paid' : 'unverified', result.details);
+        if (!unpaid) result = {...result, safeToContinue: false, stopProfile: false};
+        else if (result.status !== 'manual_security_blocker' && result.errorCode !== 'crypto_insufficient_funds') result = {...result, safeToContinue: true};
+      }
+    }
+    const explicitInsufficientFunds = !unexpectedError && (result.errorCode === 'crypto_insufficient_funds'
+      || result.status === 'crypto_insufficient_funds');
     result = normalizeResultError(result);
+    if (options.cryptoScheduled && rowArgs.rechargeMode === 'crypto') {
+      // A blocked account retains its payment ledger and browser for reconciliation;
+      // it must not prevent independent accounts from being processed.
+      result.safeToContinue = !explicitInsufficientFunds;
+      if (!explicitInsufficientFunds && result.errorCode === 'crypto_insufficient_funds') {
+        result.errorCode = 'crypto_row_failed';
+        result.details.errorCode = result.errorCode;
+      }
+    }
     if (unexpectedError) {
       if (rowArgs.rechargeMode === 'crypto' && rowArgs.stopProfiles && result.stopProfile === true
         && result.profileStop?.attempted !== true) {
@@ -256,7 +325,7 @@ export class JobWorker {
           serialNumber: row.ads_power_serial_number || '',
         });
       }
-      await this.writeUnexpectedRowOpomResult(row, result, options);
+      if (!guardedCrypto) await this.writeUnexpectedRowOpomResult(row, result, options);
       addEvent(this.db, job.id, 'row.error', `row ${row.row_number}: ${result.message}`, {
         status: result.status,
         stage: result.stage,
@@ -364,7 +433,7 @@ export class JobWorker {
           UPDATE jobs
           SET status = 'blocked', error = ?, updated_at = ?
           WHERE id = ?
-        `).run(result.message || result.status, nowIso(), job.id);
+        `).run(options.cryptoScheduled && explicitInsufficientFunds ? 'crypto_insufficient_funds' : result.message || result.status, nowIso(), job.id);
         addEvent(this.db, job.id, 'job.blocked', result.message || result.status, {}, row.id);
       }
     } finally {

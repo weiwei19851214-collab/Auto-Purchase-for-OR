@@ -2,7 +2,7 @@ import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 export const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-export const DATA_DIR = join(ROOT_DIR, 'data');
+export const DATA_DIR = process.env.OR_RUNNER_DATA_DIR ? resolve(process.env.OR_RUNNER_DATA_DIR) : join(ROOT_DIR, 'data');
 export const UPLOAD_DIR = join(DATA_DIR, 'uploads');
 export const RESULT_DIR = join(DATA_DIR, 'results');
 export const LOG_DIR = join(DATA_DIR, 'logs');

@@ -29,6 +29,7 @@
             <span id="workerLabel">Worker 空闲</span>
           </div>
           <button class="toolbar-button" id="recordsButton" type="button">任务记录</button>
+          <button class="toolbar-button" id="scheduleHistoryButton" type="button">计划执行历史</button>
           <button class="toolbar-button" id="contrastButton" type="button" aria-pressed="false">高对比</button>
           <button class="toolbar-button" id="settingsButton" type="button">设置</button>
           <span class="version-badge" id="appVersion" title="当前服务启动时的功能版本与代码提交号">版本读取中…</span>
@@ -338,12 +339,26 @@
       </form>
     </dialog>
 
+    <dialog class="sheet side-sheet" id="scheduleHistoryDialog" aria-labelledby="scheduleHistoryTitle">
+      <form method="dialog">
+        <header class="sheet-header">
+          <div>
+            <span class="eyebrow">虚拟币自动充值计划</span>
+            <h2 id="scheduleHistoryTitle">计划执行历史</h2>
+          </div>
+          <button class="close-button" value="cancel" aria-label="关闭计划执行历史">关闭</button>
+        </header>
+        <p class="settings-state">北京时间。最近 20 轮、每轮最多 100 批及最近 50 条状态记录；拉取失败即使未创建充值任务也会保留。升级前仅能恢复已保存轮次和最后状态。</p>
+        <div id="cryptoScheduleHistoryList" class="crypto-schedule-history"></div>
+      </form>
+    </dialog>
+
     <dialog class="sheet settings-sheet" id="settingsDialog" aria-labelledby="settingsTitle">
       <form method="dialog">
         <header class="sheet-header">
           <div>
             <span class="eyebrow">本地配置</span>
-            <h2 id="settingsTitle">连接与超时</h2>
+            <h2 id="settingsTitle">连接与自动充值</h2>
           </div>
           <button class="close-button" value="cancel" aria-label="关闭设置">关闭</button>
         </header>
@@ -374,6 +389,30 @@
             <label><span>OPOM 写回重试</span><input id="opomWritebackRetries" type="number" min="0" max="10" /></label>
             <label><span>重试间隔 ms</span><input id="opomRetryDelayMs" type="number" min="0" step="100" /></label>
             <label><span>单任务超时 ms</span><input id="rowTimeoutMs" type="number" min="1000" step="1000" /></label>
+          </div>
+        </details>
+        <details id="cryptoScheduleDetails">
+          <summary>虚拟币自动充值计划</summary>
+          <p class="settings-state">北京时间（Asia/Shanghai）。固定读取 VIP 组 CARD_SWITCH 与 OVERDUE 账号，去重后每批最多 50 个、依次充值。独立于主页面的临时参数。</p>
+          <div class="settings-grid">
+            <label class="wide"><span>定时方式</span><select id="cryptoScheduleType"><option value="interval">固定间隔</option><option value="daily">每天固定时间点</option><option value="hourly">每小时指定分钟</option></select></label>
+            <label class="wide" id="cryptoIntervalField"><span>间隔分钟（从启用时起）</span><input id="cryptoIntervalMinutes" type="number" min="1" step="1" value="30" /></label>
+            <label class="wide" id="cryptoDailyField" hidden><span>每天时间点（逗号分隔）</span><input id="cryptoDailyTimes" type="text" placeholder="09:00, 15:30, 21:00" autocomplete="off" /></label>
+            <label class="wide" id="cryptoHourlyField" hidden><span>每小时分钟（0–59，逗号分隔）</span><input id="cryptoHourlyMinutes" type="text" placeholder="15, 45" autocomplete="off" /></label>
+            <label><span>每账号固定充值额（美元）</span><input id="cryptoScheduleAmount" type="number" min="1" step="0.01" value="150" /></label>
+            <label><span>已初始化 OKX 钱包密码</span><input id="cryptoSchedulePassword" type="password" autocomplete="new-password" /></label>
+            <small class="wide" id="cryptoPasswordState">未配置钱包密码</small>
+          </div>
+          <p class="settings-state">仅解锁已初始化的钱包，不需要助记词。密码仅保留在服务内存；服务重启后计划暂停，需重新输入密码并启用。保存配置不会授权付款。</p>
+          <p class="settings-state" id="cryptoScheduleState" role="status" aria-live="polite">计划状态尚未加载。</p>
+          <details id="cryptoScheduleIssues" hidden>
+            <summary id="cryptoScheduleIssuesTitle">账号处理说明</summary>
+            <ul id="cryptoScheduleIssuesList"></ul>
+          </details>
+          <div class="sheet-actions crypto-schedule-actions">
+            <button class="toolbar-button" id="saveCryptoScheduleButton" type="button">保存计划</button>
+            <button class="primary-button" id="enableCryptoScheduleButton" type="button">启用自动付款</button>
+            <button class="toolbar-button" id="disableCryptoScheduleButton" type="button">停用计划</button>
           </div>
         </details>
         <p class="settings-state" id="settingsState"></p>

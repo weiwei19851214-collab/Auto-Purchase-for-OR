@@ -111,6 +111,7 @@ export async function readyToRechargePayload(payload = {}) {
     limit,
     cursor: payload.cursor || '',
     sort: payload.sort || '',
+    strictResponse: payload.strictResponse === true,
   });
   const addressMappings = [
     ...(Array.isArray(payload.addressMappings) ? payload.addressMappings : []),

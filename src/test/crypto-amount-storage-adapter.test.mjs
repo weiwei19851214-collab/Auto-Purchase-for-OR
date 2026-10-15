@@ -167,3 +167,14 @@ test('new crypto attempts reject previous checkpoints including early import fai
     rmSync(dir, {recursive: true, force: true});
   }
 });
+
+test('confirmed payment cannot become insufficient-funds retryable despite stale checkout text', async () => {
+  const result = await execute({ok: true, result: {cryptoPurchase: {
+    amount: '150', insufficientFunds: true, paymentNotSubmitted: true,
+    checkoutState: {insufficientFunds: true}, walletPaymentConfirmation: {confirmed: true, confirmationClicked: true},
+  }}});
+  assert.equal(result.status, 'purchase_unverified');
+  assert.equal(result.details.cryptoPaymentNotStarted, false);
+  assert.equal(result.safeToContinue, false);
+  assert.equal(result.stopProfile, false);
+});

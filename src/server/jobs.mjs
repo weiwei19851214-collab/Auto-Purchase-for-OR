@@ -1,4 +1,4 @@
-import {existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {existsSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
 import {newId, nowIso} from './ids.mjs';
 import {
   makeJobFiles,
@@ -15,7 +15,10 @@ import {httpError} from './http-utils.mjs';
 import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
-import {writeCompletedRow} from './opom-client.mjs';
+import {writeCompletedRow, writeCryptoCompletedRow} from './opom-client.mjs';
+import {assertCryptoPaymentAllowed, getCryptoPayment, updateCryptoPayment} from './crypto-payment-ledger.mjs';
+import {holdWalletPasswords, validateWalletPasswords} from './crypto-wallet-secrets.mjs';
+import {CRYPTO_AMOUNT_FIELDS} from '../automation/lib/crypto-amount-fields.mjs';
 
 export function defaultRechargeJobName(rechargeCount, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -93,6 +96,9 @@ export async function createJob(db, payload) {
   const options = payload.options || {};
   const plan = await parsePlan(csvText, options);
   const readyCount = plan.rows.filter((row) => row.status === 'ready').length;
+  const passwords = validateWalletPasswords(payload.runtimeWalletPasswords, plan.rows);
+  assertNoRuntimeSecrets(options);
+  if (options.cryptoScheduled) assertScheduledCsvSafe(csvText);
   if (readyCount > 0) verifyLiveConfirmation(payload.liveConfirmationToken, {csvText, options});
   const jobId = newId('job');
   const jobOptions = {
@@ -100,8 +106,26 @@ export async function createJob(db, payload) {
     runId: options.runId || (runnerArgs(options).opomWriteback ? jobId : ''),
   };
   const jobName = payload.jobName || defaultRechargeJobName(readyCount);
+  const assertDispatch = () => {
+    if (typeof payload.shouldDispatch === 'function' && !payload.shouldDispatch()) throw httpError(409, 'Crypto plan changed before job dispatch');
+    if (runnerArgs(options).rechargeMode === 'crypto') {
+      for (const row of plan.rows.filter((item) => item.status === 'ready')) {
+        assertCryptoPaymentAllowed(db, row.opomAccountId || row.adsPowerUserId || row.id);
+        assertCryptoProfileAllowed(db, row.adsPowerUserId || row.id);
+      }
+    }
+  };
+  assertDispatch();
   const {csvPath, resultCsvPath} = await makeJobFiles(jobId, sourceFileName, csvText);
   const now = nowIso();
+  try { assertDispatch(); }
+  catch (error) {
+    rmSync(csvPath, {force: true});
+    rmSync(resultCsvPath, {force: true});
+    throw error;
+  }
+  // Install runtime credentials before a queued job can become visible to the worker.
+  holdWalletPasswords(jobId, passwords);
 
   const insertJob = db.prepare(`
     INSERT INTO jobs (
@@ -215,6 +239,30 @@ export async function createJob(db, payload) {
     addEvent(db, jobId, 'job.completed', 'no executable rows');
   }
   return jobDetails(db, jobId);
+}
+
+function assertNoRuntimeSecrets(value) {
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    if (/(?:wallet.*password|password.*wallet|seed.?phrase|mnemonic)/i.test(key) && child) {
+      throw httpError(400, 'Wallet credentials must use the runtime-only input');
+    }
+    assertNoRuntimeSecrets(child);
+  }
+}
+
+function assertCryptoProfileAllowed(db, profileId) {
+  if (!profileId) return;
+  const accounts = db.prepare("SELECT DISTINCT opom_account_id FROM job_rows WHERE (ads_power_user_id=? OR profile_id=?) AND opom_account_id<>''").all(profileId, profileId);
+  for (const row of accounts) assertCryptoPaymentAllowed(db, row.opom_account_id);
+}
+
+function assertScheduledCsvSafe(text) {
+  const [header = [], ...rows] = csv.parseCsv(text);
+  const sensitiveColumns = header.flatMap((name, index) => /password|seed|mnemonic|cvv|cvc/i.test(name) ? [index] : []);
+  if (rows.some((row) => sensitiveColumns.some((index) => String(row[index] || '').trim()))) {
+    throw httpError(400, 'Scheduled crypto CSV must not contain wallet or card credentials');
+  }
 }
 
 function publicOptions(options) {
@@ -491,7 +539,7 @@ function originalRowFromJobCsv(job, rawIndex) {
   return csv.rowObject(header, source);
 }
 
-function assertRepairableOpomWritebackRow(row, originalRow) {
+function assertRepairableOpomWritebackRow(row, originalRow, crypto = false) {
   if (row.status !== 'failed' || row.stage !== 'opom.writeback') {
     throw httpError(409, 'Only failed opom.writeback rows can be repaired without rerunning purchase');
   }
@@ -503,10 +551,12 @@ function assertRepairableOpomWritebackRow(row, originalRow) {
   }
   const required = [
     ['opom_account_id', plan.opomAccountId(originalRow)],
-    ['order_no', plan.ejhOrderNo(originalRow)],
-    ['card_no', plan.cardNumber(originalRow)],
-    ['exp_month', originalRow.exp_month],
-    ['exp_year', originalRow.exp_year],
+    ...(!crypto ? [
+      ['order_no', plan.ejhOrderNo(originalRow)],
+      ['card_no', plan.cardNumber(originalRow)],
+      ['exp_month', originalRow.exp_month],
+      ['exp_year', originalRow.exp_year],
+    ] : []),
   ];
   const missing = required.filter(([, value]) => !String(value || '').trim()).map(([name]) => name);
   if (missing.length) {
@@ -541,15 +591,23 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
   if (!args.opomWriteback) throw httpError(409, 'OPOM writeback is not enabled for this job');
 
   const originalRow = originalRowFromJobCsv(job, row.raw_index);
-  assertRepairableOpomWritebackRow(row, originalRow);
+  const crypto = args.rechargeMode === 'crypto';
+  assertRepairableOpomWritebackRow(row, originalRow, crypto);
+  if (crypto) {
+    const payment = getCryptoPayment(db, row.opom_account_id);
+    if (payment && (payment.job_id !== jobId || payment.row_id !== row.id || payment.phase !== 'credited')) {
+      throw httpError(409, 'Crypto writeback repair does not match the verified payment');
+    }
+  }
 
   const details = {
     ...plan.rowMetadata(originalRow),
+    ...Object.fromEntries(Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [key, row[column] || ''])),
     purchaseStatus: row.purchase_status,
     purchaseAmount: row.purchase_amount,
     balanceBefore: row.balance_before,
     balanceAfter: row.balance_after,
-    cardLast4: row.card_last4 || plan.cardLast4(plan.cardNumber(originalRow)),
+    cardLast4: crypto ? '' : (row.card_last4 || plan.cardNumber(originalRow).replace(/\D/g, '').slice(-4)),
     paymentMethodAction: row.payment_method_action || '',
     autoTopupStatus: row.auto_topup_status || 'skipped',
     autoTopupThreshold: row.auto_topup_threshold,
@@ -562,7 +620,8 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
 
   const now = nowIso();
   try {
-    const writeback = await writeCompletedRow(args, originalRow, details, {rowNumber});
+    const writeback = await (crypto ? writeCryptoCompletedRow : writeCompletedRow)(args, originalRow, details, {rowNumber});
+    if (crypto) updateCryptoPayment(db, row.opom_account_id, 'completed', details);
     details.opomCardWritebackStatus = writeback.cardStatus;
     details.opomResultWritebackStatus = writeback.resultStatus;
     db.prepare(`
@@ -626,6 +685,14 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
   }
 
   updateJobCounts(db, jobId);
+  if (crypto) {
+    const remaining = listRows(db, jobId);
+    const queued = remaining.some((item) => item.status === 'queued');
+    const failures = remaining.some((item) => !['completed', 'skipped', 'canceled', 'queued'].includes(item.status));
+    db.prepare('UPDATE jobs SET status=?,error=?,updated_at=? WHERE id=?').run(
+      queued ? 'blocked' : failures ? 'failed' : 'completed', queued ? 'crypto_schedule_paused' : '', nowIso(), jobId,
+    );
+  }
   await rewriteResumeResult(db, jobId);
   return {
     ok: true,
@@ -649,7 +716,7 @@ export async function resumePreview(db, jobId, payload = {}) {
     ok: true,
     job: publicJob(getJob(db, jobId)),
     csvAvailability,
-    ...previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow),
+    ...guardCryptoResume(db, job, rows, previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow)),
   };
 }
 
@@ -666,7 +733,7 @@ export async function resumeJob(db, jobId, payload = {}) {
   const csvAvailability = await ensureJobCsvAvailable(job);
   if (!csvAvailability.ok) throw httpError(409, csvAvailability.reason);
   const rows = listRows(db, jobId);
-  const preview = previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow);
+  const preview = guardCryptoResume(db, job, rows, previewRows(rows, startRowNumber, !!payload.includeRiskyRows, !!payload.onlyRow));
   if (!rows.some((row) => row.row_number === startRowNumber)) {
     throw httpError(400, `row ${startRowNumber} does not exist in this job`);
   }
@@ -767,6 +834,7 @@ async function rewriteResumeResult(db, jobId) {
       errorDetail: row.error_detail || '',
       message: row.message,
       details: {
+        ...Object.fromEntries(Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [key, row[column] || ''])),
         errorCode: row.error_code || '',
         purchaseStatus: row.purchase_status,
         purchaseAmount: row.purchase_amount,
@@ -803,4 +871,28 @@ async function rewriteResumeResult(db, jobId) {
     rowsByRawIndex: rows,
     runId: JSON.parse(job.options_json || '{}').runId || job.id,
   });
+}
+
+function guardCryptoResume(db, job, rows, preview) {
+  if (runnerArgs(JSON.parse(job.options_json || '{}')).rechargeMode !== 'crypto') return preview;
+  for (const list of ['queuedRows', 'alreadyQueuedRows']) {
+    preview[list] = preview[list].filter((item) => {
+      const row = rows.find((candidate) => candidate.id === item.rowId);
+      let reason = '';
+      if (row.purchase_status === 'verified') reason = '充值已到账，请仅修复 OPOM 写回，禁止再次付款';
+      else if (['purchase_unverified', 'manual_security_blocker', 'running'].includes(row.status)) reason = '请先核验付款或解除人工安全阻断，禁止直接重试';
+      else {
+        try {
+          assertCryptoPaymentAllowed(db, row.opom_account_id || row.ads_power_user_id || row.profile_id);
+          assertCryptoProfileAllowed(db, row.ads_power_user_id || row.profile_id);
+        }
+        catch { reason = '该账号存在未完成核验的虚拟币付款，请先处理原任务'; }
+      }
+      if (!reason) return true;
+      preview.skippedRiskyRows.push({...item, risky: true, reason});
+      return false;
+    });
+  }
+  preview.canResume = preview.queuedRows.length > 0 || preview.alreadyQueuedRows.length > 0;
+  return preview;
 }

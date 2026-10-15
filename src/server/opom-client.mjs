@@ -165,7 +165,10 @@ async function requestJson(args, path, options = {}) {
     : 1;
   const retryDelayMs = Number(args.opomRetryDelayMs || process.env.OPOM_RETRY_DELAY_MS || DEFAULT_OPOM_RETRY_DELAY_MS);
   let lastError = null;
+  const startedAt = Date.now();
+  let attempts = 0;
   for (let attempt = 1; attempt <= Math.max(1, retries); attempt += 1) {
+    attempts = attempt;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
     try {
@@ -177,8 +180,8 @@ async function requestJson(args, path, options = {}) {
           ...(options.headers || {}),
         },
       });
-      clearTimeout(timeout);
       const body = await readJsonResponse(res);
+      clearTimeout(timeout);
       if (!res.ok) {
         const message = responseErrorMessage(body) || `OPOM HTTP ${res.status}`;
         const detail = `${method} ${path} HTTP ${res.status}: ${message}`;
@@ -211,7 +214,8 @@ async function requestJson(args, path, options = {}) {
   const cause = lastError?.name === 'AbortError'
     ? `timeout after ${timeoutMs}ms`
     : (lastError?.cause?.code || lastError?.cause?.message || lastError?.message || 'request failed');
-  throw new Error(redact(`OPOM network failed at ${baseUrl}: ${cause}`));
+  const endpoint = String(path).split('?')[0];
+  throw Object.assign(new Error(redact(`OPOM network failed at ${baseUrl}: ${cause} (${method} ${endpoint}; attempts=${attempts}; elapsedMs=${Date.now()-startedAt})`)), {opomNetworkFailure:true});
 }
 
 function sleep(ms) {
@@ -252,6 +256,10 @@ export async function fetchRechargeAccounts(args, input = {}) {
   if (input.cursor) params.set('cursor', String(input.cursor));
   if (input.sort) params.set('sort', String(input.sort));
   const body = await requestJson(args, `/api/v1/recharge/accounts?${params.toString()}`);
+  if (input.strictResponse && (body?.ok === false || body?.success === false || body?.error
+    || !Array.isArray(body?.data) || body.data.length > input.limit)) {
+    throw new Error('OPOM account queue response is invalid or unsuccessful');
+  }
   return {
     accounts: Array.isArray(body.data) ? body.data : [],
     nextCursor: body.nextCursor || body.data?.nextCursor || null,
@@ -465,6 +473,52 @@ export async function writeCompletedRow(args, row, details, context = {}) {
       ? {secondaryFailures: [...secondaryFailures, ...(result.secondaryFailures || [])]}
       : {}),
   };
+}
+
+// 虚拟币只写充值结果，不修改银行卡；负余额必须原样保留。
+export async function writeCryptoCompletedRow(args, row, details, context = {}) {
+  const accountId = plan.opomAccountId(row);
+  if (!args.opomWriteback || !accountId) throw new Error('Crypto completion requires OPOM writeback and account ID');
+  if (details.purchaseStatus !== 'verified') throw new Error('Crypto writeback requires verified purchase');
+  const amountUsd = numberOrUndefined(details.purchaseAmount);
+  const balanceBeforeUsd = numberOrUndefined(details.balanceBefore);
+  const balanceAfterUsd = numberOrUndefined(details.balanceAfter);
+  if (!(amountUsd > 0) || balanceBeforeUsd === undefined || balanceAfterUsd === undefined) {
+    throw new Error('Crypto writeback requires purchase amount and balance evidence');
+  }
+  const runId = args.runId || context.runId;
+  if (!runId) throw new Error('Crypto writeback requires a stable run ID');
+  const body = {
+    idempotencyKey: `crypto_result:${runId}:${accountId}:${context.rowNumber || ''}:completed`,
+    opomAccountId: accountId,
+    ...(safeLoginEmail(row) ? {loginEmail: safeLoginEmail(row)} : {}),
+    status: 'completed',
+    stage: 'closed_loop.complete',
+    rechargeMode: 'crypto',
+    amountUsd,
+    balanceBeforeUsd,
+    balanceAfterUsd,
+    ...adsPowerPayload(row, details),
+    occurredAt: context.occurredAt || new Date().toISOString(),
+  };
+  const path = `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`;
+  const secondaryFailures = [];
+  for (const target of writebackTargets(args)) {
+    try {
+      const response = await requestJson(argsForWritebackTarget(args, target), path, {
+        method: 'POST', idempotent: true, body: JSON.stringify(body),
+      });
+      if (response?.ok === false || response?.success === false || response?.error
+        || response?.data?.ok === false || response?.data?.success === false
+        || response?.raw || /^(failed|error)$/i.test(response?.status || '')) {
+        throw new Error('OPOM returned an unsuccessful crypto writeback response');
+      }
+    } catch (error) {
+      if (target.required) throw writebackError(error, {cardStatus: 'skipped', resultStatus: 'failed'});
+      secondaryFailures.push(secondaryWritebackFailure(target, path, error));
+    }
+  }
+  return {cardStatus: 'skipped', resultStatus: 'written', ...(secondaryFailures.length ? {secondaryFailures} : {})};
 }
 
 export async function writeRowResult(args, row, details, context = {}) {

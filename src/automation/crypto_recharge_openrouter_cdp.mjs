@@ -1498,6 +1498,9 @@ export async function prepareOkxWallet(input, adapters = {}) {
     for (let transition = 0; transition < 8; transition += 1) {
       current = await acquire(input, allowed, 20000);
       const stage = current.state.stage;
+      if (input.cryptoScheduled && ['welcome','method','words','password_choice','password_setup','post_password_welcome'].includes(stage)) {
+        throw new Error('manual_security_blocker: scheduled_crypto_requires_initialized_wallet');
+      }
       if (stage === 'ready') return {status: 'ready'};
       if (stage === 'transaction_confirmation') {
         const observedTransactionState = current.state.transactionState || {};
@@ -1566,7 +1569,7 @@ export async function prepareOkxWallet(input, adapters = {}) {
     }
     throw new Error('manual_security_blocker: crypto_wallet_import_page_changed');
   } catch (error) {
-    if (/^manual_security_blocker: crypto_wallet_(?:import_|password_|connect_)/.test(error.message || '')) throw error;
+    if (/^manual_security_blocker: crypto_wallet_(?:import_|password_|connect_)|^manual_security_blocker: scheduled_crypto_/.test(error.message || '')) throw error;
     // 扩展内部异常不得将浏览器错误（可能包含输入内容）写入任务日志。
     throw new Error('manual_security_blocker: crypto_wallet_import_inspection_failed');
   } finally {
@@ -1719,65 +1722,8 @@ export async function clickOkxTransactionButton(wallet, expectedStage, label, ex
 }
 
 export async function continueOkxRiskWarning(input, initial, expected, adapters = {}) {
-  if (input.confirmWalletPayment !== true) {
-    throw new Error('manual_security_blocker: crypto_wallet_transaction_confirmation_not_authorized');
-  }
-  let active = initial;
-  let needsReconnect = false;
-  const inspect = adapters.inspect || inspectOkxTransactionStage;
-  const inspectCurrent = async () => {
-    try {
-      // Re-read the authoritative target every time: popup replacement must not
-      // turn an old page's DOM into permission to click a different window.
-      const targets = (adapters.targets || getTargets)(input.debugPort)
-        .filter(target => String(target.url || '').startsWith('chrome-extension://' + OKX_EXTENSION_ID + '/'));
-      const index = selectAuthoritativeOkxTargetIndex(targets);
-      if (index < 0) return {stage: 'unknown', originOk: false, targetAmbiguous: true};
-      const target = targets[index];
-      if (needsReconnect || target.id !== active.target?.id) {
-        active.wallet.close();
-        const wallet = await (adapters.connect || cdp)(target.webSocketDebuggerUrl);
-        active = {wallet, target};
-        await wallet.send('Runtime.enable');
-        needsReconnect = false;
-      }
-      active.state = {...await inspect(active.wallet, expected), targetId: target.id};
-      return active.state;
-    } catch {
-      needsReconnect = true;
-      return {stage: 'unknown', originOk: false, readError: true};
-    }
-  };
-  try {
-    const result = await continueRiskWarning({
-      inspect: inspectCurrent,
-      capture: entry => captureRiskEvidence(active.wallet, input.confirmationDebugDir, {...entry, targetId: active.target?.id}),
-      trigger: async method => {
-        if (input.confirmWalletPayment !== true) throw new Error('risk_confirmation_not_authorized');
-        if (method === 'dom') return clickRiskDom(active.wallet);
-        if (method === 'cdp') return clickOkxTransactionButton(active.wallet, 'risk_warning', 'Continue (Unsafe)', expected);
-        return clickRiskPlaywright(input, active.target.id, inspectCurrent);
-      },
-      sleep: adapters.sleep || sleep,
-      now: adapters.now || Date.now,
-    });
-    try {
-      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-resolved', {
-        ...result, transitionVerified: true, observedAt: new Date().toISOString(),
-      });
-    } catch { result.evidenceFailures += 1; }
-    active.riskContinuation = result;
-    return active;
-  } catch (error) {
-    try {
-      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-failed', {
-        attempts: error.attempts || [], evidenceFailures: error.evidenceFailures || 0,
-        transitionVerified: false, observedAt: new Date().toISOString(),
-      });
-    } catch { error.evidenceFailures = (error.evidenceFailures || 0) + 1; }
-    finally { active.wallet.close(); }
-    throw error;
-  }
+  // Transaction risk warnings require a person; an unattended payment grant is not permission to bypass them.
+  throw new Error('manual_security_blocker: crypto_wallet_risk_warning_requires_manual_review');
 }
 
 export async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warning'], timeoutMs = 30000, adapters = {}) {
@@ -1863,6 +1809,7 @@ export async function acquireOkxTransactionTarget(input, expected, stages = ['ri
 }
 
 export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '', options = {}, adapters = {}) {
+  if (input.cryptoWalletConfirmationSubmitted) throw new Error('purchase_unverified: wallet confirmation was already attempted');
   const expected = {amount, asset, network};
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
   const acquire = adapters.acquire || acquireOkxTransactionTarget;
@@ -1891,6 +1838,7 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
       networkMatched: state.hasNetwork,
       network: state.network,
     });
+    input.cryptoWalletConfirmationSubmitted = true;
     await click(wallet, 'confirm_send', 'Confirm', expected);
     writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-confirm-clicked', {
       label: 'Confirm',
@@ -1945,6 +1893,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
   const confirmWalletPaymentFn = adapters.confirmWalletPayment || confirmOkxWalletPayment;
   // Purchase 创建 Coinbase checkout；钱包风险提示和交易 Confirm 仅在任务显式开启时自动点击。
   if (input.gmailVerification) input.gmailVerification.challengeStartedAt = Date.now();
+  input.cryptoPaymentMayHaveStarted = true;
   const purchaseClick = await submitPurchase(page);
   const checkoutTarget = await openPaymentCheckout(input, page);
   const checkout = checkoutTarget.checkout;
@@ -1974,6 +1923,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
           walletConnectionRequired: false,
           walletConfirmationRequired: false,
           insufficientFunds: true,
+          paymentNotSubmitted: input.cryptoWalletConfirmationSubmitted !== true,
           paymentFailed: checkoutState.paymentFailed === true,
           walletPaymentConfirmation: {confirmed: false},
         },
@@ -2026,6 +1976,9 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
     if (input.confirmWalletPayment === true) {
       const checkoutStateAfterLaunch = await inspectCheckout(checkout, {timeoutMs: 1000});
       if (checkoutStateAfterLaunch.insufficientFunds === true) {
+        if (walletPaymentConfirmation.confirmed || walletPaymentConfirmation.confirmationClicked || input.cryptoWalletConfirmationSubmitted) {
+          throw new Error('purchase_unverified: insufficient funds text appeared after wallet confirmation');
+        }
         const okxTargets = await inspectTargets(input.debugPort);
         return {
           checkout,
@@ -2040,6 +1993,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
             walletConnectionRequired: false,
             walletConfirmationRequired: false,
             insufficientFunds: true,
+          paymentNotSubmitted: input.cryptoWalletConfirmationSubmitted !== true,
             paymentFailed: checkoutStateAfterLaunch.paymentFailed === true,
             walletPaymentConfirmation: {confirmed: false},
           },
@@ -2115,6 +2069,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
           walletConnectionSubmitted: wallet.status === 'connect_submitted',
           walletConfirmationRequired: checkoutState.insufficientFunds !== true && checkoutState.paymentFailed !== true,
           insufficientFunds: checkoutState.insufficientFunds === true,
+          paymentNotSubmitted: input.cryptoWalletConfirmationSubmitted !== true && !walletPaymentConfirmation.confirmed && !walletPaymentConfirmation.confirmationClicked,
           paymentFailed: checkoutState.paymentFailed === true,
           walletPaymentConfirmation,
         },
@@ -2139,6 +2094,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
             walletConnectionRequired: false,
             walletConfirmationRequired: false,
             insufficientFunds: true,
+          paymentNotSubmitted: input.cryptoWalletConfirmationSubmitted !== true,
             paymentFailed: checkoutStateBeforePayment.paymentFailed === true,
             walletPaymentConfirmation: {confirmed: false},
           },
@@ -2171,6 +2127,9 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       );
     }
     const checkoutState = await inspectCheckout(checkout, {timeoutMs: walletPaymentConfirmation.confirmed ? 60000 : 10000, requirePaymentCompleted: walletPaymentConfirmation.confirmed, confirmationDebugDir: input.confirmationDebugDir});
+    if (checkoutState.insufficientFunds && (walletPaymentConfirmation.confirmed || walletPaymentConfirmation.confirmationClicked || input.cryptoWalletConfirmationSubmitted)) {
+      throw new Error('purchase_unverified: insufficient funds text appeared after wallet confirmation');
+    }
     const okxTargets = await inspectTargets(input.debugPort);
     return {
       checkout,
@@ -2190,6 +2149,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       },
     };
   } catch (error) {
+    error.cryptoPaymentNotStarted = input.cryptoPaymentMayHaveStarted !== true;
     error.cryptoAmounts = pickCryptoAmounts(input.cryptoAmounts);
     checkout.close();
     throw error;
@@ -2262,6 +2222,7 @@ async function runCryptoRecharge(rawInput) {
       elapsedMs: Date.now() - startedAt,
     };
   } catch (error) {
+    error.cryptoPaymentNotStarted = input.cryptoPaymentMayHaveStarted !== true;
     error.cryptoAmounts = pickCryptoAmounts(input.cryptoAmounts);
     throw error;
   } finally {
@@ -2281,6 +2242,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   .then((result) => console.log(JSON.stringify(result)))
   .catch((error) => {
     console.error(JSON.stringify({ok: false, error: redact(error.message || error),
+      cryptoPaymentNotStarted: error.cryptoPaymentNotStarted === true,
       cryptoAmounts: pickCryptoAmounts(error.cryptoAmounts)}));
     process.exitCode = 1;
   });

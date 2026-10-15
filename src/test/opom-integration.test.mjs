@@ -498,6 +498,35 @@ test('resolveOpomAccountsPayload ignores OPOM cardBinding when a payment card CS
   });
 });
 
+test('queue socket failures report endpoint and exhausted attempts without credentials', async () => {
+  let calls=0;
+  await withFetch(async () => {
+    calls+=1;
+    throw Object.assign(new TypeError('fetch failed'), {cause:{code:'UND_ERR_SOCKET'}});
+  }, async () => {
+    await assert.rejects(() => readyToRechargePayload({
+      opomBaseUrl:'http://opom.local',opomRechargeToken:'private-test-token',
+      status:'card_switch',group:'VIP',opomRequestRetries:2,opomRetryDelayMs:1,
+    }), (error) => {
+      assert.match(error.message,/UND_ERR_SOCKET.*GET \/api\/v1\/recharge\/accounts; attempts=2; elapsedMs=\d+/);
+      assert.equal(error.message.includes('private-test-token'),false);
+      return true;
+    });
+    assert.equal(calls,2);
+  });
+});
+
+test('OPOM timeout remains active while reading response body', async () => {
+  await withFetch(async (_url, {signal}) => ({ok:true,text:() => new Promise((_resolve,reject) => {
+    signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{name:'AbortError'})),{once:true});
+  })}), async () => {
+    await assert.rejects(() => readyToRechargePayload({
+      opomBaseUrl:'http://opom.local',opomRechargeToken:'test-token',
+      opomRequestTimeoutMs:1000,opomRequestRetries:1,
+    }), /timeout after 1000ms.*attempts=1/);
+  });
+});
+
 test('resolveOpomAccountsPayload reports OPOM network failures clearly', async () => {
   await withFetch(async () => {
     const error = new TypeError('fetch failed');

@@ -1580,3 +1580,9 @@ body[data-page="execution"] .event-line span:last-child {
     animation-iteration-count: 1 !important;
   }
 }
+
+.crypto-schedule-actions { flex-wrap: wrap; padding-bottom: 16px; }
+#cryptoScheduleState { white-space: normal; overflow-wrap: anywhere; }
+/* Keep durable scheduler history readable inside the settings sheet. */
+.crypto-schedule-history { max-height: 360px; overflow: auto; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+.crypto-schedule-history > details, .crypto-schedule-history > p { margin: 10px 0; }

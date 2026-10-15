@@ -138,13 +138,16 @@ async function handle(req, res) {
 
   if (pathname === '/api/scheduler') {
     requireSession(req);
+    res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
-      sendJson(res, 200, autoRechargeScheduler.getState('bank_card'));
+      const mode = new URL(req.url, 'http://localhost').searchParams.get('rechargeMode') || 'bank_card';
+      if (!['bank_card', 'crypto'].includes(mode)) throw httpError(400, 'Invalid rechargeMode');
+      sendJson(res, 200, autoRechargeScheduler.getState(mode));
       return;
     }
     if (req.method === 'POST') {
       const payload = await readJsonBody(req);
-      sendJson(res, 200, autoRechargeScheduler.update(payload));
+      sendJson(res, 200, await autoRechargeScheduler.update(payload));
       return;
     }
   }
@@ -284,5 +287,5 @@ async function serveStatic(res, pathname) {
 }
 
 server.listen(DEFAULT_SERVER_PORT, '127.0.0.1', () => {
-  console.log(`OpenRouter recharge runner listening on http://127.0.0.1:${DEFAULT_SERVER_PORT}`);
+  console.log(`OpenRouter recharge runner listening on http://127.0.0.1:${server.address().port}`);
 });

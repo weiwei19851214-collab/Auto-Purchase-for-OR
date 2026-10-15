@@ -225,3 +225,21 @@ adspower_status_target=waived_by_user
 - OPOM row result writeback 成功。
 - Result CSV 已生成，且不包含 CVV、Cookie、Session、Token、AK 或 EJH 原始诊断 payload。
 - AdsPower 状态写回要么明确豁免，并带有 `adspower_tag_status=skipped_user_waived` 和 `adspower_status_target=waived_by_user`，要么通过明确授权的操作模式（`group_move`、`remark_append` 或 `remark_append_v2`）写入，并且具体 `adspower_status_target` 在 result CSV 中可见。
+
+
+## 虚拟币定时计划操作与恢复
+
+1. 在“设置”配置当前 OPOM / AdsPower 连接，然后展开“虚拟币自动充值计划”。
+2. 选择北京时间的每日时间点、每小时分钟或固定间隔，填写固定充值额（默认 $150）。
+3. 输入已初始化 OKX 钱包密码，保存计划。密码仅存服务内存，响应只显示配置状态。
+4. 确认计划参数后点击“启用自动付款”，确认持续付款及 OPOM 写回授权。
+   保存、切换充值通道或旧自动准备授权都不等于启用。
+5. 观察设置内下一次执行、批次数和处理数。每轮固定拉取 VIP 的 CARD_SWITCH 与
+   OVERDUE，两队列分页完整后去重，再按 50 个一批串行处理；拉取失败不使用部分清单。
+6. 停用会停止后续派发，已经提交付款的行继续到账核验及写回。服务重启不补跑时间点，
+   计划暂停，重新输入密码后才能启用。
+7. 发现 `purchase_unverified`、安全验证或钱包未初始化时保留现场，先核查付款证据。
+   不导入助记词、不重复付款；已到账但 OPOM 写回失败仅重试写回。
+
+UI 开发验收运行 `node scripts/ui-crypto-scheduler-smoke.mjs`（全模拟，无真实付款）。
+真实启用计划和外部支付仍需当前任务中的明确授权。

@@ -4,6 +4,7 @@ import {DATA_DIR, DB_PATH} from './config.mjs';
 import {nowIso} from './ids.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {CRYPTO_AMOUNT_FIELDS} from '../automation/lib/crypto-amount-fields.mjs';
+import {getCryptoPayment} from './crypto-payment-ledger.mjs';
 
 export function openDatabase(path = DB_PATH) {
   mkdirSync(DATA_DIR, {recursive: true});
@@ -115,6 +116,25 @@ function migrate(db) {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS crypto_scheduler_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+      status TEXT NOT NULL, message TEXT NOT NULL DEFAULT '', cycle_id TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS crypto_scheduler_cycles (
+      id TEXT PRIMARY KEY, slot TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL DEFAULT '[]', total_count INTEGER NOT NULL DEFAULT 0,
+      processed_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS crypto_scheduler_batches (
+      id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL REFERENCES crypto_scheduler_cycles(id),
+      batch_index INTEGER NOT NULL, rows_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+      job_id TEXT NOT NULL DEFAULT '', UNIQUE(cycle_id, batch_index)
+    );
+    CREATE TABLE IF NOT EXISTS crypto_scheduler_accounts (
+      cycle_id TEXT NOT NULL REFERENCES crypto_scheduler_cycles(id), account_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL REFERENCES crypto_scheduler_batches(id),
+      status TEXT NOT NULL DEFAULT 'pending', message TEXT NOT NULL DEFAULT '', PRIMARY KEY(cycle_id, account_id)
+    );
     CREATE TABLE IF NOT EXISTS scheduler_state (
       id TEXT PRIMARY KEY,
       enabled INTEGER NOT NULL DEFAULT 0,
@@ -127,6 +147,8 @@ function migrate(db) {
       updated_at TEXT NOT NULL
     );
   `);
+  const schedulerAccountColumns = db.prepare('PRAGMA table_info(crypto_scheduler_accounts)').all().map((column)=>column.name);
+  for (const column of ['status','message']) if (!schedulerAccountColumns.includes(column)) db.exec(`ALTER TABLE crypto_scheduler_accounts ADD COLUMN ${column} TEXT NOT NULL DEFAULT '';`);
   const columns = db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name);
   if (!columns.includes('options_json')) {
     db.exec("ALTER TABLE jobs ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}';");
@@ -261,7 +283,7 @@ export function recoverInterruptedWork(db) {
   const detail = 'server restarted during row execution; verify balance before rerun';
   const error = simplifyError(detail, {status: 'purchase_unverified', stage: 'worker.interrupted'});
   const runningRows = db.prepare(`
-    SELECT id, job_id FROM job_rows
+    SELECT * FROM job_rows
     WHERE status = 'running'
   `).all();
   const affectedJobIds = new Set(runningRows.map((row) => row.job_id));
@@ -278,6 +300,20 @@ export function recoverInterruptedWork(db) {
       WHERE status = 'running'
     `).run(error.errorCode, error.message, error.detail, now, now);
     for (const row of runningRows) {
+      const payment = getCryptoPayment(db, row.opom_account_id || row.ads_power_user_id || row.profile_id);
+      if (payment?.job_id === row.job_id && payment.row_id === row.id && ['credited', 'completed'].includes(payment.phase)) {
+        const evidence = JSON.parse(payment.details_json || '{}');
+        const complete = payment.phase === 'completed';
+        const writebackEnabled = JSON.parse(getJob(db, row.job_id)?.options_json || '{}').opomWriteback === true;
+        db.prepare(`UPDATE job_rows SET status=?,stage=?,purchase_status=?,purchase_amount=?,balance_before=?,balance_after=?,
+          ${Object.values(CRYPTO_AMOUNT_FIELDS).map((column) => `${column}=?`).join(',')},
+          opom_result_writeback_status=?,error_code='',message=?,error_detail='' WHERE id=?`).run(
+          complete ? 'completed' : 'failed', complete ? 'closed_loop.complete' : 'opom.writeback',
+          evidence.purchaseStatus || 'verified', String(evidence.purchaseAmount ?? ''), String(evidence.balanceBefore ?? ''), String(evidence.balanceAfter ?? ''),
+          ...Object.keys(CRYPTO_AMOUNT_FIELDS).map((key) => String(evidence[key] ?? '')),
+          complete ? (writebackEnabled ? 'written' : 'skipped') : 'failed', complete ? 'Recovered completed crypto payment' : '充值已到账，重启后仅需修复 OPOM 写回，禁止再次付款', row.id,
+        );
+      }
       addEvent(db, row.job_id, 'row.interrupted', error.message, {
         errorCode: error.errorCode,
         errorDetail: error.detail,

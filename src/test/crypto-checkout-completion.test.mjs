@@ -23,45 +23,12 @@ test('risk continuation completes before the final Confirm and never retries the
   assert.deepEqual(events, ['risk-resolved', 'confirm_send:Confirm', 'close']);
 });
 
-test('risk continuation without explicit wallet permission never inspects or clicks', async () => {
-  await assert.rejects(continueOkxRiskWarning({}, {}, {}, {
-    targets() { assert.fail('must not inspect browser'); },
-  }), /confirmation_not_authorized/);
-});
-
-test('risk continuation rebinds a replaced popup and does not click its confirmation page', async () => {
-  const closed = [];
-  const old = {wallet: {close() { closed.push('old'); }}, target: {id: 'old'}};
-  const replacement = {async send(method) { assert.equal(method, 'Runtime.enable'); }, close() { closed.push('new'); }};
-  const target = {id: 'new', type: 'page', url: 'chrome-extension://mcohilncbfahbmgdjkbpemcciiolgcge/notification.html', webSocketDebuggerUrl: 'ws://new'};
-  const result = await continueOkxRiskWarning({confirmWalletPayment: true}, old, {}, {
-    targets: () => [target],
-    connect: async url => { assert.equal(url, 'ws://new'); return replacement; },
-    inspect: async () => ({stage: 'confirm_send', originOk: true, hasAmount: true, hasNetwork: true}),
-  });
-  assert.equal(result.wallet, replacement);
-  assert.equal(result.state.targetId, 'new');
-  assert.deepEqual(closed, ['old']);
-});
-
-test('diagnostic write failure preserves the blocker and closes a replacement wallet connection', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'risk-diagnostic-failure-'));
-  const file = join(dir, 'file');
-  writeFileSync(file, 'not a directory');
-  const closed = [];
-  try {
-    const initial = {wallet: {close() { closed.push('old'); }}, target: {id: 'old'}};
-    await assert.rejects(continueOkxRiskWarning({confirmWalletPayment: true, confirmationDebugDir: join(file, 'logs')}, initial, {}, {
-      targets: () => [{id: 'new', type: 'page', url: 'chrome-extension://mcohilncbfahbmgdjkbpemcciiolgcge/notification.html', webSocketDebuggerUrl: 'ws://new'}],
-      connect: async () => ({async send() { return {}; }, close() { closed.push('new'); }}),
-      inspect: async () => ({stage: 'unknown', originOk: true}),
-    }), error => {
-      assert.match(error.message, /manual_security_blocker: crypto_wallet_transaction_page_changed/);
-      assert.equal(error.evidenceFailures, 2);
-      return true;
-    });
-    assert.deepEqual(closed, ['old', 'new']);
-  } finally { rmSync(dir, {recursive: true, force: true}); }
+test('risk warning always blocks automatic continuation and preserves browser state', async () => {
+  for (const confirmed of [false, true]) {
+    await assert.rejects(continueOkxRiskWarning({confirmWalletPayment: confirmed}, {}, {}, {
+      targets() { assert.fail('must not inspect or mutate browser'); },
+    }), /manual_security_blocker: crypto_wallet_risk_warning_requires_manual_review/);
+  }
 });
 
 function fixture(origin = 'https://payments.coinbase.com') {

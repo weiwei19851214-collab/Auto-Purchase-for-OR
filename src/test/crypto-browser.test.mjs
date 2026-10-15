@@ -85,7 +85,7 @@ test('crypto browser result pauses the batch at the OKX wallet confirmation boun
   assert.equal(result.stage, 'crypto.wallet_confirmation');
   assert.match(result.message, /当前钱包界面/);
   assert.equal(result.safeToContinue, false);
-  assert.equal(result.stopProfile, true);
+  assert.equal(result.stopProfile, false);
   assert.equal(result.details.purchaseAmount, '150');
 });
 
@@ -130,9 +130,9 @@ test('Coinbase Try again is a terminal crypto payment failure and is not retried
   assert.equal(result.status, 'failed');
   assert.equal(result.stage, 'crypto.payment_failed');
   assert.equal(result.errorCode, 'crypto_payment_failed_try_again');
-  assert.match(result.message, /充值失败，可能是余额不足/);
-  assert.equal(result.safeToContinue, true);
-  assert.equal(result.stopProfile, true);
+  assert.match(result.message, /付款结果需核验/);
+  assert.equal(result.safeToContinue, false);
+  assert.equal(result.stopProfile, false);
 });
 
 test('worker keeps the crypto amount in the user-facing block reason', () => {
@@ -153,13 +153,14 @@ test('crypto execution page labels the result message column as block reason', (
   assert.match(script, /rechargeMode === 'crypto' \? '阻塞原因' : '消息'/);
 });
 
-test('bank-card and crypto scheduler controls live on the channel page instead of generic settings', () => {
+test('crypto scheduler settings are independent while the bank-card channel control remains', () => {
   const html = readFileSync(join(process.cwd(), 'public/index.html'), 'utf8');
   const script = readFileSync(join(process.cwd(), 'public/app.js'), 'utf8');
   const settingsStart = html.indexOf('id="settingsDialog"');
   const settingsEnd = html.indexOf('</dialog>', settingsStart);
   const settingsHtml = html.slice(settingsStart, settingsEnd);
-  assert.doesNotMatch(settingsHtml, /autoRechargeEnabled|自动充值计划/);
+  assert.match(settingsHtml, /cryptoScheduleType/);
+  assert.match(settingsHtml, /cryptoSchedulePassword/);
   assert.match(html, /id="autoRechargePanel"/);
   assert.match(html, /id="autoRechargeChannel">银行卡/);
   assert.ok(script.includes("const modeLabel = crypto ? '虚拟币' : '银行卡';"));
@@ -170,7 +171,7 @@ test('bank-card and crypto scheduler controls live on the channel page instead o
 test('crypto recharge defaults the account source to CSV when no mode draft exists', () => {
   const script = readFileSync(join(process.cwd(), 'public/app.js'), 'utf8');
   assert.match(script, /state.source = draft?.source || 'csv';/);
-  assert.match(script, /state.source = 'opom';/);
+  assert.doesNotMatch(script, /state\.rows = .*preparedRows/);
 });
 
 test('crypto fixed amount controls reach the task options and toggle the visible rule fields', () => {

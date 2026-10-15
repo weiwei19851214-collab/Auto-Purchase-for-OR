@@ -527,6 +527,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   });
   const row = csv.rowObject(header, dataRows[rawIndex]);
   const args = runnerArgs(options);
+  args.runtimeAbortSignal = options.runtimeAbortSignal;
   const automationScript = adapters.automationScript || automationScriptForRechargeMode(args.rechargeMode);
   const automationLogDir = ensureAutomationLogDir(options.runtimeLog, rawIndex);
   // 虚拟币充值与银行卡状态完全无关，不能被 OPOM 旧绑卡状态阻断。
@@ -564,7 +565,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       status: status.STATUSES.MISSING_FIELDS,
       stage: 'input.missing_fields',
     });
-    const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row))};
+    const details = {...plan.rowMetadata(row), automationLogDir, cardLast4: commonAdapter.cardLast4(plan.cardNumber(row)),
+      ...(args.rechargeMode === 'crypto' ? {cryptoPaymentNotStarted: true} : {})};
     await writeNonCompletedOpomResult(opomAdapter, args, row, details, {
       rowNumber: rawIndex + 2,
       status: status.STATUSES.MISSING_FIELDS,
@@ -590,7 +592,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   if (args.rechargeMode === 'crypto' && options.cryptoAccountingAttemptId) {
     task.cryptoAccountingAttemptId = options.cryptoAccountingAttemptId;
   }
-  if (args.rechargeMode === 'crypto' && options.runtimeSeedPhrase) {
+  task.cryptoScheduled = options.cryptoScheduled === true;
+  if (args.rechargeMode === 'crypto' && !options.cryptoScheduled && options.runtimeSeedPhrase) {
     // 只交给当前账号子进程，绝不加入 row/details/result CSV 或 options_json。
     task.walletSeedPhrase = options.runtimeSeedPhrase;
   }
@@ -609,12 +612,17 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const outcome = adapters.runClosedLoopChildAsync
     ? await adapters.runClosedLoopChildAsync(automationScript, task, args)
     : await runClosedLoopChildAsync(automationScript, task, args, childRunnerAdapter, commonAdapter);
+  if (options.runtimeAbortSignal?.aborted) return {
+    status: 'purchase_unverified', stage: 'crypto.timeout', message: '虚拟币执行已中止，请核验本次付款',
+    safeToContinue: false, stopProfile: false, details: {},
+  };
   const cryptoAmounts = args.rechargeMode === 'crypto' ? cryptoAmountsFromResult(outcome.result) : {};
   let profileStop = {attempted: false};
   if (outcome.ok) {
     if (args.rechargeMode === 'crypto') {
       const cryptoPurchase = outcome.result?.cryptoPurchase || {};
-      const insufficientFunds = cryptoPurchase.insufficientFunds === true || cryptoPurchase.checkoutState?.insufficientFunds === true;
+      const confirmationSubmitted = cryptoPurchase.walletPaymentConfirmation?.confirmed === true || cryptoPurchase.walletPaymentConfirmation?.confirmationClicked === true;
+      const insufficientFunds = !confirmationSubmitted && (cryptoPurchase.insufficientFunds === true || cryptoPurchase.checkoutState?.insufficientFunds === true);
       const paymentFailed = cryptoPurchase.paymentFailed === true || cryptoPurchase.checkoutState?.paymentFailed === true;
       const walletConnectionRequired = cryptoPurchase.walletConnectionRequired === true;
       const walletConfirmationRequired = cryptoPurchase.walletConfirmationRequired === true;
@@ -622,7 +630,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         && cryptoPurchase.walletPaymentConfirmation?.confirmed === true;
       const terminalFailure = paymentFailed || insufficientFunds;
       const shouldStopCryptoProfile = args.stopProfiles;
-      if (shouldStopCryptoProfile && terminalFailure) {
+      if (shouldStopCryptoProfile && insufficientFunds) {
         profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
       }
       if (paymentCompleted) {
@@ -658,17 +666,12 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       const cryptoMessage = insufficientFunds
         ? insufficientFundsMessage
         : (paymentFailed
-          ? '充值失败，可能是余额不足：Coinbase 页面显示 Try again，已关闭浏览器并继续下一任务'
+          ? 'Coinbase 显示 Try again，付款结果需核验；已暂停并保留浏览器'
           : (walletConnectionRequired
             ? 'Coinbase 正在等待 OKX 钱包连接，请在当前钱包窗口核对 Coinbase 来源后人工点击 Connect'
             : (walletConfirmationRequired
               ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
               : '虚拟币支付页面已准备，但尚未确认钱包状态')));
-      // 充值未完成时，无论是余额不足、钱包确认阻塞还是支付状态无法验证，都关闭当前 profile。
-      // 钱包弹窗可能仍处于可付款状态，不能让失败任务把浏览器留在后台。
-      if (shouldStopCryptoProfile && !profileStop.attempted) {
-        profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
-      }
       return {
         status: terminalFailure
           ? status.STATUSES.FAILED
@@ -685,11 +688,12 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           balanceBefore: cryptoPurchase.beforeBalance?.balance ?? '',
           balanceAfter: '',
           cryptoPurchase,
+          cryptoPaymentNotStarted: insufficientFunds && cryptoPurchase.paymentNotSubmitted === true,
           automationLogDir,
         },
         // 钱包余额是整个批次的共享前提，余额不足时暂停任务，避免后续账号继续进入支付流程。
-        safeToContinue: insufficientFunds ? false : terminalFailure,
-        stopProfile: true,
+        safeToContinue: false,
+        stopProfile: insufficientFunds,
         profileStop,
       };
     }
@@ -781,7 +785,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     errorCode: error.errorCode,
   });
   Object.assign(failureDetails, cryptoAmounts);
-  if (args.stopProfiles && contract.stopProfile) {
+  if (outcome.result?.cryptoPaymentNotStarted === true) failureDetails.cryptoPaymentNotStarted = true;
+  if (args.stopProfiles && contract.stopProfile && args.rechargeMode !== 'crypto') {
     profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }
   return {
@@ -915,6 +920,7 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
     if (args.scopePaymentMethod && args.removeExisting) childArgs.push('--remove-existing');
   }
 
+  if (args.runtimeAbortSignal?.aborted) return {ok: false, error: 'purchase_unverified: crypto execution aborted'};
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -930,9 +936,12 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
         ADSPOWER_START_TIMEOUT_MS: args.adspowerStartTimeoutMs || process.env.ADSPOWER_START_TIMEOUT_MS || '',
       },
     });
+    const abort = () => { timedOut = true; child.kill('SIGKILL'); };
+    args.runtimeAbortSignal?.addEventListener('abort', abort, {once: true});
+    if (args.runtimeAbortSignal?.aborted) abort();
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      child.kill(args.rechargeMode === 'crypto' ? 'SIGKILL' : 'SIGTERM');
       killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
       killTimer.unref?.();
     }, args.rowTimeoutMs);
@@ -941,6 +950,7 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      args.runtimeAbortSignal?.removeEventListener('abort', abort);
       if (killTimer) clearTimeout(killTimer);
       resolve(result);
     };
@@ -970,7 +980,7 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
         finish({
           ok: false,
           result: {cryptoAmounts},
-          error: `bind script timed out after ${args.rowTimeoutMs}ms`,
+          error: `${args.rechargeMode === 'crypto' ? 'purchase_unverified: ' : ''}bind script timed out after ${args.rowTimeoutMs}ms`,
           child: args.verbose ? {stdout: common.redact(stdout), stderr: common.redact(stderr)} : undefined,
         });
         return;
@@ -978,7 +988,7 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
       const message = parsed?.error || stderr || stdout || `bind script exited ${code}`;
       finish({
         ok: false,
-        result: {cryptoAmounts},
+        result: {cryptoAmounts, ...(parsed?.cryptoPaymentNotStarted === true ? {cryptoPaymentNotStarted: true} : {})},
         error: message,
         child: args.verbose ? {stdout: common.redact(stdout), stderr: common.redact(stderr)} : undefined,
       });

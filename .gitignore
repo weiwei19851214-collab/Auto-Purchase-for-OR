@@ -1,5 +1,6 @@
 node_modules/
 backups/
+data/deployment-backups/
 data/*.sqlite
 data/*.sqlite-*
 data/*.pid

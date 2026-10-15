@@ -35,3 +35,22 @@ test('early OKX confirmation uses Coinbase displayed payment including fees rath
   assert.equal(result.cryptoPurchase.walletPaymentConfirmation.confirmed, true);
   assert.equal(result.cryptoPurchase.checkoutState.paymentCompleted, true);
 });
+
+for (const insufficientRead of [1, 2]) {
+  test(`late insufficient-funds read ${insufficientRead} cannot erase submitted wallet confirmation`, async () => {
+    let confirms = 0, reads = 0;
+    const checkout = {close() {}};
+    await assert.rejects(continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {amount: '150'}, {
+      submitPurchase: async () => ({clicked: true}),
+      openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/fixture'}}),
+      selectWallet: async () => ({selected: true}),
+      launchExtension: async () => ({targetCount: 1}),
+      readPayment: async () => ({amount: '157.50', asset: 'USDC', network: 'arbitrum one'}),
+      prepareWallet: async () => {assert.fail('confirmed transaction must skip wallet preparation');},
+      confirmWalletPayment: async () => { confirms++; return {confirmed: true, confirmationClicked: true}; },
+      readCheckout: async () => ({insufficientFunds: ++reads === insufficientRead}),
+      inspectTargets: async () => [],
+    }), /purchase_unverified: insufficient funds text appeared after wallet confirmation/);
+    assert.equal(confirms, 1);
+  });
+}

@@ -15,6 +15,8 @@
     "checklist:launch": "node scripts/launch-checklist.mjs",
     "smoke:feishu": "node scripts/feishu-handoff-smoke.mjs",
     "smoke:local": "node scripts/local-smoke.mjs",
+    "smoke:crypto-scheduler": "node scripts/crypto-scheduler-api-smoke.mjs",
+    "smoke:ui:crypto": "node scripts/ui-crypto-scheduler-smoke.mjs",
     "smoke:ui": "node scripts/ui-smoke.mjs",
     "smoke:ui:interaction": "node scripts/ui-interaction-smoke.mjs",
     "smoke:ui:opom-flow": "node scripts/ui-opom-flow-smoke.mjs",

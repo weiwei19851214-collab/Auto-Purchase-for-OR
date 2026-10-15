@@ -89,7 +89,6 @@
     creatingJob: false,
     matchingAdsPower: false,
     cardAllocationSignature: '',
-    schedulerRowsUpdatedAt: {bank_card: '', crypto: ''},
     modeDrafts: {
       bank_card: null,
       crypto: null,
@@ -926,7 +925,7 @@
     };
     state.rechargeMode = next;
     const draft = state.modeDrafts[next];
-    // 虚拟币手工任务默认从账号 CSV 开始；自动计划回填的 OPOM 行仍由计划状态单独覆盖。
+    // 虚拟币手工任务从账号 CSV 开始，定时计划使用独立快照。
     state.source = draft?.source || 'csv';
     state.rows = draft?.rows?.map((row) => ({...row})) || [];
     state.fileName = draft?.fileName || '';
@@ -1398,6 +1397,131 @@
     }
   }
 
+  function renderCryptoScheduleFields() {
+    const type = el.cryptoScheduleType.value;
+    el.cryptoIntervalField.hidden = type !== 'interval';
+    el.cryptoDailyField.hidden = type !== 'daily';
+    el.cryptoHourlyField.hidden = type !== 'hourly';
+  }
+
+  function scheduleTime(value) {
+    return new Date(value).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false});
+  }
+
+  function cryptoScheduleSummary(scheduler = {}) {
+    const round = scheduler.round || {};
+    return [
+      scheduler.enabled ? '虚拟币计划已启用。' : '虚拟币计划已暂停。',
+      scheduler.schedule || '',
+      scheduler.nextRunAt ? `下次 ${scheduleTime(scheduler.nextRunAt)}` : '',
+      scheduler.lastRunAt ? `上次 ${scheduleTime(scheduler.lastRunAt)}` : '',
+      round.batchCount ? `批次 ${round.batchIndex}/${round.batchCount}，已处理 ${round.processedCount || 0}/${round.totalCount || 0}` : '',
+      scheduler.message || '',
+    ].filter(Boolean).join(' ');
+  }
+
+  function renderCryptoScheduleSettings(populate = false) {
+    const scheduler = state.schedulers.crypto || {};
+    const settings = scheduler.settings || {};
+    if (populate) {
+      el.cryptoScheduleType.value = settings.scheduleType || 'interval';
+      el.cryptoIntervalMinutes.value = settings.intervalMinutes || 30;
+      el.cryptoDailyTimes.value = (settings.dailyTimes || []).join(', ');
+      el.cryptoHourlyMinutes.value = (settings.hourlyMinutes || []).join(', ');
+      el.cryptoScheduleAmount.value = settings.amount || 150;
+    }
+    renderCryptoScheduleFields();
+    el.cryptoPasswordState.textContent = scheduler.walletPasswordConfigured ? '钱包密码已配置' : '未配置钱包密码（重启后需重新输入）';
+    el.cryptoScheduleState.textContent = cryptoScheduleSummary(scheduler);
+    const issues = Array.isArray(scheduler.round?.issues) ? scheduler.round.issues : [];
+    const issueCount = scheduler.round?.issueCount || issues.length;
+    el.cryptoScheduleIssues.hidden = !issueCount;
+    el.cryptoScheduleIssuesTitle.textContent = `账号处理说明（${issueCount}）`;
+    el.cryptoScheduleIssuesList.replaceChildren(...issues.map((issue) => {
+      const item = document.createElement('li');
+      item.textContent = `${issue.accountId || '未知账号'} · ${issue.status || ''} · ${sanitizeMessage(issue.message || '')}`;
+      return item;
+    }));
+    renderCryptoScheduleHistory(scheduler.history || {});
+    el.disableCryptoScheduleButton.disabled = state.cryptoScheduleBusy || !scheduler.enabled;
+  }
+
+  function renderCryptoScheduleHistory(history) {
+    const labels = {enabled:'已启用',disabled:'已停用',saved:'配置已保存',failed:'失败',retry_wait:'等待网络重试',paused_insufficient_funds:'钱包余额不足，已暂停',paused_restart:'重启暂停',paused_review:'待人工检查',
+      waiting_busy:'等待其他任务',running:'处理中',active:'进行中',queued:'已排队',pending:'待处理',completed:'处理结束',skipped:'已跳过',idle_no_rows:'无符合条件账号'};
+    const nodes = [];
+    for (const round of history.rounds || []) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${scheduleTime(round.createdAt)} · ${labels[round.status] || round.status} · 已处理 ${round.processedCount}/${round.totalCount} 个账号 · ${round.batchCount} 批`;
+      details.append(summary);
+      const id = document.createElement('p');
+      id.textContent = `轮次 ${round.id}`;
+      details.append(id);
+      for (const batch of round.batches || []) {
+        const line = document.createElement('p');
+        line.textContent = `第 ${batch.batchIndex} 批 · ${batch.accountCount} 个账号 · ${labels[batch.status] || batch.status} `;
+        if (batch.jobId) {
+          const link = document.createElement('a');
+          link.href = `/execution.html?job=${encodeURIComponent(batch.jobId)}`;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = '查看充值任务与账号结果';
+          line.append(link);
+        }
+        details.append(line);
+      }
+      if (round.batchCount > (round.batches || []).length) {
+        const note = document.createElement('p');
+        note.textContent = '批次较多，此处仅展示前 100 批；其余充值任务可在主页面任务记录中查看。';
+        details.append(note);
+      }
+      nodes.push(details);
+    }
+    for (const event of history.events || []) {
+      const item = document.createElement('p');
+      item.textContent = `${scheduleTime(event.createdAt)} · ${labels[event.status] || event.status} · ${sanitizeMessage(event.message || '')}${event.cycleId ? ` · 轮次 ${event.cycleId}` : ''}`;
+      nodes.push(item);
+    }
+    if (!nodes.length) {
+      const empty = document.createElement('p');
+      empty.textContent = '暂无计划执行历史。';
+      nodes.push(empty);
+    }
+    el.cryptoScheduleHistoryList.replaceChildren(...nodes);
+  }
+
+  async function updateCryptoSchedule(action) {
+    const splitValues = (value) => value.split(/[,，\s]+/).map((item) => item.trim()).filter(Boolean);
+    const settings = {
+      scheduleType: el.cryptoScheduleType.value,
+      intervalMinutes: Number(el.cryptoIntervalMinutes.value),
+      dailyTimes: splitValues(el.cryptoDailyTimes.value),
+      hourlyMinutes: splitValues(el.cryptoHourlyMinutes.value).map(Number),
+      amount: Number(el.cryptoScheduleAmount.value),
+    };
+    if (action !== 'disable') {
+      if (!(settings.amount > 0 && Number.isFinite(settings.amount))) throw new Error('请输入有效的固定充值金额');
+      if (settings.scheduleType === 'interval' && !(Number.isInteger(settings.intervalMinutes) && settings.intervalMinutes >= 1)) throw new Error('间隔分钟必须为正整数');
+      if (settings.scheduleType === 'daily' && (!settings.dailyTimes.length || settings.dailyTimes.some((time) => !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)))) throw new Error('每天时间点请使用 HH:mm，例如 09:00, 15:30');
+      if (settings.scheduleType === 'hourly' && (!settings.hourlyMinutes.length || settings.hourlyMinutes.some((minute) => !Number.isInteger(minute) || minute < 0 || minute > 59))) throw new Error('每小时分钟必须为 0–59 的整数');
+    }
+    if (action === 'enable' && !window.confirm(`确认持续授权自动付款及 OPOM 写回？计划将按北京时间定时读取 VIP 组低余额和待换卡账号，每账号固定充值 $${settings.amount}，通过已初始化 OKX 钱包实际提交付款并写回 OPOM，直到停用或发生阻断。`)) return;
+    const body = {rechargeMode: 'crypto', action, ...runtimeConfig()};
+    if (action !== 'disable') body.settings = settings;
+    if (el.cryptoSchedulePassword.value && action !== 'disable') body.walletPassword = el.cryptoSchedulePassword.value;
+    if (action === 'enable') body.confirmAutomaticPurchase = true;
+    try {
+      const scheduler = await requestJson('/api/scheduler', {method: 'POST', body});
+      state.schedulers.crypto = scheduler;
+      renderCryptoScheduleSettings(true);
+      renderSchedulerState(scheduler);
+    } finally {
+      el.cryptoSchedulePassword.value = '';
+      delete body.walletPassword;
+    }
+  }
+
   function schedulerPayload(enabled) {
     const options = optionsPayload();
     return {
@@ -1420,15 +1544,21 @@
 
   function renderSchedulerState(scheduler = {}) {
     if (!el.autoRechargeEnabled || !el.autoRechargeSummary) return;
-    const crypto = state.rechargeMode === 'crypto';
+    if (scheduler.ok) state.schedulers[scheduler.settings?.rechargeMode || state.rechargeMode] = scheduler;
+    // The header represents the active plan, independently of the manual preparation tab.
+    const displayedMode = state.schedulers[state.rechargeMode]?.enabled
+      ? state.rechargeMode
+      : ['crypto', 'bank_card'].find((mode) => state.schedulers[mode]?.enabled) || state.rechargeMode;
+    scheduler = state.schedulers[displayedMode] || {};
+    const crypto = displayedMode === 'crypto';
     const modeLabel = crypto ? '虚拟币' : '银行卡';
     el.autoRechargeChannel.textContent = modeLabel;
     el.autoRechargeTitle.textContent = `${modeLabel}自动充值计划`;
     el.autoRechargeDescription.textContent = crypto
-      ? '每小时 15 / 45 分，读取低余额账号并执行独立的 OKX Wallet 充值流程。'
+      ? '在设置中配置独立计划；VIP 低余额及待换卡账号，每批最多 50 个。'
       : '每小时 15 / 45 分，按当前银行卡页面参数自动创建真实充值任务。';
     el.autoRechargeSwitchLabel.textContent = `启用${modeLabel}自动充值计划`;
-    el.autoRechargePanel.dataset.rechargeMode = state.rechargeMode;
+    el.autoRechargePanel.dataset.rechargeMode = displayedMode;
     if (!scheduler.ok) {
       state.scheduler = {};
       el.autoRechargeEnabled.checked = false;
@@ -1438,7 +1568,7 @@
       return;
     }
     state.scheduler = scheduler;
-    const schedulerMode = scheduler.settings?.rechargeMode || state.rechargeMode;
+    const schedulerMode = scheduler.settings?.rechargeMode || displayedMode;
     state.schedulers[schedulerMode] = scheduler;
     el.autoRechargeEnabled.checked = Boolean(scheduler.enabled);
     el.autoRechargeEnabled.disabled = !scheduler.enabled && (!opomConfigured() || !adsPowerConfigured());
@@ -1452,36 +1582,29 @@
       scheduler.lastRunAt ? `上次 ${formatTime(scheduler.lastRunAt)}` : '',
       scheduler.message || '',
     ].filter(Boolean).join(' ');
-    el.autoRechargeSummary.textContent = summary;
+    el.autoRechargeSummary.textContent = crypto ? cryptoScheduleSummary(scheduler) : summary;
     el.autoRechargeSummary.classList.toggle('success', Boolean(scheduler.enabled) && !/failed/i.test(scheduler.status || ''));
     el.autoRechargeSummary.classList.toggle('warning', /failed|skipped|idle_no_ready/i.test(scheduler.status || ''));
-    if (
-      state.rechargeMode === 'crypto'
-      && scheduler.settings?.rechargeMode === 'crypto'
-      && Array.isArray(scheduler.preparedRows)
-      && scheduler.updatedAt
-      && scheduler.updatedAt !== state.schedulerRowsUpdatedAt.crypto
-    ) {
-      state.schedulerRowsUpdatedAt.crypto = scheduler.updatedAt;
-      state.source = 'opom';
-      state.rows = normalizeApiRows(scheduler.preparedRows, 'opom');
-      state.fileName = 'auto-crypto-monitor.csv';
-      state.opomConfirmed = true;
-      el.skipMatch.checked = false;
-      el.opomLoadState.textContent = '自动计划已获取 ' + state.rows.length + ' 条';
-      renderRows();
-    }
+
   }
 
   async function toggleAutoRecharge() {
     const enabled = el.autoRechargeEnabled.checked;
+    const displayedMode = el.autoRechargePanel.dataset.rechargeMode || state.rechargeMode;
+    if (displayedMode === 'crypto') {
+      el.autoRechargeEnabled.checked = Boolean(state.schedulers.crypto?.enabled);
+      if (!enabled) return updateCryptoSchedule('disable');
+      renderCryptoScheduleSettings(true);
+      el.cryptoScheduleDetails.open = true;
+      el.settingsDialog.showModal();
+      el.cryptoScheduleDetails.scrollIntoView({block: 'start'});
+      return;
+    }
     if (enabled && el.refundOnly.checked) {
       el.autoRechargeEnabled.checked = false;
       throw new Error('仅退款属于人工专项操作，不支持自动定时执行');
     }
-    const confirmation = state.rechargeMode === 'crypto'
-      ? '启用后，服务端会按计划读取低余额账号、匹配 AdsPower 并自动执行到 OKX Wallet 最终确认界面。确认启用？'
-      : el.zdrOnly.checked
+    const confirmation = el.zdrOnly.checked
       ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅关闭 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
       : el.enableZdrOnly.checked
         ? '启用后，服务端将在每小时 15 和 45 分按当前页面参数创建仅开启 ZDR 的任务，不执行充值或 Auto Top-Up。确认启用？'
@@ -1496,13 +1619,9 @@
     }
     const scheduler = await requestJson('/api/scheduler', {
       method: 'POST',
-      body: schedulerPayload(enabled),
+      body: enabled ? schedulerPayload(enabled) : {rechargeMode: displayedMode, enabled: false},
     });
-    let nextScheduler = scheduler;
-    if (enabled && state.rechargeMode === 'crypto') {
-      nextScheduler = await requestJson('/api/scheduler/prepare-now', {method: 'POST'});
-    }
-    renderSchedulerState(nextScheduler);
+    renderSchedulerState(scheduler);
   }
 
   async function refreshJobs() {
@@ -1514,6 +1633,7 @@
     state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
     state.worker = data.worker || {};
     state.schedulers = data.schedulers || {bank_card: data.scheduler || {}};
+    renderCryptoScheduleSettings();
     renderSchedulerState(state.schedulers[state.rechargeMode] || {});
     renderWorkerAndJobs();
     clearError();
@@ -1711,7 +1831,34 @@
     el.resetButton.addEventListener('click', resetPreparation);
     el.dismissError.addEventListener('click', clearError);
 
-    el.settingsButton.addEventListener('click', () => el.settingsDialog.showModal());
+    el.settingsButton.addEventListener('click', () => {
+      renderCryptoScheduleSettings(true);
+      el.settingsDialog.showModal();
+    });
+    el.scheduleHistoryButton.addEventListener('click', () => {
+      renderCryptoScheduleHistory(state.schedulers.crypto?.history || {});
+      el.scheduleHistoryDialog.showModal();
+      refreshJobs().catch(showError);
+    });
+    el.cryptoScheduleType.addEventListener('change', renderCryptoScheduleFields);
+    el.settingsDialog.addEventListener('close', () => { el.cryptoSchedulePassword.value = ''; });
+    for (const [id, action] of [['saveCryptoScheduleButton', 'save'], ['enableCryptoScheduleButton', 'enable'], ['disableCryptoScheduleButton', 'disable']]) {
+      el[id].addEventListener('click', async () => {
+        const buttons = [el.saveCryptoScheduleButton, el.enableCryptoScheduleButton, el.disableCryptoScheduleButton];
+        if (state.cryptoScheduleBusy) return;
+        state.cryptoScheduleBusy = true;
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+          await updateCryptoSchedule(action);
+        } catch (error) {
+          el.cryptoScheduleState.textContent = sanitizeMessage(error.message);
+        } finally {
+          state.cryptoScheduleBusy = false;
+          buttons.forEach((button) => { button.disabled = false; });
+          el.disableCryptoScheduleButton.disabled = !state.schedulers.crypto?.enabled;
+        }
+      });
+    }
     el.recordsButton.addEventListener('click', () => {
       renderWorkerAndJobs();
       el.recordsDialog.showModal();

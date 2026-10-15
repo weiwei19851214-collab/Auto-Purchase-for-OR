@@ -1,3 +1,4 @@
+import {CryptoScheduler} from './crypto-scheduler.mjs';
 import {readyToRechargePayload, canonicalCsvFromRows} from './opom-orchestrator.mjs';
 import {matchAdsPowerPayload} from './adspower-match.mjs';
 import {createJob, dryRunPayload} from './jobs.mjs';
@@ -14,6 +15,7 @@ const RECHARGE_STATUS = 'needs_recharge';
 export class AutoRechargeScheduler {
   constructor(db, options = {}) {
     this.db = db;
+    this.crypto = new CryptoScheduler(db, options.crypto || {});
     this.intervalMs = options.intervalMs || DEFAULT_INTERVAL_MS;
     this.timer = null;
     this.running = false;
@@ -36,6 +38,7 @@ export class AutoRechargeScheduler {
   }
 
   getState(rechargeMode = 'bank_card') {
+    if (rechargeMode === 'crypto') return this.crypto.getState();
     return publicState(readSchedulerState(this.db, rechargeMode), rechargeMode);
   }
 
@@ -44,35 +47,11 @@ export class AutoRechargeScheduler {
   }
 
   async prepareNow() {
-    const state = readSchedulerState(this.db, 'crypto');
-    const settings = JSON.parse(state.settingsJson || '{}');
-    if (!state.enabled || settings.rechargeMode !== 'crypto') {
-      throw httpError(409, '只有已启用的虚拟币自动充值计划可以立即准备账号');
-    }
-    if (this.runningModes.has('crypto')) throw httpError(409, '虚拟币自动充值计划正在执行，请稍后再试');
-    this.runningModes.add('crypto');
-    this.running = true;
-    updateSchedulerStatus(this.db, 'crypto', {
-      status: 'running',
-      message: '正在从监控系统读取低余额账号并匹配 AdsPower。',
-    });
-    try {
-      await this.runOnce('manual-' + Date.now(), 'crypto');
-    } catch (error) {
-      updateSchedulerStatus(this.db, 'crypto', {
-        status: 'failed',
-        message: redact(error.message || 'auto recharge preparation failed'),
-        lastRunAt: nowIso(),
-      });
-      throw error;
-    } finally {
-      this.runningModes.delete('crypto');
-      this.running = this.runningModes.size > 0;
-    }
-    return this.getState('crypto');
+    return this.crypto.prepareNow();
   }
 
   update(payload = {}) {
+    if (payload.rechargeMode === 'crypto') return this.crypto.update(payload);
     if (payload.enabled) {
       const settings = normalizeSettings(payload);
       validateEnabledSettings(settings, payload);
@@ -100,10 +79,14 @@ export class AutoRechargeScheduler {
   }
 
   async tick(date = new Date()) {
-    await Promise.all(RECHARGE_MODES.map((mode) => this.tickMode(mode, date)));
+    if (this.ticking) return;
+    this.ticking = true;
+    try { for (const mode of RECHARGE_MODES) await this.tickMode(mode, date); }
+    finally { this.ticking = false; }
   }
 
   async tickMode(rechargeMode, date = new Date()) {
+    if (rechargeMode === 'crypto') return this.crypto.tick(date);
     if (this.runningModes.has(rechargeMode)) return;
     const state = readSchedulerState(this.db, rechargeMode);
     if (!state.enabled) return;
@@ -138,6 +121,7 @@ export class AutoRechargeScheduler {
   }
 
   async runOnce(slot, rechargeMode = 'bank_card') {
+    if (rechargeMode === 'crypto') return this.crypto.tick(new Date(), true);
     const state = readSchedulerState(this.db, rechargeMode);
     const settings = JSON.parse(state.settingsJson || '{}');
     const activeJob = this.db.prepare(`

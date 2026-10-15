@@ -21,6 +21,12 @@ export function normalizedOptions(options = {}) {
   const args = runnerArgs(options);
   return {
     rechargeMode: args.rechargeMode,
+    confirmWalletPayment: args.confirmWalletPayment,
+    cryptoRechargeRuleMode: args.cryptoRechargeRuleMode,
+    cryptoFixedAmount: args.cryptoFixedAmount,
+    cryptoScheduled: options.cryptoScheduled === true,
+    cryptoCycleId: String(options.cryptoCycleId || ''),
+    cryptoBatchId: String(options.cryptoBatchId || ''),
     removeExisting: args.removeExisting,
     preserveExistingPaymentMethod: args.preserveExistingPaymentMethod,
     stopProfiles: args.stopProfiles,

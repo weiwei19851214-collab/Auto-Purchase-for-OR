@@ -17,7 +17,7 @@ export function classifyError(message) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
       stage: 'crypto.email_verification',
       safeToContinueBatch: false,
-      stopProfile: true,
+      stopProfile: false,
       message: text,
     });
   }

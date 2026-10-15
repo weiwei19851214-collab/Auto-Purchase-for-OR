@@ -76,7 +76,7 @@ export async function captureGmailBaseline(input, {getTargets, cdp, createTarget
   return readBaseline(target, true);
 }
 
-export async function submitEmailCode(page, expectedAccount, code) {
+export async function submitEmailCode(page, expectedAccount, code, {continueTimeoutMs = 5000} = {}) {
   if(!/^\d{6}$/.test(code)) throw new Error('manual_security_blocker: crypto_email_code_invalid');
   const challenge=await inspectEmailChallenge(page,expectedAccount);
   if(!challenge?.identityMatches || !challenge.fieldReady || challenge.rejected) throw new Error('manual_security_blocker: crypto_email_challenge_changed');
@@ -104,9 +104,39 @@ export async function submitEmailCode(page, expectedAccount, code) {
   const retained=await evaluate(page,`(()=>{const f=document.querySelector('[role="dialog"] input[autocomplete="one-time-code"]');return !!f && f.value===${JSON.stringify(code)} && document.activeElement!==f})()`);
   if(!retained) throw new Error('manual_security_blocker: crypto_email_fill_failed');
   await assertChallenge();
-  const clicked=await evaluate(page,`(()=>{const d=[...document.querySelectorAll('[role="dialog"]')].find(e=>e.getClientRects().length && /code sent to your email/i.test(e.innerText));const buttons=[...(d?.querySelectorAll('button')||[])].filter(e=>e.getClientRects().length && e.innerText.trim()==='Continue' && !e.disabled);if(buttons.length!==1)return false;buttons[0].click();return true})()`);
-  if(!clicked) throw new Error('manual_security_blocker: crypto_email_continue_unavailable');
-  return {submitted:true};
+  // React can enable Continue after blur/render; observe readiness before one click.
+  const deadline = Date.now() + continueTimeoutMs;
+  let lastAction = 'waiting';
+  do {
+    const action = await evaluate(page, `(() => {
+      if (location.origin !== 'https://openrouter.ai' || location.pathname !== '/settings/credits') return 'changed';
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(e => e.getClientRects().length && /code sent to your email/i.test(e.innerText));
+      if (!dialogs.length) return 'transitioned';
+      if (dialogs.length !== 1) return 'changed';
+      const d = dialogs[0];
+      const emails = (d.innerText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi) || []).map(e => e.toLowerCase());
+      if (emails.length !== 1 || emails[0] !== ${JSON.stringify(String(expectedAccount).toLowerCase())}
+        || /invalid code|incorrect code|expired|too many attempts/i.test(d.innerText)) return 'changed';
+      const field = d.querySelector('input[autocomplete="one-time-code"][maxlength="6"]');
+      if (!field || field.value !== ${JSON.stringify(code)}) return 'changed';
+      const buttons = [...d.querySelectorAll('button')].filter(e => e.getClientRects().length
+        && /^Continue$/i.test(String(e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim()));
+      if (buttons.length > 1) return 'ambiguous';
+      const button = buttons[0];
+      if (!button) return 'waiting_missing';
+      if (button.disabled || button.getAttribute?.('aria-disabled') === 'true'
+        || button.getAttribute?.('aria-busy') === 'true') return 'waiting_disabled';
+      button.click();
+      return 'clicked';
+    })()`);
+    // Disappearance is only a handoff to the existing checkout verifier, never success evidence.
+    if (action === 'clicked' || action === 'transitioned') return {submitted:true};
+    if (action === 'changed') throw new Error('manual_security_blocker: crypto_email_challenge_changed');
+    lastAction = action;
+    if (action === 'ambiguous') break;
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(100, deadline - Date.now()))));
+  } while (Date.now() < deadline);
+  throw new Error('manual_security_blocker: crypto_email_continue_unavailable:' + lastAction);
 }
 
 export async function completeEmailVerification(input,page,context,{getTargets,cdp,timeoutMs=40000}){

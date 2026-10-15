@@ -20,7 +20,7 @@ function mockPage({origin = 'https://openrouter.ai', pathname = '/settings/credi
   document.querySelector = () => field;
   const location = {origin, pathname};
   return {
-    calls, field, document, location, dialog, get clicks() {return clicks;},
+    calls, field, document, location, dialog, buttons, get clicks() {return clicks;},
     async send(method, params) {
       calls.push({method, params});
       if (method === 'Runtime.evaluate') return {result: {value: runInNewContext(params.expression, {document, location})}};
@@ -69,7 +69,7 @@ test('submission clears existing text, types each digit through real key events,
 test('ambiguous or absent Continue never clicks', async () => {
   for (const continueCount of [0, 2]) {
     const page = mockPage({continueCount});
-    await assert.rejects(submitEmailCode(page, account, '123456'), /crypto_email_continue_unavailable/);
+    await assert.rejects(submitEmailCode(page, account, '123456', {continueTimeoutMs: 10}), /crypto_email_continue_unavailable/);
     assert.equal(page.clicks, 0);
   }
 });
@@ -243,6 +243,7 @@ test('email verification failure pauses the batch instead of retrying another pa
     assert.equal(result.status, 'manual_security_blocker');
     assert.equal(result.stage, 'crypto.email_verification');
     assert.equal(result.safeToContinueBatch, false);
+    assert.equal(result.stopProfile, false);
   }
 });
 
@@ -361,4 +362,61 @@ test('baseline never accepts inbox rows lacking message identifiers', async t =>
   const fixture = baselineFixture({createdSequence: [{...baselineSnapshot, rows: [{messageId: ''}]}]});
   await assert.rejects(fixture.run(), /crypto_email_gmail_not_ready/);
   assert.deepEqual(fixture.closes, ['ws://created']);
+});
+
+
+test('Continue waits for asynchronous enablement after blur and clicks once', async t => {
+  mockPollingClock(t);
+  const page = mockPage();
+  let polls = 0;
+  const send = page.send.bind(page);
+  page.buttons[0].disabled = true;
+  page.buttons[0].innerText = '  Continue  ';
+  page.send = async (method, params) => {
+    if (params.expression?.includes("return 'waiting_disabled'")) {
+      if (++polls === 3) page.buttons[0].disabled = false;
+    }
+    return send(method, params);
+  };
+  await submitEmailCode(page, account, '123456');
+  assert.equal(polls, 3);
+  assert.equal(page.clicks, 1);
+  assert.equal(page.calls.filter(c => c.params.type === 'char').length, 6);
+});
+
+test('Continue stays disabled until bounded deadline without repeated code submission', async t => {
+  const clock = mockPollingClock(t);
+  const page = mockPage();
+  page.buttons[0].disabled = true;
+  await assert.rejects(submitEmailCode(page, account, '123456'), /crypto_email_continue_unavailable/);
+  assert.equal(clock.elapsed, 5000);
+  assert.equal(page.clicks, 0);
+  assert.equal(page.calls.filter(c => c.params.type === 'char').length, 6);
+});
+
+test('identity change while waiting for Continue prevents the click', async t => {
+  mockPollingClock(t);
+  const page = mockPage();
+  const send = page.send.bind(page);
+  page.send = async (method, params) => {
+    if (params.expression?.includes("return 'waiting_disabled'")) page.dialog.innerText = 'Verification required code sent to your email other@example.test';
+    return send(method, params);
+  };
+  await assert.rejects(submitEmailCode(page, account, '123456'), /crypto_email_challenge_changed/);
+  assert.equal(page.clicks, 0);
+});
+
+
+test('dialog disappearance during Continue readiness does not click again or claim verification success', async t => {
+  mockPollingClock(t);
+  const page = mockPage();
+  const send = page.send.bind(page);
+  page.send = async (method, params) => {
+    if (params.expression?.includes("return 'waiting_disabled'")) page.document.querySelectorAll = () => [];
+    return send(method, params);
+  };
+  const result = await submitEmailCode(page, account, '123456');
+  assert.deepEqual(result, {submitted: true});
+  assert.equal(page.clicks, 0);
+  assert.equal('verified' in result, false);
 });

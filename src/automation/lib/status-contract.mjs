@@ -55,6 +55,12 @@ export function classifyError(message) {
       stage: 'crypto.password_verification', safeToContinueBatch: false, stopProfile: true, message: text,
     });
   }
+  if (/crypto_wallet_transaction_risk_warning_not_dismissed/i.test(text)) {
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.wallet_confirmation', terminal: true,
+      safeToContinueBatch: false, stopProfile: false, message: text,
+    });
+  }
   if (/crypto_wallet_transaction_/i.test(text)) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
       stage: 'crypto.wallet_confirmation',

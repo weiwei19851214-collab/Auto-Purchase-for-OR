@@ -72,3 +72,26 @@ test('transaction changes during overlay wait abort before any click', async () 
   await assert.rejects(clickOkxTransactionButton(wallet, 'confirm_send', 'Confirm', expected), /page_changed/);
   assert.equal(calls.filter(method => method === 'Input.dispatchMouseEvent').length, 0);
 });
+
+
+test('persistent risk overlay reports its actual state and never clicks during acquisition', async () => {
+  const methods = [];
+  const wallet = {close() {}, async send(method) {
+    methods.push(method);
+    if (method === 'Runtime.enable') return {};
+    return {result: {value: {origin, text: 'Suspicious Receiving address',
+      buttons: [{label: 'Continue (Unsafe)', visible: true, disabled: false}]}}};
+  }};
+  const message = 'manual_security_blocker: crypto_wallet_transaction_risk_warning_not_dismissed';
+  await assert.rejects(acquireOkxTransactionTarget({}, expected, ['confirm_send'], 1, {
+    findTargets: async () => [{type: 'page', url: origin + '/notification.html', webSocketDebuggerUrl: 'ws://fixture'}],
+    cdp: async () => wallet, sleep: async () => {},
+  }), /crypto_wallet_transaction_risk_warning_not_dismissed/);
+  assert.equal(methods.includes('Input.dispatchMouseEvent'), false);
+  const {classifyError} = await import('../automation/lib/status-contract.mjs');
+  const status = classifyError(message);
+  assert.equal(status.stopProfile, false);
+  assert.equal(status.safeToContinueBatch, false);
+  const {simplifyError} = await import('../automation/lib/error-message-contract.mjs');
+  assert.match(simplifyError(message).message, /风险提示仍未关闭/);
+});

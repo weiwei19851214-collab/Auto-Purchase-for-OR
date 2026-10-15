@@ -9,6 +9,11 @@ const UNKNOWN_ERROR = Object.freeze({
 
 const RULES = [
   {
+    errorCode: 'crypto_wallet_transaction_risk_warning_not_dismissed',
+    message: 'OKX 收款地址风险提示仍未关闭，尚未进入最终交易确认页；任务已暂停并保留窗口，请人工核对',
+    matches: ({text}) => /crypto_wallet_transaction_risk_warning_not_dismissed/i.test(text),
+  },
+  {
     errorCode: 'crypto_task_timeout',
     message: '虚拟币充值单行流程超过 4 分钟，已强制关闭浏览器并继续下一任务',
     matches: ({text, stage}) => /crypto_task_timeout|crypto\.timeout/i.test(text)

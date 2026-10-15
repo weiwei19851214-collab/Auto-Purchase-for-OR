@@ -1727,15 +1727,20 @@ export async function acquireOkxTransactionTarget(input, expected, stages = ['ri
     'network=' + String(lastState.hasNetwork === true),
   ].join(',');
   // 无可见交易按钮表示确认页尚未弹出；出现按钮但指纹不匹配时保留现场供人工核对。
-  const errorCode = Number(lastState.buttonCount || 0) > 0
-    ? 'crypto_wallet_transaction_page_unverified:'
-    : 'crypto_wallet_transaction_confirmation_unavailable:';
+  const riskWarningStillVisible = lastState.stage === 'risk_warning' && !stages.includes('risk_warning');
+  const errorCode = riskWarningStillVisible
+    ? 'crypto_wallet_transaction_risk_warning_not_dismissed:'
+    : Number(lastState.buttonCount || 0) > 0
+      ? 'crypto_wallet_transaction_page_unverified:'
+      : 'crypto_wallet_transaction_confirmation_unavailable:';
   writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-transaction-detection-failed', {
     ...lastState,
     expectedAsset: String(expected.asset || '').toUpperCase(),
     expectedAmount: String(expected.amount || ''),
     expectedNetwork: String(expected.network || ''),
     waitTimeoutMs: timeoutMs,
+    expectedStages: stages,
+    riskWarningStillVisible,
   });
   throw new Error('manual_security_blocker: ' + errorCode + fingerprint);
 }

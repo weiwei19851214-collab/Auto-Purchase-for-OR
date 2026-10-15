@@ -76,7 +76,7 @@ export async function captureGmailBaseline(input, {getTargets, cdp, createTarget
   return readBaseline(target, true);
 }
 
-export async function submitEmailCode(page, expectedAccount, code, {continueTimeoutMs = 5000} = {}) {
+export async function submitEmailCode(page, expectedAccount, code, {continueTimeoutMs = 15000} = {}) {
   if(!/^\d{6}$/.test(code)) throw new Error('manual_security_blocker: crypto_email_code_invalid');
   const challenge=await inspectEmailChallenge(page,expectedAccount);
   if(!challenge?.identityMatches || !challenge.fieldReady || challenge.rejected) throw new Error('manual_security_blocker: crypto_email_challenge_changed');

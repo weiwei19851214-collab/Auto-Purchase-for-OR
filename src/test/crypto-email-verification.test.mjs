@@ -389,7 +389,7 @@ test('Continue stays disabled until bounded deadline without repeated code submi
   const page = mockPage();
   page.buttons[0].disabled = true;
   await assert.rejects(submitEmailCode(page, account, '123456'), /crypto_email_continue_unavailable/);
-  assert.equal(clock.elapsed, 5000);
+  assert.equal(clock.elapsed, 15000);
   assert.equal(page.clicks, 0);
   assert.equal(page.calls.filter(c => c.params.type === 'char').length, 6);
 });

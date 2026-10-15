@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {runInNewContext} from 'node:vm';
-import {submitEmailCode, completeEmailVerification} from '../automation/lib/crypto-email-verification.mjs';
+import {captureGmailBaseline, submitEmailCode, completeEmailVerification} from '../automation/lib/crypto-email-verification.mjs';
 
 const account = 'reader@example.test';
 function mockPage({origin = 'https://openrouter.ai', pathname = '/settings/credits', email = account, continueCount = 1, rejected = false} = {}) {
@@ -244,4 +244,121 @@ test('email verification failure pauses the batch instead of retrying another pa
     assert.equal(result.stage, 'crypto.email_verification');
     assert.equal(result.safeToContinueBatch, false);
   }
+});
+
+function mockPollingClock(t) {
+  let now = 1800000000000;
+  const startedAt = now;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setTimeout', (callback, delay = 0) => {
+    now += delay;
+    queueMicrotask(callback);
+    return 0;
+  });
+  return {get elapsed() {return now - startedAt;}};
+}
+function baselineFixture({targets = [], sequence = [], createdSequence = sequence} = {}) {
+  const created = {id: 'created-gmail', type: 'page', url: 'https://mail.google.com/mail/u/?authuser=reader%40example.test#inbox', webSocketDebuggerUrl: 'ws://created'};
+  const reads = new Map();
+  const closes = [];
+  const creates = [];
+  const dependencies = {
+    getTargets: () => targets,
+    async createTarget(...args) {creates.push(args); return created;},
+    async cdp(url) {
+      return {
+        close() {closes.push(url);},
+        async send(method) {
+          if (method === 'Page.navigate') return {};
+          assert.equal(method, 'Runtime.evaluate');
+          const values = url === created.webSocketDebuggerUrl ? createdSequence : sequence;
+          const index = reads.get(url) || 0;
+          reads.set(url, index + 1);
+          const value = values[Math.min(index, values.length - 1)];
+          if (value instanceof Error) throw value;
+          return {result: {value}};
+        },
+      };
+    },
+  };
+  return {dependencies, creates, closes, reads,
+    run: (overrides = {}) => captureGmailBaseline({expectedAccount: account, debugPort: 62027}, {...dependencies, ...overrides})};
+}
+const baselineSnapshot = {trustedOrigin: true, mailboxAccount: account, isInbox: true, rows: [{messageId: 'before-purchase'}]};
+const existingGmailTarget = {id: 'existing-gmail', type: 'page', url: 'https://mail.google.com/mail/u/0/#inbox', webSocketDebuggerUrl: 'ws://existing'};
+
+test('baseline opens an account-directed Gmail inbox when no Gmail tab exists', async () => {
+  const fixture = baselineFixture({createdSequence: [baselineSnapshot]});
+  const result = await fixture.run();
+  assert.deepEqual(fixture.creates, [[62027, 'https://mail.google.com/mail/u/?authuser=reader%40example.test#inbox']]);
+  assert.equal(result.targetId, 'created-gmail');
+  assert.deepEqual(result.baselineIds, ['before-purchase']);
+  assert.equal(typeof result.challengeStartedAt, 'number');
+  assert.deepEqual(fixture.closes, ['ws://created']);
+});
+test('baseline reuses a matching existing inbox without creating another tab', async () => {
+  const fixture = baselineFixture({targets: [existingGmailTarget], sequence: [baselineSnapshot]});
+  const result = await fixture.run();
+  assert.equal(result.targetId, existingGmailTarget.id);
+  assert.equal(fixture.creates.length, 0);
+  assert.deepEqual(fixture.closes, ['ws://existing']);
+});
+test('baseline opens the requested account when existing Gmail belongs to another account', async () => {
+  const fixture = baselineFixture({targets: [existingGmailTarget],
+    sequence: [{...baselineSnapshot, mailboxAccount: 'other@example.test'}], createdSequence: [baselineSnapshot]});
+  const result = await fixture.run();
+  assert.equal(result.targetId, 'created-gmail');
+  assert.equal(fixture.creates.length, 1);
+  assert.deepEqual(fixture.closes, ['ws://existing', 'ws://created']);
+});
+test('baseline tolerates loading and context replacement but records only the verified inbox', async t => {
+  mockPollingClock(t);
+  const fixture = baselineFixture({createdSequence: [
+    {trustedOrigin: true, mailboxAccount: null, isInbox: false, rows: []},
+    new Error('Execution context was destroyed.'),
+    {...baselineSnapshot, rows: []},
+    baselineSnapshot,
+  ]});
+  const result = await fixture.run();
+  assert.deepEqual(result.baselineIds, ['before-purchase']);
+  assert.equal(fixture.reads.get('ws://created'), 4);
+  assert.deepEqual(fixture.closes, ['ws://created']);
+});
+test('baseline fails safely when the inbox never finishes loading within twenty seconds', async t => {
+  const clock = mockPollingClock(t);
+  const fixture = baselineFixture({createdSequence: [{trustedOrigin: true, mailboxAccount: null, isInbox: false, rows: []}]});
+  await assert.rejects(fixture.run(), /crypto_email_gmail_not_ready/);
+  assert.equal(clock.elapsed, 20000);
+  assert.deepEqual(fixture.closes, ['ws://created']);
+});
+test('baseline never accepts a conflicting identity or untrusted origin in the newly opened inbox', async t => {
+  mockPollingClock(t);
+  for (const snapshot of [{...baselineSnapshot, mailboxAccount: 'other@example.test'}, {...baselineSnapshot, trustedOrigin: false}]) {
+    const fixture = baselineFixture({createdSequence: [snapshot]});
+    await assert.rejects(fixture.run(), snapshot.trustedOrigin ? /crypto_email_identity_mismatch/ : /crypto_email_gmail_not_ready/);
+    assert.deepEqual(fixture.closes, ['ws://created']);
+  }
+});
+test('fresh verification default wait ends at twenty seconds without submitting a code', async t => {
+  const clock = mockPollingClock(t);
+  const page = mockPage();
+  let closed = false;
+  await assert.rejects(completeEmailVerification({expectedAccount: account}, page,
+    {targetId: 'gmail', baselineIds: ['old'], challengeStartedAt: Date.now()}, {
+      getTargets: () => [{id: 'gmail', url: 'https://mail.google.com/mail/u/0/#inbox'}],
+      cdp: async () => ({close() {closed = true;}, async send() {
+        return {result: {value: {trustedOrigin: true, isInbox: true, mailboxAccount: null, rows: []}}};
+      }}),
+    }), /crypto_email_fresh_message_timeout/);
+  assert.equal(clock.elapsed, 20000);
+  assert.equal(page.clicks, 0);
+  assert.equal(page.calls.some(call => call.method === 'Input.dispatchKeyEvent'), false);
+  assert.equal(closed, true);
+});
+
+test('baseline never accepts inbox rows lacking message identifiers', async t => {
+  mockPollingClock(t);
+  const fixture = baselineFixture({createdSequence: [{...baselineSnapshot, rows: [{messageId: ''}]}]});
+  await assert.rejects(fixture.run(), /crypto_email_gmail_not_ready/);
+  assert.deepEqual(fixture.closes, ['ws://created']);
 });

@@ -173,6 +173,20 @@ function getTargets(debugPort) {
   return curlJson('http://127.0.0.1:' + debugPort + '/json/list', 5);
 }
 
+async function createGmailTarget(debugPort, url) {
+  const browser = await cdp(getBrowserWs(debugPort));
+  let targetId;
+  try { ({targetId} = await browser.send('Target.createTarget', {url})); }
+  finally { browser.close(); }
+  const deadline = Date.now() + 5000;
+  do {
+    const target = getTargets(debugPort).find(item => item.id === targetId && item.webSocketDebuggerUrl);
+    if (target) return target;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error('manual_security_blocker: crypto_email_gmail_unavailable');
+}
+
 function getBrowserWs(debugPort) {
   return curlJson('http://127.0.0.1:' + debugPort + '/json/version', 5).webSocketDebuggerUrl || '';
 }
@@ -2019,9 +2033,10 @@ async function runCryptoRecharge(rawInput) {
     const purchaseForm = await waitForCryptoPurchaseForm(page);
     writeDiagnostic(input.confirmationDebugDir, 'crypto-purchase-form-ready', purchaseForm);
     const amountInput = await fillAmount(page, purchase.amount);
-    // Capture inbox IDs before this Purchase can send an email. Missing Gmail
-    // only blocks an actual email challenge, not an otherwise verified session.
-    input.gmailVerification = await captureGmailBaseline(input, {getTargets, cdp}).catch(() => null);
+    // Open/verify Gmail and capture inbox IDs before Purchase can send an email.
+    // Preserve preparation failures instead of silently discarding the baseline.
+    input.gmailVerification = await captureGmailBaseline(input, {getTargets, cdp, createTarget: createGmailTarget});
+    await page.send('Page.bringToFront');
     input.previousCoinbaseSessions = getTargets(input.debugPort).map(coinbaseSessionUrl).filter(Boolean);
     const continued = await continueCryptoAfterAmount(input, page, {...purchase, useCrypto, purchaseForm, amountInput});
     checkout = continued.checkout;

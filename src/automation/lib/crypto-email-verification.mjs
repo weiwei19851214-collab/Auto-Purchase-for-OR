@@ -29,25 +29,51 @@ export async function inspectEmailChallenge(page, expectedAccount) {
   })()`);
 }
 
-export async function captureGmailBaseline(input, {getTargets, cdp}) {
-  const targets=getTargets(input.debugPort).filter(t=>t.type==='page' && /^https:\/\/mail\.google\.com\/mail\//.test(t.url));
-  for(const target of targets){
-    const client=await cdp(target.webSocketDebuggerUrl);
-    try{
-      // Restore the inbox list without opening or changing any message's read state.
-      const url=new URL(target.url); url.hash='inbox';
-      if(target.url!==url.href) await client.send('Page.navigate',{url:url.href});
-      for(let attempt=0;attempt<20;attempt++){
-        const snapshot=await evaluate(client,GMAIL_INBOX_SNAPSHOT_EXPRESSION);
-        if(snapshot.mailboxAccount?.toLowerCase()===input.expectedAccount.toLowerCase() && snapshot.isInbox && snapshot.rows.length){
-          return {targetId:target.id, baselineIds:snapshot.rows.map(r=>r.messageId).filter(Boolean), challengeStartedAt:Date.now()};
-        }
-        if(snapshot.mailboxAccount && snapshot.mailboxAccount.toLowerCase()!==input.expectedAccount.toLowerCase()) break;
-        await new Promise(r=>setTimeout(r,250));
+export async function captureGmailBaseline(input, {getTargets, cdp, createTarget, timeoutMs = 20000}) {
+  const expected = String(input.expectedAccount || '').trim().toLowerCase();
+  if (!expected.includes('@')) throw new Error('manual_security_blocker: crypto_email_identity_mismatch');
+  const readBaseline = async (target, required) => {
+    const client = await cdp(target.webSocketDebuggerUrl);
+    const deadline = Date.now() + timeoutMs;
+    try {
+      const url = new URL(target.url);
+      if (url.origin === 'https://mail.google.com' && url.hash !== '#inbox') {
+        url.hash = 'inbox';
+        await client.send('Page.navigate', {url: url.href});
       }
-    }finally{client.close()}
+      do {
+        let snapshot;
+        try { snapshot = await evaluate(client, VERIFIED_GMAIL_SNAPSHOT_EXPRESSION); }
+        catch (error) {
+          if (!isReloadContextLoss(error)) throw error;
+        }
+        if (snapshot?.mailboxAccount && snapshot.mailboxAccount.toLowerCase() !== expected) {
+          if (required) throw new Error('manual_security_blocker: crypto_email_identity_mismatch');
+          return null;
+        }
+        if (snapshot?.trustedOrigin === true && snapshot.mailboxAccount?.toLowerCase() === expected
+          && snapshot.isInbox && snapshot.rows?.length
+          && snapshot.rows.every(row => typeof row.messageId === 'string' && row.messageId.trim())) {
+          return {targetId: target.id, baselineIds: snapshot.rows.map(row => row.messageId), challengeStartedAt: Date.now()};
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(250, deadline - Date.now()))));
+      } while (Date.now() < deadline);
+      if (required) throw new Error('manual_security_blocker: crypto_email_gmail_not_ready');
+      return null;
+    } finally { client.close(); }
+  };
+  const targets = getTargets(input.debugPort).filter(t => t.type === 'page' && /^https:\/\/mail\.google\.com\/mail\//.test(t.url));
+  for (const target of targets) {
+    const baseline = await readBaseline(target, false);
+    if (baseline) return baseline;
   }
-  return null;
+  if (!createTarget) throw new Error('manual_security_blocker: crypto_email_gmail_unavailable');
+  // Use this profile's existing Google session, addressed to the expected account.
+  // Never capture a replacement baseline after Purchase has sent the challenge.
+  const target = await createTarget(input.debugPort,
+    'https://mail.google.com/mail/u/?authuser=' + encodeURIComponent(expected) + '#inbox');
+  if (!target?.webSocketDebuggerUrl) throw new Error('manual_security_blocker: crypto_email_gmail_unavailable');
+  return readBaseline(target, true);
 }
 
 export async function submitEmailCode(page, expectedAccount, code) {
@@ -83,7 +109,7 @@ export async function submitEmailCode(page, expectedAccount, code) {
   return {submitted:true};
 }
 
-export async function completeEmailVerification(input,page,context,{getTargets,cdp,timeoutMs=60000}){
+export async function completeEmailVerification(input,page,context,{getTargets,cdp,timeoutMs=20000}){
   if(!context || context.submitted || context.inProgress) throw new Error('manual_security_blocker: crypto_email_baseline_missing_or_used');
   context.inProgress=true;
   const challenge=await inspectEmailChallenge(page,input.expectedAccount);
@@ -121,7 +147,7 @@ export async function completeEmailVerification(input,page,context,{getTargets,c
       }
       if(selected.status!=='gmail_waiting_for_fresh_verification') throw new Error('manual_security_blocker: crypto_email_'+selected.status);
       if(Date.now()-lastRefresh>10000){await gmail.send('Page.reload',{ignoreCache:false});lastRefresh=Date.now()}
-      await new Promise(r=>setTimeout(r,1000));
+      await new Promise(r=>setTimeout(r,Math.max(0,Math.min(1000,deadline-Date.now()))));
     }
     throw new Error('manual_security_blocker: crypto_email_fresh_message_timeout');
   }finally{gmail.close()}

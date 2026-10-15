@@ -170,6 +170,7 @@ h2 { font-size: 19px; font-weight: 760; }
 }
 
 .toolbar-actions { justify-content: flex-end; }
+.version-badge { white-space: nowrap; flex-shrink: 0; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--secondary); padding: 0 4px; }
 
 .toolbar-button,
 .primary-button,

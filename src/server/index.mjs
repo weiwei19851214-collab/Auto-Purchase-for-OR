@@ -17,6 +17,8 @@ import {runnerArgs} from './automation-adapter.mjs';
 import {JobWorker} from './worker.mjs';
 import {AutoRechargeScheduler} from './auto-recharge-scheduler.mjs';
 
+// Snapshot at startup: a later Git update must not masquerade as a restarted service.
+const runningVersion = (await repoInfo()).shortSha || '';
 const db = openDatabase();
 const recoveredJobIds = recoverInterruptedWork(db);
 if (recoveredJobIds.length) console.warn(`[recovery] blocked ${recoveredJobIds.length} interrupted job(s) for manual verification`);
@@ -51,6 +53,7 @@ async function handle(req, res) {
     sendJson(res, 200, {
       ok: true,
       worker: worker.status(),
+      version: runningVersion,
       scheduler: autoRechargeScheduler.getState('bank_card'),
       schedulers: autoRechargeScheduler.getStates(),
     });
@@ -156,6 +159,7 @@ async function handle(req, res) {
       ok: true,
       jobs: jobsList(db),
       worker: worker.status(),
+      version: runningVersion,
       scheduler: autoRechargeScheduler.getState('bank_card'),
       schedulers: autoRechargeScheduler.getStates(),
     });

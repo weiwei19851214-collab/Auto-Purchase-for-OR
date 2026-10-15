@@ -1507,6 +1507,7 @@
 
   async function refreshJobs() {
     const data = await requestJson('/api/jobs');
+    el.appVersion.textContent = /^[a-f0-9]{7,40}$/.test(data.version || '') ? `版本 ${data.version}` : '版本未知';
     state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
     state.worker = data.worker || {};
     state.schedulers = data.schedulers || {bank_card: data.scheduler || {}};

@@ -6,6 +6,7 @@ import {redact} from './redact.mjs';
 import {executeRow, runnerArgs, writeResultCsv, automationLogDirForRow} from './automation-adapter.mjs';
 import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult, writeCryptoCompletedRow} from './opom-client.mjs';
+import {buildCryptoCallbackPayload} from './crypto-callback.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {CRYPTO_TASK_TIMEOUT_MS} from './config.mjs';
@@ -13,7 +14,7 @@ import * as adspower from '../automation/lib/adspower.mjs';
 import {CRYPTO_AMOUNT_FIELDS, cryptoAmountsWithCheckpoint} from '../automation/lib/crypto-amount-fields.mjs';
 
 import {walletPasswordForRow, walletSeedForRow} from './crypto-wallet-secrets.mjs';
-import {getCryptoPayment, beginCryptoPayment, updateCryptoPayment} from './crypto-payment-ledger.mjs';
+import {getCryptoPayment, beginCryptoPayment, updateCryptoPayment, frozenCryptoCallback} from './crypto-payment-ledger.mjs';
 
 // Store observed accounting values as text; never infer missing amounts.
 const CRYPTO_ACCOUNTING_FIELDS = Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [column, key]);
@@ -266,7 +267,8 @@ export class JobWorker {
       const owned = getCryptoPayment(this.db, accountKey);
       const canUpdate = owned?.row_id === row.id || previousPayment?.phase === 'credited';
       if (result.status === 'completed' && canUpdate) {
-        const details = result.details || {};
+        const details = {...result.details, cryptoOccurredAt:result.details?.cryptoOccurredAt || nowIso()};
+        result.details = details;
         const verified = Number.isFinite(Number(details.balanceAfter)) && details.balanceAfter !== ''
           && Number.isFinite(Number(details.balanceBefore)) && details.balanceBefore !== ''
           && Number(details.balanceAfter) > Number(details.balanceBefore);
@@ -277,18 +279,22 @@ export class JobWorker {
           updateCryptoPayment(this.db, accountKey, 'credited', details);
           try {
             if (options.opomWriteback && row.opom_account_id) {
+              const eventKey = 'crypto:' + owned.job_id + ':' + owned.row_id;
+              const callbackPayload = frozenCryptoCallback(this.db,eventKey,()=>buildCryptoCallbackPayload(
+                {opom_account_id:row.opom_account_id},details,
+                {idempotencyKey:eventKey,providerEventId:eventKey,occurredAt:details.cryptoOccurredAt}));
               const written = await (this.writeRowResultFn || writeCryptoCompletedRow)({...options, runId: owned.job_id}, {
                 opom_account_id: row.opom_account_id, ads_power_user_id: row.ads_power_user_id,
                 ads_power_serial_number: row.ads_power_serial_number,
                 result_idempotency_key: 'crypto:' + owned.job_id + ':' + owned.row_id,
-              }, details, {runId: owned.job_id, rowNumber: row.row_number, status: 'completed', stage: 'closed_loop.complete'});
+              }, details, {runId: owned.job_id, rowNumber: row.row_number, status: 'completed', stage: 'closed_loop.complete',callbackPayload});
               if (written.resultStatus !== 'written') throw new Error('OPOM result not written');
               result.details = {...details, opomResultWritebackStatus: 'written'};
             } else if (options.cryptoScheduled) throw new Error('scheduled crypto requires OPOM writeback');
             updateCryptoPayment(this.db, accountKey, 'completed', details);
           } catch (error) {
             result = {...result, status: 'failed', stage: 'opom.writeback',
-              errorCode: /^OPOM network failed/i.test(error.message || '') ? 'opom_writeback_network_failed' : 'opom_writeback_failed',
+              errorCode: error.opomNetworkFailure || [500,503].includes(error.httpStatus) || /^OPOM network failed/i.test(error.message || '') ? 'opom_writeback_network_failed' : 'opom_writeback_failed',
               errorDetail: redact(error.message || String(error)),
               message: '充值已到账，OPOM 写回待重试；禁止再次付款',
               details: {...details, opomResultWritebackStatus: 'failed'}, safeToContinue: false, stopProfile: false};

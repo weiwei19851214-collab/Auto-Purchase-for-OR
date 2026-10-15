@@ -243,3 +243,17 @@ adspower_status_target=waived_by_user
 
 UI 开发验收运行 `node scripts/ui-crypto-scheduler-smoke.mjs`（全模拟，无真实付款）。
 真实启用计划和外部支付仍需当前任务中的明确授权。
+
+### 虚拟币财务回调
+
+手动与自动充值统一向当前 OPOM 地址的 `/api/v1/recharge/virtual-currency/callback`
+发送已核验充值面额 `amount`、`amountCurrency=USD`、实读支付金额 `PaidAmount` 和
+美元网络费 `networkFee`（`networkFeeCurrency=USD`）；不发送 `fee` 或 `feeCurrency`。
+`PaidAmount` 大小写不可改。网络费缺少美元值时不得用原币数量代替，也不得将未知费用写为零。
+当前来源为 USD/USDC 的支付页面金额及网络费美元估值；小于阈值的显示值会在备注保留原文。
+
+回调成功需确认 `data.status=STORED`、匹配的 `providerEventId` 和非空 `callbackId`。
+账号余额及 AdsPower 信息仍通过原结果接口同步。两条写回都完成后才将账号标记为完成。
+`crypto_callback_outbox` 持久保留首次回调正文；所有重试均沿用原付款事件、时间和金额。
+网络/500/503 错误可重试；400/401/404/409/422 应检查配置或资料，不要修改幂等键重发。
+历史任务缺少金额证据时保留待写回状态，不自动编造数据，不重新发起付款。

@@ -2,7 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 
-// Local accounting fields only; never spread these into external writeback payloads.
+// Accounting fields are mapped explicitly by the crypto callback builder; never spread them into external payloads.
 export const CRYPTO_AMOUNT_FIELDS = Object.freeze({
   cryptoCreditAmount: 'crypto_credit_amount',
   cryptoPaymentAmount: 'crypto_payment_amount',

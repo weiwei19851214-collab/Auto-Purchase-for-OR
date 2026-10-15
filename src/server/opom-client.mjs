@@ -1,4 +1,5 @@
 import {redact} from './redact.mjs';
+import {validateCryptoCallbackPayload} from './crypto-callback.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 
 const DEFAULT_GROUP = 'recharge';
@@ -197,6 +198,9 @@ async function requestJson(args, path, options = {}) {
         httpError.responseBody = body;
         httpError.nonRetryable = true;
         throw httpError;
+      }
+      if (options.expectedStatuses && !options.expectedStatuses.includes(res.status)) {
+        throw Object.assign(new Error(`OPOM unexpected HTTP status ${res.status}`), {nonRetryable: true, httpStatus: res.status});
       }
       return body;
     } catch (error) {
@@ -480,6 +484,7 @@ export async function writeCryptoCompletedRow(args, row, details, context = {}) 
   const accountId = plan.opomAccountId(row);
   if (!args.opomWriteback || !accountId) throw new Error('Crypto completion requires OPOM writeback and account ID');
   if (details.purchaseStatus !== 'verified') throw new Error('Crypto writeback requires verified purchase');
+  const callbackPayload = validateCryptoCallbackPayload(context.callbackPayload, accountId);
   const amountUsd = numberOrUndefined(details.purchaseAmount);
   const balanceBeforeUsd = numberOrUndefined(details.balanceBefore);
   const balanceAfterUsd = numberOrUndefined(details.balanceAfter);
@@ -489,7 +494,7 @@ export async function writeCryptoCompletedRow(args, row, details, context = {}) 
   const runId = args.runId || context.runId;
   if (!runId) throw new Error('Crypto writeback requires a stable run ID');
   const body = {
-    idempotencyKey: `crypto_result:${runId}:${accountId}:${context.rowNumber || ''}:completed`,
+    idempotencyKey: `crypto_result:${callbackPayload.providerEventId}:completed`,
     opomAccountId: accountId,
     ...(safeLoginEmail(row) ? {loginEmail: safeLoginEmail(row)} : {}),
     status: 'completed',
@@ -499,12 +504,20 @@ export async function writeCryptoCompletedRow(args, row, details, context = {}) 
     balanceBeforeUsd,
     balanceAfterUsd,
     ...adsPowerPayload(row, details),
-    occurredAt: context.occurredAt || new Date().toISOString(),
+    occurredAt: callbackPayload.occurredAt,
   };
   const path = `/api/v1/recharge/runs/${encodeURIComponent(runId)}/results`;
   const secondaryFailures = [];
   for (const target of writebackTargets(args)) {
     try {
+      const callback = await requestJson(argsForWritebackTarget(args, target), '/api/v1/recharge/virtual-currency/callback', {
+        method: 'POST', idempotent: true, expectedStatuses: [200, 201], body: JSON.stringify(callbackPayload),
+      });
+      if (callback?.data?.status !== 'STORED' || callback?.data?.providerEventId !== callbackPayload.providerEventId
+        || typeof callback?.data?.callbackId !== 'string' || !callback.data.callbackId.trim()
+        || callback?.ok === false || callback?.success === false || callback?.error) {
+        throw new Error('OPOM returned an unsuccessful crypto callback response');
+      }
       const response = await requestJson(argsForWritebackTarget(args, target), path, {
         method: 'POST', idempotent: true, body: JSON.stringify(body),
       });
@@ -616,6 +629,8 @@ function safeLoginEmail(row) {
 
 function writebackError(error, status) {
   const wrapped = new Error(redact(error?.message || 'OPOM writeback failed'));
+  if (error?.httpStatus) wrapped.httpStatus = error.httpStatus;
+  if (error?.opomNetworkFailure) wrapped.opomNetworkFailure = true;
   wrapped.opomCardWritebackStatus = status.cardStatus;
   wrapped.opomResultWritebackStatus = status.resultStatus;
   return wrapped;

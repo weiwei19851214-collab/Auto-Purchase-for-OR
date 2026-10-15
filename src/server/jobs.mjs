@@ -16,7 +16,8 @@ import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {writeCompletedRow, writeCryptoCompletedRow} from './opom-client.mjs';
-import {assertCryptoPaymentAllowed, getCryptoPayment, updateCryptoPayment} from './crypto-payment-ledger.mjs';
+import {assertCryptoPaymentAllowed, getCryptoPayment, updateCryptoPayment, frozenCryptoCallback} from './crypto-payment-ledger.mjs';
+import {buildCryptoCallbackPayload} from './crypto-callback.mjs';
 import {holdWalletPasswords, validateWalletPasswords} from './crypto-wallet-secrets.mjs';
 import {CRYPTO_AMOUNT_FIELDS} from '../automation/lib/crypto-amount-fields.mjs';
 
@@ -620,7 +621,17 @@ export async function repairOpomWriteback(db, jobId, payload = {}) {
 
   const now = nowIso();
   try {
-    const writeback = await (crypto ? writeCryptoCompletedRow : writeCompletedRow)(args, originalRow, details, {rowNumber});
+    const context = {rowNumber};
+    if (crypto) {
+      const payment = getCryptoPayment(db,row.opom_account_id);
+      if (payment) Object.assign(details,JSON.parse(payment.details_json));
+      details.cryptoOccurredAt ||= row.finished_at || payment?.updated_at || now;
+      const eventKey = `crypto:${payment?.job_id || jobId}:${payment?.row_id || row.id}`;
+      context.callbackPayload = frozenCryptoCallback(db,eventKey,()=>buildCryptoCallbackPayload(originalRow,details,
+        {idempotencyKey:eventKey,providerEventId:eventKey,occurredAt:details.cryptoOccurredAt}));
+      context.runId = payment?.job_id || jobId;
+    }
+    const writeback = await (crypto ? writeCryptoCompletedRow : writeCompletedRow)(crypto?{...args,runId:context.runId}:args, originalRow, details, context);
     if (crypto) updateCryptoPayment(db, row.opom_account_id, 'completed', details);
     details.opomCardWritebackStatus = writeback.cardStatus;
     details.opomResultWritebackStatus = writeback.resultStatus;

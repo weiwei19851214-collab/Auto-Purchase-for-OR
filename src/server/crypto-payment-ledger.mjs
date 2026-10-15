@@ -6,6 +6,18 @@ export function initializeCryptoPaymentLedger(db) {
     cycle_id TEXT NOT NULL DEFAULT '', phase TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS crypto_callback_outbox (
+    event_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+  )`);
+}
+export function frozenCryptoCallback(db, eventKey, buildPayload) {
+  initializeCryptoPaymentLedger(db);
+  const existing = db.prepare('SELECT payload_json FROM crypto_callback_outbox WHERE event_key=?').get(eventKey);
+  if (existing) return JSON.parse(existing.payload_json);
+  const payload = buildPayload();
+  db.prepare('INSERT INTO crypto_callback_outbox(event_key,payload_json,created_at) VALUES(?,?,?)')
+    .run(eventKey,JSON.stringify(payload),new Date().toISOString());
+  return payload;
 }
 export function getCryptoPayment(db, accountId) {
   initializeCryptoPaymentLedger(db);
@@ -32,7 +44,7 @@ export function beginCryptoPayment(db, accountId, jobId, rowId, cycleId = '') {
 export function updateCryptoPayment(db, accountId, phase, details = {}) {
   // Explicit allowlist: never persist child input or wallet credentials.
   const safe = {};
-  for (const key of ['purchaseAmount','balanceBefore','balanceAfter','adsPowerUserId','adsPowerSerialNumber','purchaseStatus', ...Object.keys(CRYPTO_AMOUNT_FIELDS)]) {
+  for (const key of ['purchaseAmount','balanceBefore','balanceAfter','adsPowerUserId','adsPowerSerialNumber','purchaseStatus','cryptoOccurredAt', ...Object.keys(CRYPTO_AMOUNT_FIELDS)]) {
     if (details[key] !== undefined) safe[key] = details[key];
   }
   db.prepare('UPDATE crypto_payment_ledger SET phase=?,details_json=?,updated_at=? WHERE account_id=?')

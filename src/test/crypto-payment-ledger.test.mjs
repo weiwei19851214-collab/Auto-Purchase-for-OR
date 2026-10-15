@@ -1,8 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {beginCryptoPayment, getCryptoPayment, isCryptoAccountBlocked, updateCryptoPayment} from '../server/crypto-payment-ledger.mjs';
+import {beginCryptoPayment, getCryptoPayment, isCryptoAccountBlocked, updateCryptoPayment, frozenCryptoCallback} from '../server/crypto-payment-ledger.mjs';
 import {prepareOkxWallet, continueOkxRiskWarning} from '../automation/crypto_recharge_openrouter_cdp.mjs';
+
+test('callback snapshot survives database reopen and never rebuilds amounts or timestamp', async () => {
+  const {mkdtempSync,rmSync}=await import('node:fs');
+  const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+  const dir=mkdtempSync(join(tmpdir(),'crypto-outbox-'));const path=join(dir,'test.sqlite');
+  let db=new DatabaseSync(path);
+  try {
+    const payload={idempotencyKey:'original-job-row',providerEventId:'original-job-row',amount:'150',PaidAmount:'157.50',networkFee:'0.01',occurredAt:'2026-10-15T00:00:00.000Z'};
+    assert.deepEqual(frozenCryptoCallback(db,'original-job-row',()=>payload),payload);
+    db.close();db=new DatabaseSync(path);
+    assert.deepEqual(frozenCryptoCallback(db,'original-job-row',()=>{throw new Error('must not rebuild');}),payload);
+  } finally {db.close();rmSync(dir,{recursive:true,force:true});}
+});
 
 test('durable crypto guard blocks overlapping jobs and uncertain retries across cycles', () => {
   const db = new DatabaseSync(':memory:');
@@ -57,6 +70,7 @@ test('worker retries only OPOM after verified credit, preserving password solely
     holdWalletPasswords(jobId, ['fixture-private-password']);
     db.prepare("INSERT INTO scheduler_state(id,enabled,updated_at) VALUES('auto-recharge:crypto',1,?)").run(new Date().toISOString());
     let purchases = 0, writes = 0;
+    const callbackBodies=[];
     const worker = new JobWorker(db, {
       executeRowFn: async (_csv, _index, options) => {
         purchases++;
@@ -65,9 +79,13 @@ test('worker retries only OPOM after verified credit, preserving password solely
         assert.equal(getCryptoPayment(db, 'account-fixture').phase, 'executing');
         return {status: 'completed', safeToContinue: true, details: {
           purchaseStatus: 'verified', purchaseAmount: '150', balanceBefore: '-2', balanceAfter: '148',
+          cryptoCreditAmount:'150',cryptoPaymentAmount:'157.50',cryptoPaymentAsset:'USDC',cryptoNetworkFeeUsd:'0.01',cryptoNetworkFeeStatus:'observed',
         }};
       },
-      writeRowResultFn: async () => { if (++writes === 1) throw new Error('simulated outage'); return {resultStatus: 'written'}; },
+      writeRowResultFn: async (_args,_row,_details,context) => {
+        callbackBodies.push(JSON.stringify(context.callbackPayload));
+        if (++writes === 1) throw new Error('simulated outage'); return {resultStatus: 'written'};
+      },
     });
     await worker.runJob(jobId);
     assert.equal(getCryptoPayment(db, 'account-fixture').phase, 'credited');
@@ -77,6 +95,11 @@ test('worker retries only OPOM after verified credit, preserving password solely
     await worker.runJob(jobId);
     assert.equal(purchases, 1);
     assert.equal(writes, 2);
+    assert.equal(callbackBodies[0],callbackBodies[1]);
+    assert.equal(JSON.parse(callbackBodies[0]).PaidAmount,'157.50');
+    assert.equal(JSON.parse(callbackBodies[0]).networkFee,'0.01');
+    assert.equal('fee' in JSON.parse(callbackBodies[0]),false);
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM crypto_callback_outbox').all()).includes('fixture-private-password'),false);
     assert.equal(getCryptoPayment(db, 'account-fixture').phase, 'completed');
     assert.equal(getJob(db, jobId).options_json.includes('fixture-private-password'), false);
     assert.equal(JSON.stringify(db.prepare('SELECT * FROM crypto_payment_ledger').all()).includes('fixture-private-password'), false);
@@ -179,7 +202,8 @@ for (const scenario of ['ordinary', 'security', 'uncertain', 'exception', 'write
               details: {cryptoPaymentNotStarted: !['uncertain', 'security'].includes(scenario)},
             };
           }
-          return {status: 'completed', safeToContinue: true, details: {balanceBefore: '0', balanceAfter: '150', purchaseAmount: '150'}};
+          return {status: 'completed', safeToContinue: true, details: {balanceBefore: '0', balanceAfter: '150', purchaseAmount: '150',purchaseStatus:'verified',
+            cryptoCreditAmount:'150',cryptoPaymentAmount:'157.50',cryptoPaymentAsset:'USDC',cryptoNetworkFeeUsd:'0.01',cryptoNetworkFeeStatus:'observed'}};
         },
         writeRowResultFn: async (_options, row) => {
           if (scenario === 'writeback-network' && row.opom_account_id === 'fixture-0') throw new Error('OPOM network failed at fixture: UND_ERR_SOCKET');

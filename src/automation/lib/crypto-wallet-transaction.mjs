@@ -10,6 +10,9 @@ const NETWORK_ALIASES = new Map([
   ['polygon pos', 'polygon'],
 ]);
 
+// Coinbase 文案里的介词 “to” 不能被当成资产；只有明确币种才参与资产指纹。
+const KNOWN_ASSETS = '(?:USDC|USDT|ETH|DAI|MATIC|SOL|BTC)';
+
 export function normalizeTransactionLabel(value) {
   return String(value || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -156,8 +159,10 @@ export function classifyOkxTransactionSnapshot(snapshot, expected = {}) {
 
 export function checkoutPaymentFingerprint(text) {
   const normalized = String(text || '').replace(/ /g, ' ');
-  const pay = normalized.match(/\bPay\s+([0-9,]+(?:\.\d+)?)\s+([A-Z][A-Z0-9_]*)\b/i);
-  const total = normalized.match(/\bTotal(?: due| to pay)?\s*:?\s*\$?\s*([0-9,]+(?:\.\d+)?)\s*([A-Z][A-Z0-9_]*)?/i);
+  // Coinbase 文案可能是 “Pay $10.50 to ...” 或 “Pay 10.50 USDC ...”。
+  // 这里读取的是实际扣款金额，可能包含网络/服务费，不能回退成用户设置的充值目标金额。
+  const pay = normalized.match(new RegExp('\\bPay\\s+\\$?\\s*([0-9,]+(?:\\.\\d+)?)\\s*(' + KNOWN_ASSETS + ')?\\b', 'i'));
+  const total = normalized.match(new RegExp('\\bTotal(?: due| to pay)?\\s*:?\\s*\\$?\\s*([0-9,]+(?:\\.\\d+)?)\\s*(' + KNOWN_ASSETS + ')?\\b', 'i'));
   return {
     amount: pay?.[1] || total?.[1] || '',
     asset: String(pay?.[2] || total?.[2] || '').toUpperCase(),

@@ -155,6 +155,27 @@ test('password Confirm may go directly to Connect without a welcome page', async
   assert.deepEqual(page.clicks, ['Confirm', 'Connect']);
 });
 
+test('unlocked wallet transaction page is routed to payment confirmation instead of wallet-page blocker', async () => {
+  const page = walletFixture('ready');
+  const calls = [];
+  const result = await prepareOkxWallet({
+    confirmWalletPayment: true,
+    expectedCryptoPayment: {amount: '10.50', asset: 'USDC', network: 'Arbitrum One'},
+  }, {
+    acquireStage: async (_input, allowed) => {
+      assert.ok(allowed.includes('transaction_confirmation'));
+      return {wallet: page.wallet, target: {}, state: {stage: 'transaction_confirmation', transactionStage: 'risk_warning'}};
+    },
+    confirmWalletPayment: async (_input, amount, asset, network) => {
+      calls.push({amount, asset, network});
+      return {confirmed: true, riskWarningClicked: true, confirmationClicked: true};
+    },
+  });
+  assert.equal(result.status, 'payment_confirmed');
+  assert.deepEqual(calls, [{amount: '10.50', asset: 'USDC', network: 'Arbitrum One'}]);
+  assert.equal(page.closed, 1);
+});
+
 test('missing CSV password fails before typing and still releases the target', async () => {
   const page = walletFixture('password_setup');
   await assert.rejects(prepareOkxWallet({}, page.adapters), /crypto_wallet_password_missing/);

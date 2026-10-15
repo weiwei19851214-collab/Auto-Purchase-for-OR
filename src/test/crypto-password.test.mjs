@@ -56,7 +56,7 @@ test('Invalid credentials in the visible Credits password dialog stops after one
   assert.equal(error.status, 'manual_security_blocker');
   assert.equal(error.stage, 'crypto.password_verification');
   assert.equal(error.safeToContinueBatch, false);
-  assert.equal(error.stopProfile, false);
+  assert.equal(error.stopProfile, true);
   assert.equal(clicks, 1);
   const source = readFileSync(new URL('../automation/crypto_recharge_openrouter_cdp.mjs', import.meta.url), 'utf8');
   const checkout = source.slice(source.indexOf('async function openCheckout('), source.indexOf('async function selectOkxWallet('));
@@ -202,7 +202,7 @@ test('crypto password failures are sanitized and preserve browser for human veri
     assert.equal(error.message.includes(secret), false);
     const result = classifyError(error.message);
     assert.equal(result.status, 'manual_security_blocker');
-    assert.equal(result.stopProfile, false);
+    assert.equal(result.stopProfile, true);
     assert.equal(result.safeToContinueBatch, false);
     return true;
   });

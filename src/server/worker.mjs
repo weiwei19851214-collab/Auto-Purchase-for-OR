@@ -238,6 +238,14 @@ export class JobWorker {
     }
     result = normalizeResultError(result);
     if (unexpectedError) {
+      if (rowArgs.rechargeMode === 'crypto' && rowArgs.stopProfiles && result.stopProfile === true
+        && result.profileStop?.attempted !== true) {
+        // 适配器之外抛出的单行异常也必须回收 AdsPower profile，避免钱包窗口残留。
+        result.profileStop = await adspower.stopProfile(rowArgs, {
+          userId: row.ads_power_user_id || row.profile_id || '',
+          serialNumber: row.ads_power_serial_number || '',
+        });
+      }
       await this.writeUnexpectedRowOpomResult(row, result, options);
       addEvent(this.db, job.id, 'row.error', `row ${row.row_number}: ${result.message}`, {
         status: result.status,

@@ -1268,9 +1268,9 @@ async function clickOkxWalletConnect(wallet) {
   return {status: 'connect_submitted'};
 }
 
-export async function findOkxWalletTargets(input, listTargets = getTargets, pause = sleep) {
+export async function findOkxWalletTargets(input, listTargets = getTargets, pause = sleep, timeoutMs = 10000) {
   const extensionRoot = 'chrome-extension://' + OKX_EXTENSION_ID + '/';
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   do {
     const targets = listTargets(input.debugPort).filter((target) =>
       ['page', 'other', 'iframe'].includes(target.type) && String(target.url || '').startsWith(extensionRoot)
@@ -1297,7 +1297,7 @@ async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   let lastKnownStages = [];
   do {
-    const targets = await findOkxWalletTargets(input);
+      const targets = await findOkxWalletTargets(input, getTargets, sleep, Math.min(timeoutMs, 1000));
     const clients = [];
     let selectedIndex = -1;
     try {
@@ -1306,8 +1306,21 @@ async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
         clients.push(wallet);
         await wallet.send('Runtime.enable');
       }
-      const stages = await Promise.all(clients.map((wallet) =>
-        inspectWalletStage(wallet).catch(() => ({stage: 'unknown'}))));
+      const stages = await Promise.all(clients.map(async (wallet) => {
+        let transactionState = {stage: 'not_checked'};
+        if (input.confirmWalletPayment === true && input.expectedCryptoPayment) {
+          try {
+            transactionState = await inspectOkxTransactionStage(wallet, input.expectedCryptoPayment);
+            if (['risk_warning', 'confirm_send'].includes(transactionState.stage)) {
+              return {stage: 'transaction_confirmation', transactionState};
+            }
+          } catch {
+            transactionState = {stage: 'inspection_error'};
+          }
+        }
+        const walletState = await inspectWalletStage(wallet).catch(() => ({stage: 'unknown'}));
+        return {...walletState, transactionState};
+      }));
       lastKnownStages = stages.map((state) => state.stage);
       writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-targets', {
         allowed,
@@ -1315,6 +1328,11 @@ async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
           type: target.type || '',
           url: String(target.url || '').split('?')[0],
           stage: stages[index]?.stage || 'unknown',
+          transactionStage: stages[index]?.transactionState?.stage || 'not_checked',
+          transactionButtonCount: Number(stages[index]?.transactionState?.buttonCount || 0),
+          transactionOriginOk: stages[index]?.transactionState?.originOk === true,
+          transactionAmountMatched: stages[index]?.transactionState?.hasAmount === true,
+          transactionNetworkMatched: stages[index]?.transactionState?.hasNetwork === true,
         })),
       });
       const matches = stages.flatMap((state, index) => allowed.includes(state.stage) ? [index] : []);
@@ -1333,7 +1351,7 @@ async function acquireOkxWalletStage(input, allowed, timeoutMs = 10000) {
         throw new Error('manual_security_blocker: crypto_wallet_import_authentication_required');
       }
     } catch (error) {
-      if (/^manual_security_blocker: crypto_wallet_import_/.test(error.message || '')) throw error;
+      if (/^manual_security_blocker: crypto_wallet_(?:import_|transaction_)/.test(error.message || '')) throw error;
     } finally {
       if (selectedIndex < 0) {
         for (const client of clients) client.close();
@@ -1350,11 +1368,32 @@ export async function prepareOkxWallet(input, adapters = {}) {
   try {
     // 普通密码页是可执行阶段，不是人工阻断；允许从上一次已完成的页面直接接续。
     let allowed = ['ready', 'unlock', 'welcome', 'method', 'words', 'password_choice', 'password_setup',
-      'post_password_welcome', 'connect_request'];
+      'post_password_welcome', 'connect_request', 'transaction_confirmation'];
     for (let transition = 0; transition < 8; transition += 1) {
       current = await acquire(input, allowed, 20000);
       const stage = current.state.stage;
       if (stage === 'ready') return {status: 'ready'};
+      if (stage === 'transaction_confirmation') {
+        const observedTransactionState = current.state.transactionState || {};
+        current.wallet.close();
+        current = null;
+        const confirmPayment = adapters.confirmWalletPayment || confirmOkxWalletPayment;
+        const expected = input.expectedCryptoPayment || {};
+        const walletPaymentConfirmation = await confirmPayment(
+          input,
+          expected.amount || '',
+          expected.asset || 'USDC',
+          expected.network || '',
+          {timeoutMs: 30000},
+        );
+        writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-payment-confirmed', {
+          transactionStageDetected: observedTransactionState.stage || '',
+          riskWarningClicked: walletPaymentConfirmation.riskWarningClicked === true,
+          confirmationClicked: walletPaymentConfirmation.confirmationClicked === true,
+          network: walletPaymentConfirmation.network || '',
+        });
+        return {status: 'payment_confirmed', walletPaymentConfirmation};
+      }
       if (stage === 'connect_request') {
         if (input.confirmWalletConnection === false) return {status: 'connect_required'};
         return await clickOkxWalletConnect(current.wallet);
@@ -1495,7 +1534,7 @@ async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warn
   do {
     let targets;
     try {
-      targets = await findOkxWalletTargets(input);
+      targets = await findOkxWalletTargets(input, getTargets, sleep, Math.min(timeoutMs, 1000));
     } catch {
       targets = [];
     }
@@ -1513,29 +1552,95 @@ async function acquireOkxTransactionTarget(input, expected, stages = ['risk_warn
         wallet?.close();
       }
     }
-    if (matches.length > 1) {
-      for (const match of matches) match.wallet.close();
-      throw new Error('manual_security_blocker: crypto_wallet_transaction_target_ambiguous');
+    if (matches.length) {
+      // OKX notification page 与承载 UI 的 SES iframe 可能同时暴露同一笔交易；按同一指纹去重后优先使用顶层 page。
+      const uniqueFingerprints = new Set(matches.map(({state}) => [
+        state.stage,
+        state.network,
+        state.asset,
+        state.hasAmount === true,
+      ].join('|')));
+      if (uniqueFingerprints.size > 1) {
+        for (const match of matches) match.wallet.close();
+        throw new Error('manual_security_blocker: crypto_wallet_transaction_target_ambiguous');
+      }
+      matches.sort((left, right) => {
+        const rank = (type) => type === 'page' ? 0 : type === 'other' ? 1 : 2;
+        return rank(left.target.type) - rank(right.target.type);
+      });
+      const selected = matches[0];
+      for (const duplicate of matches.slice(1)) duplicate.wallet.close();
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-transaction-detected', {
+        stage: selected.state.stage,
+        targetType: selected.target.type || '',
+        duplicateTargets: matches.length - 1,
+        originOk: selected.state.originOk,
+        amountMatched: selected.state.hasAmount,
+        networkMatched: selected.state.hasNetwork,
+        network: selected.state.network,
+      });
+      return selected;
     }
-    if (matches.length === 1) return matches[0];
     await sleep(250);
   } while (Date.now() < deadline);
-  throw new Error('manual_security_blocker: crypto_wallet_transaction_confirmation_unavailable:' + lastState.stage);
+  const fingerprint = [
+    lastState.stage || 'unknown',
+    'buttons=' + Number(lastState.buttonCount || 0),
+    'origin=' + String(lastState.originOk === true),
+    'amount=' + String(lastState.hasAmount === true),
+    'network=' + String(lastState.hasNetwork === true),
+  ].join(',');
+  // 无可见交易按钮表示确认页尚未弹出；出现按钮但指纹不匹配时保留现场供人工核对。
+  const errorCode = Number(lastState.buttonCount || 0) > 0
+    ? 'crypto_wallet_transaction_page_unverified:'
+    : 'crypto_wallet_transaction_confirmation_unavailable:';
+  writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-transaction-detection-failed', {
+    ...lastState,
+    expectedAsset: String(expected.asset || '').toUpperCase(),
+    expectedAmount: String(expected.amount || ''),
+    expectedNetwork: String(expected.network || ''),
+    waitTimeoutMs: timeoutMs,
+  });
+  throw new Error('manual_security_blocker: ' + errorCode + fingerprint);
 }
 
-export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '') {
+export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', network = '', options = {}) {
   const expected = {amount, asset, network};
-  let current = await acquireOkxTransactionTarget(input, expected, ['risk_warning']);
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 30000;
+  let current = await acquireOkxTransactionTarget(input, expected, ['risk_warning', 'confirm_send'], timeoutMs);
   let wallet = current.wallet;
   try {
-    await clickOkxTransactionButton(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
-    wallet.close();
-    wallet = null;
-    current = await acquireOkxTransactionTarget(input, expected, ['confirm_send'], 15000);
-    wallet = current.wallet;
+    const riskWarningClicked = current.state.stage === 'risk_warning';
+    if (riskWarningClicked) {
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-before-click', {
+        stage: current.state.stage,
+        amountMatched: current.state.hasAmount,
+        network: current.state.network,
+      });
+      await clickOkxTransactionButton(wallet, 'risk_warning', 'Continue (Unsafe)', expected);
+      writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-risk-warning-clicked', {
+        label: 'Continue (Unsafe)',
+        stage: current.state.stage,
+      });
+      wallet.close();
+      wallet = null;
+      current = await acquireOkxTransactionTarget(input, expected, ['confirm_send'], Math.min(timeoutMs, 15000));
+      wallet = current.wallet;
+    }
     const state = current.state;
+    writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-confirm-before-click', {
+      stage: state.stage,
+      amountMatched: state.hasAmount,
+      networkMatched: state.hasNetwork,
+      network: state.network,
+    });
     await clickOkxTransactionButton(wallet, 'confirm_send', 'Confirm', expected);
-    return {confirmed: true, riskWarningClicked: true, confirmationClicked: true, network: state.network};
+    writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-confirm-clicked', {
+      label: 'Confirm',
+      stage: state.stage,
+      network: state.network,
+    });
+    return {confirmed: true, riskWarningClicked, confirmationClicked: true, network: state.network};
   } finally {
     wallet?.close();
   }
@@ -1585,6 +1690,47 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         },
       };
     }
+    const checkoutDetails = await checkoutFingerprint(checkout).catch(() => ({}));
+    const expectedPaymentAmount = checkoutDetails.amount
+      || purchaseContext.totalDue
+      || purchaseContext.amount
+      || purchaseContext.ruleDecision?.selectedAmount
+      || '';
+    const expectedPaymentAsset = checkoutDetails.asset
+      || purchaseContext.checkoutState?.requiredAsset
+      || purchaseContext.requiredAsset
+      || 'USDC';
+    const expectedPaymentNetwork = paymentNetworkFromContext(purchaseContext);
+    input.expectedCryptoPayment = {
+      amount: expectedPaymentAmount,
+      asset: expectedPaymentAsset,
+      network: expectedPaymentNetwork,
+    };
+    writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-payment-context', {
+      confirmWalletPayment: input.confirmWalletPayment === true,
+      amount: String(expectedPaymentAmount || ''),
+      asset: String(expectedPaymentAsset || ''),
+      network: String(expectedPaymentNetwork || ''),
+      checkoutOrigin: checkoutDetails.origin || '',
+      checkoutPath: checkoutDetails.pathname || '',
+    });
+    let walletPaymentConfirmation = {confirmed: false};
+    if (input.confirmWalletPayment === true) {
+      // 解锁后风险提示会立即弹出；短探测必须在 dapp-entry 钱包页识别之前进行。
+      try {
+        walletPaymentConfirmation = await confirmWalletPaymentFn(
+          input,
+          expectedPaymentAmount,
+          expectedPaymentAsset,
+          expectedPaymentNetwork,
+          {timeoutMs: 1000},
+        );
+      } catch (error) {
+        const errorMessage = String(error?.message || error);
+        if (/crypto_wallet_transaction_page_unverified/.test(errorMessage)) throw error;
+        if (!/crypto_wallet_transaction_confirmation_unavailable/.test(errorMessage)) throw error;
+      }
+    }
     // 显式自动付款时，Launch extension 后先再读一次 Coinbase；迟到的余额不足
     // 优先于任何 OKX 交易按钮。未开启自动付款时保持原有人工边界和调用顺序。
     if (input.confirmWalletPayment === true) {
@@ -1611,9 +1757,56 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       }
     }
     // Coinbase 的 Launch extension 弹出钱包后，再判断登录状态或执行首次导入。
-    const wallet = await prepareWallet(input);
-    let walletPaymentConfirmation = {confirmed: false};
-    if (wallet.status === 'connect_required' || wallet.status === 'connect_submitted') {
+    // 交易 target 已出现时不再用 dapp-entry 通知页状态覆盖已识别的支付页面。
+    let wallet = walletPaymentConfirmation.confirmed
+      ? {status: 'ready', reason: 'transaction_page_already_open'}
+      : null;
+    if (!wallet) {
+      try {
+        wallet = await prepareWallet(input);
+      } catch (error) {
+        const errorMessage = String(error?.message || error);
+        const walletStageUnrecognized = /crypto_wallet_(?:import_unverified|import_unknown_page|import_page_changed|import_inspection_failed)/.test(errorMessage);
+        if (input.confirmWalletPayment !== true || !walletStageUnrecognized) throw error;
+        // 密码解锁后风险页可能异步出现；钱包主页状态识别失败时，再给交易 target 一个完整等待窗口。
+        try {
+          walletPaymentConfirmation = await confirmWalletPaymentFn(
+            input,
+            expectedPaymentAmount,
+            expectedPaymentAsset,
+            expectedPaymentNetwork,
+            {timeoutMs: 30000},
+          );
+          wallet = {status: 'ready', reason: 'transaction_page_intercepted_after_unlock'};
+        } catch (transactionError) {
+          const transactionMessage = String(transactionError?.message || transactionError);
+          if (/crypto_wallet_transaction_page_unverified/.test(transactionMessage)) throw transactionError;
+          if (/crypto_wallet_transaction_confirmation_unavailable/.test(transactionMessage)) throw error;
+          throw transactionError;
+        }
+      }
+    }
+    if (wallet.status === 'payment_confirmed' && wallet.walletPaymentConfirmation?.confirmed === true) {
+      walletPaymentConfirmation = wallet.walletPaymentConfirmation;
+    }
+    if (!walletPaymentConfirmation.confirmed && wallet.status === 'connect_submitted'
+      && input.confirmWalletPayment === true) {
+      // OKX Connect 提交后可能立即弹出交易风险页；不要在此提前返回钱包等待状态。
+      try {
+        walletPaymentConfirmation = await confirmWalletPaymentFn(
+          input,
+          expectedPaymentAmount,
+          expectedPaymentAsset,
+          expectedPaymentNetwork,
+          {timeoutMs: 30000},
+        );
+      } catch (error) {
+        const errorMessage = String(error?.message || error);
+        if (/crypto_wallet_transaction_page_unverified/.test(errorMessage)) throw error;
+        if (!/crypto_wallet_transaction_confirmation_unavailable/.test(errorMessage)) throw error;
+      }
+    }
+    if (!walletPaymentConfirmation.confirmed && (wallet.status === 'connect_required' || wallet.status === 'connect_submitted')) {
       // 余额不足不需要等人工连接钱包；页面错误可能在 Launch extension 后异步渲染，
       // 延长读取窗口，避免先误判为 wallet_confirmation 而把当前任务挂住。
       const checkoutState = await inspectCheckout(checkout, {timeoutMs: 30000});
@@ -1637,8 +1830,8 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         },
       };
     }
-    if (wallet.status !== 'ready') throw new Error('manual_security_blocker: crypto_wallet_import_unverified');
-    if (input.confirmWalletPayment === true) {
+    if (!walletPaymentConfirmation.confirmed && wallet.status !== 'ready') throw new Error('manual_security_blocker: crypto_wallet_import_unverified');
+    if (input.confirmWalletPayment === true && !walletPaymentConfirmation.confirmed) {
       // 钱包已就绪后再次读取 Coinbase；余额不足的异步结果优先于任何钱包交易按钮。
       const checkoutStateBeforePayment = await inspectCheckout(checkout, {timeoutMs: 1000});
       const livePaymentPage = await checkoutFingerprint(checkout).catch(() => null);
@@ -1678,7 +1871,8 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         || purchaseContext.ruleDecision?.selectedAmount;
       const expectedAsset = checkoutFingerprintData.asset
         || checkoutStateBeforePayment.requiredAsset
-        || purchaseContext.requiredAsset;
+        || purchaseContext.requiredAsset
+        || 'USDC';
       const expectedNetwork = paymentNetworkFromContext({...purchaseContext, checkoutState: checkoutStateBeforePayment}) || checkoutFingerprintData.network;
       if (!expectedAmount || !expectedAsset) {
         throw new Error('manual_security_blocker: crypto_wallet_transaction_payment_context_missing');
@@ -1694,6 +1888,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         expectedAmount,
         expectedAsset,
         expectedNetwork,
+        {timeoutMs: 30000},
       );
     }
     const checkoutState = await inspectCheckout(checkout, {timeoutMs: walletPaymentConfirmation.confirmed ? 60000 : 10000, requirePaymentCompleted: walletPaymentConfirmation.confirmed});

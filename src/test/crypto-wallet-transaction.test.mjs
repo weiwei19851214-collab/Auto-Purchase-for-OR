@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   classifyOkxTransactionSnapshot,
+  checkoutPaymentFingerprint,
   extractTransactionAmountAssets,
   normalizeTransactionAmount,
 } from '../automation/lib/crypto-wallet-transaction.mjs';
@@ -20,6 +21,18 @@ test('normalizes decimal amounts and extracts wallet asset values', () => {
   assert.equal(normalizeTransactionAmount('10.50'), 10.5);
   assert.deepEqual(extractTransactionAmountAssets('-10.50 USDC'), [{amount: 10.5, asset: 'USDC'}]);
   assert.equal(normalizeTransactionAmount('-10.50'), null);
+});
+
+test('checkout fingerprint keeps the Coinbase fee-inclusive payment amount', () => {
+  assert.deepEqual(checkoutPaymentFingerprint('Pay $10.50 to OpenRouter, Inc'), {
+    amount: '10.50', asset: '', network: '',
+  });
+  assert.deepEqual(checkoutPaymentFingerprint('Pay 10.50 USDC to OpenRouter, Inc'), {
+    amount: '10.50', asset: 'USDC', network: '',
+  });
+  assert.deepEqual(checkoutPaymentFingerprint('Total due $10.5'), {
+    amount: '10.5', asset: '', network: '',
+  });
 });
 
 test('recognizes the warning page without requiring transaction details', () => {

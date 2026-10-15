@@ -615,7 +615,8 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
       const paymentCompleted = cryptoPurchase.paymentCompleted === true
         && cryptoPurchase.walletPaymentConfirmation?.confirmed === true;
       const terminalFailure = paymentFailed || insufficientFunds;
-      if (terminalFailure && args.stopProfiles) {
+      const shouldStopCryptoProfile = args.stopProfiles;
+      if (shouldStopCryptoProfile && terminalFailure) {
         profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
       }
       if (paymentCompleted) {
@@ -656,6 +657,11 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
             : (walletConfirmationRequired
               ? 'OKX 钱包已连接，请在当前钱包界面核对金额和网络后人工确认支付'
               : '虚拟币支付页面已准备，但尚未确认钱包状态')));
+      // 充值未完成时，无论是余额不足、钱包确认阻塞还是支付状态无法验证，都关闭当前 profile。
+      // 钱包弹窗可能仍处于可付款状态，不能让失败任务把浏览器留在后台。
+      if (shouldStopCryptoProfile && !profileStop.attempted) {
+        profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
+      }
       return {
         status: terminalFailure
           ? status.STATUSES.FAILED
@@ -675,7 +681,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         },
         // 钱包余额是整个批次的共享前提，余额不足时暂停任务，避免后续账号继续进入支付流程。
         safeToContinue: insufficientFunds ? false : terminalFailure,
-        stopProfile: terminalFailure,
+        stopProfile: true,
         profileStop,
       };
     }

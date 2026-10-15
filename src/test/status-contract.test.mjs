@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {classifyError, STATUSES} from '../automation/lib/status-contract.mjs';
 
-test('crypto purchase form loading failure preserves the AdsPower browser and pauses the batch', () => {
+test('crypto purchase form loading failure closes the AdsPower browser and pauses the batch', () => {
   const result = classifyError('Crypto purchase form did not become ready within 20000ms');
   assert.equal(result.status, STATUSES.FAILED);
   assert.equal(result.stage, 'crypto.purchase_form');
   assert.equal(result.safeToContinueBatch, false);
-  assert.equal(result.stopProfile, false);
+  assert.equal(result.stopProfile, true);
 });
 
 test('Stripe Link save-info state is not classified as manual security blocker', () => {

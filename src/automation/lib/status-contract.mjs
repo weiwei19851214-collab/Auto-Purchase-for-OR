@@ -33,13 +33,18 @@ export function classifyError(message) {
     });
   }
   if (/crypto_wallet_(?:import_|password_)/.test(text)) {
-    return statusRecord(STATUSES.FAILED, {
-      stage: 'crypto.wallet_import', safeToContinueBatch: true, stopProfile: true, message: text,
+    return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
+      stage: 'crypto.wallet_import',
+      terminal: true,
+      // 虚拟币单行失败后必须释放 AdsPower profile，避免钱包弹窗阻塞后续任务。
+      safeToContinueBatch: false,
+      stopProfile: true,
+      message: text,
     });
   }
   if (/crypto_password_/i.test(text)) {
     return statusRecord(STATUSES.MANUAL_SECURITY_BLOCKER, {
-      stage: 'crypto.password_verification', safeToContinueBatch: false, stopProfile: false, message: text,
+      stage: 'crypto.password_verification', safeToContinueBatch: false, stopProfile: true, message: text,
     });
   }
   if (/crypto_wallet_transaction_/i.test(text)) {
@@ -47,7 +52,7 @@ export function classifyError(message) {
       stage: 'crypto.wallet_confirmation',
       terminal: true,
       safeToContinueBatch: false,
-      stopProfile: false,
+      stopProfile: true,
       message: text,
     });
   }
@@ -55,9 +60,9 @@ export function classifyError(message) {
     return statusRecord(STATUSES.FAILED, {
       stage: 'crypto.purchase_form',
       terminal: true,
-      // 虚拟币页面加载或输入失败时保留浏览器现场，并暂停后续账号，避免页面刚刷新出来就被关闭。
+      // 页面已无法继续时立即关闭 profile，避免失败任务留下可重复付款的窗口。
       safeToContinueBatch: false,
-      stopProfile: false,
+      stopProfile: true,
       message: text,
     });
   }
@@ -66,7 +71,7 @@ export function classifyError(message) {
       stage: /password/i.test(text) ? 'identity.reverification' : 'crypto.wallet_confirmation',
       terminal: true,
       safeToContinueBatch: false,
-      stopProfile: false,
+      stopProfile: true,
       message: text,
     });
   }

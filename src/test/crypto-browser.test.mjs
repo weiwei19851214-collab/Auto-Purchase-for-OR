@@ -23,6 +23,11 @@ const CRYPTO_OPTIONS = {
   skipAdsPowerMatch: false,
 };
 
+const observedCheckoutPayment = async () => ({
+  amount: '10.50', asset: 'USDC', network: 'arbitrum one', source: 'coinbase_checkout',
+  networkFee: {amount: '', asset: '', usd: '', display: '', status: 'unavailable', source: 'coinbase_checkout'},
+});
+
 test('runtime dispatcher keeps bank-card and crypto executors physically separated', () => {
   assert.match(automationScriptForRechargeMode('crypto'), /crypto_recharge_openrouter_cdp\.mjs$/);
   assert.match(automationScriptForRechargeMode('bank_card'), /bind_openrouter_card_cdp\.mjs$/);
@@ -245,6 +250,7 @@ test('post-amount flow launches OKX, then checks login before wallet confirmatio
   const checkout = {close() { calls.push('close'); }};
   const adapters = {
     prepareWallet: async () => { calls.push('wallet'); return {status: 'ready'}; },
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => { calls.push('purchase'); return {clicked: true}; },
     openCheckout: async () => { calls.push('checkout'); return {checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}; },
     selectWallet: async () => { calls.push('select-okx'); return {selected: true}; },
@@ -262,6 +268,7 @@ test('post-amount flow launches OKX, then checks login before wallet confirmatio
   const blockedCheckout = {close() {}};
   await assert.rejects(continueCryptoAfterAmount({}, {}, {}, {
     prepareWallet: async () => ({status: 'locked'}),
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout: blockedCheckout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -276,6 +283,7 @@ test('crypto checkout prioritizes insufficient funds while wallet connection is 
   const checkout = {close() {}};
   const result = await continueCryptoAfterAmount({}, {}, {amount: '150'}, {
     prepareWallet: async () => ({status: 'connect_required'}),
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -311,6 +319,7 @@ test('explicit wallet payment confirmation still skips OKX when Coinbase reports
       confirmed = true;
       throw new Error('wallet payment must not run after insufficient funds');
     },
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -333,6 +342,7 @@ test('crypto checkout uses Coinbase insufficient funds even when OKX did not exp
       prepared = true;
       throw new Error('OKX should not be required after Coinbase insufficient funds');
     },
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -359,6 +369,7 @@ test('crypto checkout leaves a non-ready wallet at the connection boundary witho
   let confirmed = false;
   let checkoutReads = 0;
   const result = await continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {amount: '10'}, {
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -390,6 +401,7 @@ test('crypto checkout can confirm OKX risk warning and payment confirmation befo
     requiredAsset: 'USDC',
     network: 'Arbitrum One',
   }, {
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -405,10 +417,25 @@ test('crypto checkout can confirm OKX risk warning and payment confirmation befo
     },
     inspectTargets: async () => [],
   });
-  assert.deepEqual(calls, [['confirm-wallet-payment', '10', 'USDC', 'Arbitrum One'], ['read-checkout', 1000], ['read-checkout', 60000]]);
+  assert.deepEqual(calls, [['confirm-wallet-payment', '10.50', 'USDC', 'Arbitrum One'], ['read-checkout', 1000], ['read-checkout', 60000]]);
   assert.equal(result.cryptoPurchase.walletPaymentConfirmation.confirmed, true);
   assert.equal(result.cryptoPurchase.checkoutState.paymentCompleted, true);
   result.checkout.close();
+});
+
+test('crypto checkout does not fall back to recharge or cached total when payment cannot be observed', async () => {
+  let confirmed = false;
+  await assert.rejects(continueCryptoAfterAmount({confirmWalletPayment: true}, {}, {
+    amount: '10', totalDue: '10.50', requiredAsset: 'USDC',
+  }, {
+    submitPurchase: async () => ({clicked: true}),
+    openCheckout: async () => ({checkout: {close() {}}, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
+    selectWallet: async () => ({selected: true}),
+    launchExtension: async () => ({targetCount: 1}),
+    readPayment: async () => { throw new Error('crypto_checkout_payment_amount_unverified'); },
+    confirmWalletPayment: async () => { confirmed = true; return {confirmed: true}; },
+  }), /crypto_checkout_payment_amount_unverified/);
+  assert.equal(confirmed, false);
 });
 
 test('crypto payment completion from wallet stage handler is carried through to Coinbase verification', async () => {
@@ -420,6 +447,7 @@ test('crypto payment completion from wallet stage handler is carried through to 
     beforeBalance: {balance: 20},
     requiredAsset: 'USDC',
   }, {
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),
@@ -454,6 +482,7 @@ test('crypto transaction risk page appearing after wallet-page inspection error 
     requiredAsset: 'USDC',
     network: 'Arbitrum One',
   }, {
+    readPayment: observedCheckoutPayment,
     submitPurchase: async () => ({clicked: true}),
     openCheckout: async () => ({checkout, target: {url: 'https://payments.coinbase.com/payment-sessions/test'}}),
     selectWallet: async () => ({selected: true}),

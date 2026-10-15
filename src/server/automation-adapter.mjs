@@ -8,6 +8,7 @@ import * as childRunner from '../automation/lib/child-runner.mjs';
 import * as common from '../automation/lib/common.mjs';
 import * as csv from '../automation/lib/csv.mjs';
 import * as plan from '../automation/lib/recharge-plan.mjs';
+import {CRYPTO_AMOUNT_FIELDS, cryptoAmountsFromResult, cryptoAmountsWithCheckpoint, beginCryptoAccountingAttempt} from '../automation/lib/crypto-amount-fields.mjs';
 import * as status from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import * as opom from './opom-client.mjs';
@@ -342,6 +343,7 @@ export function publicRow(row) {
     missing: JSON.parse(row.missing_json || '[]'),
     purchaseStatus: row.purchase_status,
     purchaseAmount: row.purchase_amount,
+    ...Object.fromEntries(Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [key, row[column] ?? ''])),
     balanceBefore: row.balance_before,
     balanceAfter: row.balance_after,
     zdrStatus: row.zdr_status || '',
@@ -585,6 +587,9 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const task = args.rechargeMode === 'crypto'
     ? plan.buildCryptoRechargeTask(row, args)
     : plan.buildClosedLoopTask(row, args);
+  if (args.rechargeMode === 'crypto' && options.cryptoAccountingAttemptId) {
+    task.cryptoAccountingAttemptId = options.cryptoAccountingAttemptId;
+  }
   if (args.rechargeMode === 'crypto' && options.runtimeSeedPhrase) {
     // 只交给当前账号子进程，绝不加入 row/details/result CSV 或 options_json。
     task.walletSeedPhrase = options.runtimeSeedPhrase;
@@ -604,6 +609,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
   const outcome = adapters.runClosedLoopChildAsync
     ? await adapters.runClosedLoopChildAsync(automationScript, task, args)
     : await runClosedLoopChildAsync(automationScript, task, args, childRunnerAdapter, commonAdapter);
+  const cryptoAmounts = args.rechargeMode === 'crypto' ? cryptoAmountsFromResult(outcome.result) : {};
   let profileStop = {attempted: false};
   if (outcome.ok) {
     if (args.rechargeMode === 'crypto') {
@@ -629,6 +635,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
           details: {
             ...plan.rowMetadata(row),
             rechargeMode: 'crypto',
+            ...cryptoAmounts,
             purchaseStatus: 'verified',
             purchaseAmount: cryptoPurchase.amount || cryptoPurchase.ruleDecision?.selectedAmount || '',
             balanceBefore: cryptoPurchase.beforeBalance?.balance ?? '',
@@ -672,6 +679,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
         details: {
           ...plan.rowMetadata(row),
           rechargeMode: 'crypto',
+          ...cryptoAmounts,
           purchaseStatus: insufficientFunds ? 'insufficient_funds' : (walletConfirmationRequired ? 'wallet_confirmation_required' : 'checkout_prepared'),
           purchaseAmount: cryptoPurchase.amount || cryptoPurchase.ruleDecision?.selectedAmount || '',
           balanceBefore: cryptoPurchase.beforeBalance?.balance ?? '',
@@ -772,6 +780,7 @@ export async function executeRowWithAdapters(csvText, rawIndex, options = {}, ad
     message: error.message,
     errorCode: error.errorCode,
   });
+  Object.assign(failureDetails, cryptoAmounts);
   if (args.stopProfiles && contract.stopProfile) {
     profileStop = await adspowerAdapter.stopProfile(args, plan.adsPowerProfileIdentifier(row));
   }
@@ -804,12 +813,16 @@ function isOpomCardBindingFailure(error) {
 
 function ensureAutomationLogDir(runtimeLog = {}, rawIndex = 0) {
   cleanupOldAutomationLogs();
+  const dir = automationLogDirForRow(runtimeLog, rawIndex);
+  mkdirSync(dir, {recursive: true});
+  return dir;
+}
+
+export function automationLogDirForRow(runtimeLog = {}, rawIndex = 0) {
   const jobId = String(runtimeLog.jobId || 'manual').replace(/[^a-zA-Z0-9._-]+/g, '_');
   const rowNumber = String(runtimeLog.rowNumber || rawIndex + 2).replace(/[^a-zA-Z0-9._-]+/g, '_');
   const rowId = String(runtimeLog.rowId || '').replace(/[^a-zA-Z0-9._-]+/g, '_');
-  const dir = join(LOG_DIR, jobId, `row-${rowNumber}${rowId ? `-${rowId}` : ''}`);
-  mkdirSync(dir, {recursive: true});
-  return dir;
+  return join(LOG_DIR, jobId, `row-${rowNumber}${rowId ? `-${rowId}` : ''}`);
 }
 
 function cleanupOldAutomationLogs() {
@@ -894,6 +907,7 @@ function completionMessage(args) {
 }
 
 export async function runClosedLoopChildAsync(bindScript, task, args, childRunner, common) {
+  if (args.rechargeMode === 'crypto') beginCryptoAccountingAttempt(task);
   const childArgs = [bindScript, '--stdin'];
   if (args.rechargeMode !== 'crypto') {
     if (args.scopeAutoTopup) childArgs.push('--configure-auto-topup');
@@ -947,13 +961,15 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
     });
     child.on('close', (code) => {
       const parsed = childRunner.parseChildJson(stdout, stderr);
+      const cryptoAmounts = cryptoAmountsWithCheckpoint(task, parsed);
       if (code === 0 && parsed?.ok) {
-        finish({ok: true, result: parsed});
+        finish({ok: true, result: {...parsed, cryptoAmounts}});
         return;
       }
       if (timedOut) {
         finish({
           ok: false,
+          result: {cryptoAmounts},
           error: `bind script timed out after ${args.rowTimeoutMs}ms`,
           child: args.verbose ? {stdout: common.redact(stdout), stderr: common.redact(stderr)} : undefined,
         });
@@ -962,6 +978,7 @@ export async function runClosedLoopChildAsync(bindScript, task, args, childRunne
       const message = parsed?.error || stderr || stdout || `bind script exited ${code}`;
       finish({
         ok: false,
+        result: {cryptoAmounts},
         error: message,
         child: args.verbose ? {stdout: common.redact(stdout), stderr: common.redact(stderr)} : undefined,
       });

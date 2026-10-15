@@ -1,14 +1,19 @@
 import {readFileSync} from 'node:fs';
+import {randomUUID} from 'node:crypto';
 import {addEvent, getJob, listRows, updateJobCounts} from './db.mjs';
 import {nowIso} from './ids.mjs';
 import {redact} from './redact.mjs';
-import {executeRow, runnerArgs, writeResultCsv} from './automation-adapter.mjs';
+import {executeRow, runnerArgs, writeResultCsv, automationLogDirForRow} from './automation-adapter.mjs';
 import {writeAdsPowerStatus} from './adspower-status.mjs';
 import {writeRowResult} from './opom-client.mjs';
 import * as statusContract from '../automation/lib/status-contract.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
 import {CRYPTO_TASK_TIMEOUT_MS} from './config.mjs';
 import * as adspower from '../automation/lib/adspower.mjs';
+import {CRYPTO_AMOUNT_FIELDS, cryptoAmountsWithCheckpoint} from '../automation/lib/crypto-amount-fields.mjs';
+
+// Store observed accounting values as text; never infer missing amounts.
+const CRYPTO_ACCOUNTING_FIELDS = Object.entries(CRYPTO_AMOUNT_FIELDS).map(([key, column]) => [column, key]);
 
 const ERROR_ROW_STATUSES = new Set([
   'failed',
@@ -188,14 +193,13 @@ export class JobWorker {
     const heartbeat = this.startRowHeartbeat(job, row);
     let result;
     let unexpectedError = false;
+    const runtimeLog = {jobId: job.id, rowId: row.id, rowNumber: row.row_number};
+    const cryptoAccountingAttemptId = rowArgs.rechargeMode === 'crypto' ? randomUUID() : '';
     try {
       const executionPromise = this.executeRowFn(csvText, row.raw_index, {
         ...options,
-        runtimeLog: {
-          jobId: job.id,
-          rowId: row.id,
-          rowNumber: row.row_number,
-        },
+        runtimeLog,
+        ...(cryptoAccountingAttemptId ? {cryptoAccountingAttemptId} : {}),
       });
       if (rowArgs.rechargeMode !== 'crypto') {
         result = await executionPromise;
@@ -223,7 +227,13 @@ export class JobWorker {
             errorCode: 'crypto_task_timeout',
             message: '虚拟币充值单行流程超过 4 分钟，已强制关闭浏览器并继续下一任务',
             errorDetail: 'crypto task timeout after ' + CRYPTO_TASK_TIMEOUT_MS + 'ms',
-            details: {profileStop},
+            details: {
+              profileStop,
+              ...cryptoAmountsWithCheckpoint({
+                confirmationDebugDir: automationLogDirForRow(runtimeLog, row.raw_index),
+                cryptoAccountingAttemptId,
+              }),
+            },
             safeToContinue: true,
             stopProfile: true,
             profileStop,
@@ -270,6 +280,7 @@ export class JobWorker {
         SET status = ?, stage = ?, error_code = ?, message = ?, error_detail = ?,
           purchase_status = ?, purchase_amount = ?,
           balance_before = ?, balance_after = ?,
+          ${CRYPTO_ACCOUNTING_FIELDS.map(([column]) => `${column} = ?`).join(', ')},
           ads_power_user_id = COALESCE(NULLIF(?, ''), ads_power_user_id),
           ads_power_serial_number = COALESCE(NULLIF(?, ''), ads_power_serial_number),
           card_no = COALESCE(NULLIF(?, ''), card_no),
@@ -299,6 +310,7 @@ export class JobWorker {
         result.details?.purchaseAmount || '',
         String(result.details?.balanceBefore ?? ''),
         String(result.details?.balanceAfter ?? ''),
+        ...CRYPTO_ACCOUNTING_FIELDS.map(([, key]) => String(result.details?.[key] ?? '')),
         result.details?.adsPowerUserId || row.ads_power_user_id || '',
         result.details?.adsPowerSerialNumber || row.ads_power_serial_number || '',
         result.details?.cardNo || '',
@@ -540,6 +552,7 @@ export class JobWorker {
           purchaseAmount: row.purchase_amount,
           balanceBefore: row.balance_before,
           balanceAfter: row.balance_after,
+          ...Object.fromEntries(CRYPTO_ACCOUNTING_FIELDS.map(([column, key]) => [key, row[column] ?? ''])),
           cardLast4: row.card_last4,
           cardNo: row.card_no,
           paymentMethodAction: row.payment_method_action || '',

@@ -1,5 +1,6 @@
 import {cardLast4, normalizeExpiry, normalizeMoneyValue, redact} from './common.mjs';
 import {rowObject, setCell} from './csv.mjs';
+import {CRYPTO_AMOUNT_FIELDS, pickCryptoAmounts} from './crypto-amount-fields.mjs';
 
 export function loginEmail(row) {
   return String(row.login_email || row.username || '').trim();
@@ -107,6 +108,7 @@ export function resultColumns() {
     'task_message',
     'purchase_status',
     'purchase_amount',
+    ...Object.values(CRYPTO_AMOUNT_FIELDS),
     'balance_before',
     'balance_after',
     'card_last4',
@@ -601,6 +603,10 @@ export function writeOutcome(header, row, status, message, details = {}) {
   setCell(header, row, 'task_message', redact(message || ''));
   setCell(header, row, 'purchase_status', details.purchaseStatus || '');
   setCell(header, row, 'purchase_amount', details.purchaseAmount || '');
+  const cryptoAmounts = pickCryptoAmounts(details);
+  for (const [key, column] of Object.entries(CRYPTO_AMOUNT_FIELDS)) {
+    setCell(header, row, column, cryptoAmounts[key] ?? '');
+  }
   setCell(header, row, 'balance_before', details.balanceBefore ?? '');
   setCell(header, row, 'balance_after', details.balanceAfter ?? '');
   setCell(header, row, 'card_last4', details.cardLast4 || '');

@@ -1,5 +1,7 @@
 # OpenRouter 充值执行器
 
+当前功能版本：**v1.1.0**。控制台右上角显示服务启动时的版本号及 Git 提交号。
+
 本项目提供一个本地 Web 控制台和确定性的 Node.js worker，用于通过
 AdsPower/CDP 完成 OpenRouter 绑卡、no-purchase 测试、验证充值和 Auto top-up
 配置。
@@ -99,6 +101,35 @@ Credits 页后，按下面顺序处理单个账号：
 11. 根据配置停止当前 AdsPower profile，并写入任务状态、结果 CSV 和日志。
 
 ## 虚拟币充值流程
+
+### 本地对账金额
+
+虚拟币金额按三类独立记录：充值面额（例如 `10`）、Coinbase 实读支付金额
+（例如包含业务口径 5% 税费的 `10.50`）、链上网络费用。支付金额必须从当前可信
+Coinbase checkout 的 Pay/Total 区域读取，读不到就停止，不回退充值面额、不按 1.05 推算。
+钱包核验只比较支付金额，明确的 Fee/Network fee/Gas fee 与余额不会被误当成第二笔付款。
+Coinbase 的普通 Fee 可能是税费，不将它冒充网络费用。
+
+本地 `job_rows`、任务详情 API 和结果 CSV 保存以下字段；`purchase_amount` 保持原充值面额语义。
+
+| 数据库/CSV 字段 | 含义 |
+| --- | --- |
+| `crypto_credit_amount` | 本次充值面额，例如 10 |
+| `crypto_payment_amount` | Coinbase 实读支付金额，例如 10.50 |
+| `crypto_payment_asset` | 支付币种，例如 USDC |
+| `crypto_payment_amount_source` | 支付金额读取来源 |
+| `crypto_network_fee_amount` | 网络费原币数量，或只显示 USD 时的 USD 金额 |
+| `crypto_network_fee_asset` | 网络费币种，例如 ETH 或 USD |
+| `crypto_network_fee_usd` | 页面显示的网络费 USD 估值，不自行换算 |
+| `crypto_network_fee_display` | 网络费原始显示，例如 `<$0.01` |
+| `crypto_network_fee_status` | `observed` 或 `unavailable`（未读取） |
+| `crypto_network_fee_source` | 网络费读取来源 |
+
+按当前对账约定，`<$0.01` 按 `0.01` 记录预估数值，仍保留原文，不增加精度标记。
+如果 Coinbase/OKX 都没有可读取的网络费，允许继续付款，费用数值留空、状态记为
+`unavailable`，不能填成零。真实显示的零费用才记录为 `0`。
+失败时也保存已观察到的金额；安全的 `crypto-financials.json` checkpoint 用于子进程超时后的金额恢复。
+旧任务增加字段后保持空值，不推算历史金额。OPOM 的虚拟币回调接口尚未对接，本次不发送这些新字段。
 
 ### 风险提示三级触发与留证
 

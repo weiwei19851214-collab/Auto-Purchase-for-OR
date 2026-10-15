@@ -50,6 +50,7 @@ export function extractTransactionNetworks(text) {
     .map((line) => normalizeTransactionLabel(line)).filter(Boolean);
   const networks = [];
   for (let index = 0; index < lines.length; index += 1) {
+    if (FEE_LABEL.test(lines[index])) continue;
     const match = lines[index].match(/^Network\s*:?\s*(.*)$/i);
     if (!match) continue;
     const value = normalizeTransactionLabel(match[1]) || lines[index + 1] || '';
@@ -77,6 +78,84 @@ export function extractTransactionAmountAssets(text) {
   return [...inline, ...labeled];
 }
 
+const FEE_LABEL = /^(?:Estimated\s+)?(?:Network\s+fee|Gas\s+fee|Transaction\s+fee|Fee)\b\s*:?\s*/i;
+const BALANCE_LABEL = /^(?:(?:Available|Wallet|Token)\s+)?Balance\b\s*:?\s*/i;
+const FEE_VALUE = /([<≤~≈]?\s*)(?:\$\s*(\d[\d,]*(?:\.\d+)?)\s*(?:USD\b)?|(\d[\d,]*(?:\.\d+)?)\s*(USD|USDC|USDT|ETH|DAI|MATIC|POL|SOL|BTC|BNB|AVAX)\b)/gi;
+
+function isValueOnlyLine(line) {
+  return /^[\s\d.,$<≤~≈()A-Z]+$/.test(line) && /\d/.test(line);
+}
+
+function adjacentDetailValue(lines, index) {
+  const line = lines[index] || '';
+  if (/^[<≤~≈]?\s*\d[\d,]*(?:\.\d+)?$/.test(line)) {
+    return /^(?:USD|USDC|USDT|ETH|DAI|MATIC|POL|SOL|BTC|BNB|AVAX)$/.test(lines[index + 1] || '')
+      ? [line, lines[index + 1]] : [];
+  }
+  return isValueOnlyLine(line) ? [line] : [];
+}
+
+// Labelled fee and balance values are evidence, but are not payment amounts.
+// Consume only adjacent value-only lines so another Send/Amount row stays visible
+// to the conflicting-payment guard.
+function paymentAmountText(text) {
+  const lines = normalizedLines(text);
+  const payment = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (FEE_LABEL.test(lines[index]) || BALANCE_LABEL.test(lines[index])) {
+      let detail = lines[index];
+      while (index + 1 < lines.length) {
+        const next = adjacentDetailValue(lines, index + 1);
+        if (!next.length) break;
+        const combined = `${detail} ${next.join(' ')}`;
+        const values = [...combined.matchAll(FEE_VALUE)];
+        const dollars = values.filter((match) => match[2] || match[4]?.toUpperCase() === 'USD');
+        // A second token amount is not safely attributable to this fee/balance.
+        // Keep it as a payment candidate instead of hiding a possible conflict.
+        if (dollars.length > 1 || values.length - dollars.length > 1) break;
+        detail = combined;
+        index += next.length;
+      }
+      continue;
+    }
+    payment.push(lines[index]);
+  }
+  return payment.join('\n');
+}
+
+export function extractWalletNetworkFee(text) {
+  const unavailable = {
+    amount: '', asset: '', usd: '', display: '',
+    status: 'unavailable', source: 'okx_confirm',
+  };
+  const lines = normalizedLines(text);
+  const labels = lines.flatMap((line, index) => FEE_LABEL.test(line) ? [index] : []);
+  if (labels.length !== 1) return unavailable;
+  const index = labels[0];
+  const parts = [lines[index].replace(FEE_LABEL, '')];
+  for (let next = index + 1; next < lines.length;) {
+    const values = adjacentDetailValue(lines, next);
+    if (!values.length) break;
+    parts.push(...values);
+    next += values.length;
+  }
+  const display = parts.filter(Boolean).join(' ');
+  const values = [...display.matchAll(FEE_VALUE)].map((match) => ({
+    value: (match[2] || match[3]).replace(/,/g, ''),
+    asset: match[2] ? 'USD' : match[4].toUpperCase(),
+  }));
+  const native = values.filter((value) => value.asset !== 'USD');
+  const usd = values.filter((value) => value.asset === 'USD');
+  if (!values.length || native.length > 1 || usd.length > 1) return unavailable;
+  // Reconciliation uses the displayed estimate, including “<$0.01” as 0.01.
+  // Keep the original display so the estimate remains inspectable.
+  const primary = native[0] || usd[0];
+  return {
+    ...unavailable, display, status: 'observed',
+    amount: primary.value, asset: primary.asset, usd: usd[0]?.value || '',
+  };
+}
+
 function originMatches(origin, expectedOrigin) {
   return String(origin || '') === String(expectedOrigin || '');
 }
@@ -91,9 +170,7 @@ function amountAssetMatches(entries, expectedAmount, expectedAsset) {
 function entriesConflict(entries, expectedAmount, expectedAsset) {
   const amount = normalizeTransactionAmount(expectedAmount);
   const asset = String(expectedAsset || '').trim().toUpperCase();
-  // Gas/fee rows may contain another asset; only a conflicting value for the
-  // payment asset invalidates the fingerprint.
-  return entries.some((entry) => entry.asset === asset && entry.amount !== amount);
+  return entries.some((entry) => entry.asset !== asset || entry.amount !== amount);
 }
 
 function networkMatches(networks, expectedNetwork) {
@@ -119,7 +196,7 @@ export function classifyOkxTransactionSnapshot(snapshot, expected = {}) {
   const text = normalizeTransactionLabel(snapshot?.text);
   const buttons = Array.isArray(snapshot?.buttons) ? snapshot.buttons.filter((button) => button.visible !== false) : [];
   const originOk = originMatches(snapshot?.origin, expectedOrigin);
-  const entries = extractTransactionAmountAssets(snapshot?.text || '');
+  const entries = extractTransactionAmountAssets(paymentAmountText(snapshot?.text || ''));
   const networks = extractTransactionNetworks(snapshot?.text || '');
   const amount = normalizeTransactionAmount(expected.amount);
   const asset = String(expected.asset || '').trim().toUpperCase();

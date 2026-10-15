@@ -15,9 +15,11 @@ import {readCryptoAccountPassword} from './lib/crypto-account-password.mjs';
 import {captureGmailBaseline, completeEmailVerification, inspectEmailChallenge} from './lib/crypto-email-verification.mjs';
 import {continueRiskWarning} from './lib/crypto-risk-continue.mjs';
 import {captureRiskEvidence, clickRiskDom, clickRiskPlaywright} from './lib/crypto-risk-browser.mjs';
+import {pickCryptoAmounts} from './lib/crypto-amount-fields.mjs';
 import {
   checkoutPaymentFingerprint,
   classifyOkxTransactionSnapshot,
+  extractWalletNetworkFee,
 } from './lib/crypto-wallet-transaction.mjs';
 
 const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/settings/credits';
@@ -1602,6 +1604,55 @@ async function checkoutFingerprint(checkout) {
   }));
 }
 
+function recordCryptoAmounts(input, patch) {
+  input.cryptoAmounts = {...pickCryptoAmounts(input.cryptoAmounts), ...pickCryptoAmounts(patch)};
+  // A bounded, credential-free checkpoint also survives child-process timeouts.
+  writeDiagnostic(input.confirmationDebugDir, 'crypto-financials', {
+    attemptId: input.cryptoAccountingAttemptId || '',
+    cryptoAmounts: input.cryptoAmounts, observedAt: new Date().toISOString(),
+  });
+}
+
+function networkFeeAmounts(fee) {
+  return {
+    cryptoNetworkFeeAmount: fee?.amount || '',
+    cryptoNetworkFeeAsset: fee?.asset || '',
+    cryptoNetworkFeeUsd: fee?.usd || '',
+    cryptoNetworkFeeDisplay: fee?.display || '',
+    cryptoNetworkFeeStatus: fee?.status || 'unavailable',
+    cryptoNetworkFeeSource: fee?.status === 'observed' ? fee.source : '',
+  };
+}
+
+// Payment must be observed on the current trusted checkout. Never synthesize
+// it from credit amount, a tax multiplier, input context, or a previous run.
+export async function readObservedCryptoPayment(checkout, {timeoutMs = 10000, sleep: pause = sleep, now = Date.now} = {}) {
+  const deadline = now() + timeoutMs;
+  do {
+    let snapshot;
+    try { snapshot = await checkoutFingerprint(checkout); } catch {}
+    if (snapshot && (snapshot.origin !== 'https://payments.coinbase.com'
+      || !/^\/payment-sessions\/[^/]+\/?$/.test(snapshot.pathname || ''))) {
+      throw new Error('manual_security_blocker: crypto_wallet_transaction_checkout_unverified');
+    }
+    if (snapshot) {
+      const payment = checkoutPaymentFingerprint(snapshot.text || '');
+      const amount = String(payment.amount || '').replace(/,/g, '');
+      if (amount && Number.isFinite(Number(amount)) && Number(amount) > 0) {
+        // On Coinbase only explicit Network/Gas fee labels count. Its generic
+        // Fee/service charge may be the 5% tax, not the chain transaction fee.
+        const feeText = (snapshot.text || '').replace(/^(?:Estimated\s+)?(?:Fee|Transaction fee)\b[^\n]*$/gim, '');
+        const fee = extractWalletNetworkFee(feeText);
+        return {...payment, amount, source: 'coinbase_checkout',
+          networkFee: {...fee, source: 'coinbase_checkout'}};
+      }
+    }
+    if (now() >= deadline) break;
+    await pause(Math.min(250, deadline - now()));
+  } while (now() <= deadline);
+  throw new Error('manual_security_blocker: crypto_wallet_transaction_payment_amount_unreadable');
+}
+
 function paymentNetworkFromContext(context = {}) {
   return context.network || context.checkoutState?.network || context.requiredNetwork || '';
 }
@@ -1622,6 +1673,7 @@ async function inspectOkxTransactionStage(wallet, expected = {}) {
   }));
   const progress = String(snapshot.text || '').match(/\b([1-9]\d?) of ([1-9]\d?) confirmations\b/i);
   return {...classifyOkxTransactionSnapshot(snapshot, expected),
+    networkFee: extractWalletNetworkFee(snapshot.text || ''),
     confirmationStep: progress ? Number(progress[1]) : null,
     confirmationTotal: progress ? Number(progress[2]) : null};
 }
@@ -1825,6 +1877,14 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
       wallet = current.wallet;
     }
     const state = current.state;
+    if (state.hasAmount === true && state.asset) {
+      recordCryptoAmounts(input, {cryptoPaymentAsset: state.asset});
+    }
+    if (state.networkFee?.status === 'observed') {
+      recordCryptoAmounts(input, networkFeeAmounts(state.networkFee));
+    } else if (!input.cryptoAmounts?.cryptoNetworkFeeStatus) {
+      recordCryptoAmounts(input, networkFeeAmounts(null));
+    }
     writeDiagnostic(input.confirmationDebugDir, 'crypto-wallet-confirm-before-click', {
       stage: state.stage,
       amountMatched: state.hasAmount,
@@ -1843,6 +1903,9 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
     let afterClick;
     try {
       const observed = await inspect(wallet, expected);
+      if (observed.originOk === true && observed.networkFee?.status === 'observed') {
+        recordCryptoAmounts(input, networkFeeAmounts(observed.networkFee));
+      }
       afterClick = {stage: observed.stage, originOk: observed.originOk === true,
         amountMatched: observed.hasAmount === true, networkMatched: observed.hasNetwork === true,
         buttonCount: Number(observed.buttonCount || 0), readError: false,
@@ -1858,6 +1921,7 @@ export async function confirmOkxWalletPayment(input, amount, asset = 'USDC', net
       meaning: 'read_only_observation_requires_checkout_verification',
     });
     return {confirmed: true, riskWarningClicked, confirmationClicked: true, network: state.network,
+      financials: pickCryptoAmounts(input.cryptoAmounts),
       riskWarningAttempts: current.riskContinuation?.attempts || [],
       riskEvidenceFailures: current.riskContinuation?.evidenceFailures || 0};
   } finally {
@@ -1873,6 +1937,11 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
   const openWalletExtension = adapters.launchExtension || launchOkxExtension;
   const inspectCheckout = adapters.readCheckout || readCheckoutState;
   const inspectTargets = adapters.inspectTargets || inspectOkxTargets;
+  const readPayment = adapters.readPayment || readObservedCryptoPayment;
+  recordCryptoAmounts(input, {
+    cryptoCreditAmount: purchaseContext.amount || purchaseContext.ruleDecision?.selectedAmount || '',
+    ...networkFeeAmounts(null),
+  });
   const confirmWalletPaymentFn = adapters.confirmWalletPayment || confirmOkxWalletPayment;
   // Purchase 创建 Coinbase checkout；钱包风险提示和交易 Confirm 仅在任务显式开启时自动点击。
   if (input.gmailVerification) input.gmailVerification.challengeStartedAt = Date.now();
@@ -1910,18 +1979,19 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
         },
       };
     }
-    const checkoutDetails = await checkoutFingerprint(checkout).catch(() => ({}));
-    const displayedPayment = checkoutPaymentFingerprint(checkoutDetails.text || '');
-    const expectedPaymentAmount = displayedPayment.amount
-      || purchaseContext.totalDue
-      || purchaseContext.amount
-      || purchaseContext.ruleDecision?.selectedAmount
-      || '';
+    const displayedPayment = await readPayment(checkout);
+    const expectedPaymentAmount = displayedPayment.amount;
     const expectedPaymentAsset = displayedPayment.asset
       || purchaseContext.checkoutState?.requiredAsset
       || purchaseContext.requiredAsset
       || 'USDC';
     const expectedPaymentNetwork = paymentNetworkFromContext(purchaseContext) || displayedPayment.network;
+    recordCryptoAmounts(input, {
+      cryptoPaymentAmount: expectedPaymentAmount,
+      cryptoPaymentAsset: displayedPayment.asset || '',
+      cryptoPaymentAmountSource: displayedPayment.source,
+      ...(displayedPayment.networkFee?.status === 'observed' ? networkFeeAmounts(displayedPayment.networkFee) : {}),
+    });
     input.expectedCryptoPayment = {
       amount: expectedPaymentAmount,
       asset: expectedPaymentAsset,
@@ -1932,8 +2002,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       amount: String(expectedPaymentAmount || ''),
       asset: String(expectedPaymentAsset || ''),
       network: String(expectedPaymentNetwork || ''),
-      checkoutOrigin: checkoutDetails.origin || '',
-      checkoutPath: checkoutDetails.pathname || '',
+      paymentAmountSource: displayedPayment.source,
     });
     let walletPaymentConfirmation = {confirmed: false};
     if (input.confirmWalletPayment === true) {
@@ -2055,15 +2124,6 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
     if (input.confirmWalletPayment === true && !walletPaymentConfirmation.confirmed) {
       // 钱包已就绪后再次读取 Coinbase；余额不足的异步结果优先于任何钱包交易按钮。
       const checkoutStateBeforePayment = await inspectCheckout(checkout, {timeoutMs: 1000});
-      const livePaymentPage = await checkoutFingerprint(checkout).catch(() => null);
-      const paymentPage = livePaymentPage || (typeof checkout?.send !== 'function'
-        ? {
-          origin: 'https://payments.coinbase.com',
-          pathname: String(checkoutTarget.target.url || '').split('?')[0].replace('https://payments.coinbase.com', ''),
-          text: '',
-        }
-        : null);
-      if (!paymentPage) throw new Error('manual_security_blocker: crypto_wallet_transaction_checkout_unverified');
       if (checkoutStateBeforePayment.insufficientFunds === true) {
         const okxTargets = await inspectTargets(input.debugPort);
         return {
@@ -2084,12 +2144,10 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
           },
         };
       }
-      const checkoutFingerprintData = checkoutPaymentFingerprint(paymentPage.text);
+      const checkoutFingerprintData = await readPayment(checkout);
       // Coinbase 的 Pay 金额可能包含网络/服务费（例如 Credits 10 但钱包支付 10.50），
       // 交易页必须优先匹配 checkout 展示的实际扣款金额。
-      const expectedAmount = checkoutFingerprintData.amount
-        || purchaseContext.amount
-        || purchaseContext.ruleDecision?.selectedAmount;
+      const expectedAmount = checkoutFingerprintData.amount;
       const expectedAsset = checkoutFingerprintData.asset
         || checkoutStateBeforePayment.requiredAsset
         || purchaseContext.requiredAsset
@@ -2098,12 +2156,12 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       if (!expectedAmount || !expectedAsset) {
         throw new Error('manual_security_blocker: crypto_wallet_transaction_payment_context_missing');
       }
-      // Coinbase 有时不在结账正文展示网络；此时由 OKX 确认页要求唯一且已知的网络，
-      // 不静默默认到某条链。
-      if (!/^(?:https?:\/\/)?payments\.coinbase\.com$/i.test(paymentPage.origin || '')
-        || !/^\/payment-sessions\/[^/]+$/i.test(paymentPage.pathname || '')) {
-        throw new Error('manual_security_blocker: crypto_wallet_transaction_checkout_unverified');
-      }
+      recordCryptoAmounts(input, {
+        cryptoPaymentAmount: expectedAmount,
+        cryptoPaymentAsset: checkoutFingerprintData.asset || input.cryptoAmounts?.cryptoPaymentAsset || '',
+        cryptoPaymentAmountSource: checkoutFingerprintData.source,
+        ...(checkoutFingerprintData.networkFee?.status === 'observed' ? networkFeeAmounts(checkoutFingerprintData.networkFee) : {}),
+      });
       walletPaymentConfirmation = await confirmWalletPaymentFn(
         input,
         expectedAmount,
@@ -2118,6 +2176,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       checkout,
       cryptoPurchase: {
         ...purchaseContext,
+        financials: pickCryptoAmounts(input.cryptoAmounts),
         purchaseClick,
         checkoutUrl: String(checkoutTarget.target.url || '').split('?')[0],
         walletSelection,
@@ -2131,6 +2190,7 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
       },
     };
   } catch (error) {
+    error.cryptoAmounts = pickCryptoAmounts(input.cryptoAmounts);
     checkout.close();
     throw error;
   }
@@ -2138,13 +2198,20 @@ export async function continueCryptoAfterAmount(input, page, purchaseContext, ad
 
 async function runCryptoRecharge(rawInput) {
   const startedAt = Date.now();
-  const input = await startProfile(rawInput);
+  rawInput.cryptoAmounts = {};
+  recordCryptoAmounts(rawInput, {});
+  let input = rawInput;
   let page;
   let checkout;
   try {
+    input = await startProfile(rawInput);
     page = await ensureCreditsPage(input);
     const account = await waitForAccount(page, input.expectedAccount);
     const purchase = await resolveAmount(page, input.purchase);
+    recordCryptoAmounts(input, {
+      cryptoCreditAmount: purchase.amount || '',
+      ...networkFeeAmounts(null),
+    });
     if (purchase.skippedByRule) {
       return {ok: true, status: 'crypto_skipped_by_balance_rule', account: account.account, cryptoPurchase: {...purchase, walletConfirmationRequired: false}};
     }
@@ -2160,6 +2227,7 @@ async function runCryptoRecharge(rawInput) {
     const continued = await continueCryptoAfterAmount(input, page, {...purchase, useCrypto, purchaseForm, amountInput});
     checkout = continued.checkout;
     const cryptoPurchase = continued.cryptoPurchase;
+    cryptoPurchase.financials = pickCryptoAmounts(input.cryptoAmounts);
     if (cryptoPurchase.walletPaymentConfirmation?.confirmed === true) {
       // Continuation has already spent the payment observation window. Never restart it or submit again.
       const checkoutState = cryptoPurchase.checkoutState || {};
@@ -2193,6 +2261,9 @@ async function runCryptoRecharge(rawInput) {
       cryptoPurchase,
       elapsedMs: Date.now() - startedAt,
     };
+  } catch (error) {
+    error.cryptoAmounts = pickCryptoAmounts(input.cryptoAmounts);
+    throw error;
   } finally {
     checkout?.close();
     page?.close();
@@ -2209,6 +2280,7 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main()
   .then((result) => console.log(JSON.stringify(result)))
   .catch((error) => {
-    console.error(JSON.stringify({ok: false, error: redact(error.message || error)}));
+    console.error(JSON.stringify({ok: false, error: redact(error.message || error),
+      cryptoAmounts: pickCryptoAmounts(error.cryptoAmounts)}));
     process.exitCode = 1;
   });

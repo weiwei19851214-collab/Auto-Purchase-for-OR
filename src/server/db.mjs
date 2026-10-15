@@ -3,6 +3,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {DATA_DIR, DB_PATH} from './config.mjs';
 import {nowIso} from './ids.mjs';
 import {simplifyError} from '../automation/lib/error-message-contract.mjs';
+import {CRYPTO_AMOUNT_FIELDS} from '../automation/lib/crypto-amount-fields.mjs';
 
 export function openDatabase(path = DB_PATH) {
   mkdirSync(DATA_DIR, {recursive: true});
@@ -68,6 +69,16 @@ function migrate(db) {
       purchase_amount TEXT NOT NULL DEFAULT '',
       balance_before TEXT NOT NULL DEFAULT '',
       balance_after TEXT NOT NULL DEFAULT '',
+      crypto_credit_amount TEXT NOT NULL DEFAULT '',
+      crypto_payment_amount TEXT NOT NULL DEFAULT '',
+      crypto_payment_asset TEXT NOT NULL DEFAULT '',
+      crypto_payment_amount_source TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_amount TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_asset TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_usd TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_display TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_status TEXT NOT NULL DEFAULT '',
+      crypto_network_fee_source TEXT NOT NULL DEFAULT '',
       zdr_status TEXT NOT NULL DEFAULT '',
       zdr_changed TEXT NOT NULL DEFAULT '',
       data_training_status TEXT NOT NULL DEFAULT '',
@@ -148,6 +159,7 @@ function migrate(db) {
     'adspower_status_reason',
     'error_code',
     'error_detail',
+    ...Object.values(CRYPTO_AMOUNT_FIELDS),
   ]) addRowColumn(name);
   backfillSimplifiedRowErrors(db);
 }

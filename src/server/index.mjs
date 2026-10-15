@@ -1,6 +1,6 @@
 import {createServer} from 'node:http';
 import {execFile} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {assertLocalRequest, requireSession, sessionPayload} from './auth.mjs';
 import {DEFAULT_SERVER_PORT, PUBLIC_DIR, ROOT_DIR} from './config.mjs';
@@ -19,6 +19,7 @@ import {AutoRechargeScheduler} from './auto-recharge-scheduler.mjs';
 
 // Snapshot at startup: a later Git update must not masquerade as a restarted service.
 const runningVersion = (await repoInfo()).shortSha || '';
+const runningAppVersion = JSON.parse(readFileSync(resolve(ROOT_DIR, 'package.json'), 'utf8')).version;
 const db = openDatabase();
 const recoveredJobIds = recoverInterruptedWork(db);
 if (recoveredJobIds.length) console.warn(`[recovery] blocked ${recoveredJobIds.length} interrupted job(s) for manual verification`);
@@ -54,6 +55,7 @@ async function handle(req, res) {
       ok: true,
       worker: worker.status(),
       version: runningVersion,
+      appVersion: runningAppVersion,
       scheduler: autoRechargeScheduler.getState('bank_card'),
       schedulers: autoRechargeScheduler.getStates(),
     });
@@ -160,6 +162,7 @@ async function handle(req, res) {
       jobs: jobsList(db),
       worker: worker.status(),
       version: runningVersion,
+      appVersion: runningAppVersion,
       scheduler: autoRechargeScheduler.getState('bank_card'),
       schedulers: autoRechargeScheduler.getStates(),
     });

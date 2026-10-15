@@ -4,6 +4,7 @@ import {
   classifyOkxTransactionSnapshot,
   checkoutPaymentFingerprint,
   extractTransactionAmountAssets,
+  extractWalletNetworkFee,
   normalizeTransactionAmount,
 } from '../automation/lib/crypto-wallet-transaction.mjs';
 
@@ -68,4 +69,71 @@ test('requires an observed network and does not silently default a chain', () =>
   assert.equal(withoutNetwork.stage, 'unknown');
   const unknownNetwork = classifyOkxTransactionSnapshot(snapshot(`${confirmText.replace('Arbitrum One', 'Unknown Chain')}`, buttons('Confirm')), {amount: '10.50', asset: 'USDC'});
   assert.equal(unknownNetwork.stage, 'unknown');
+});
+
+test('excludes explicitly labelled fee and balance from payment conflicts', () => {
+  const expected = {amount: '10.50', asset: 'USDC', network: 'Arbitrum One'};
+  for (const details of [
+    'Fee 0.01 USDC\nBalance 99 USDC',
+    'Network fee\n0.01 USDC\nAvailable balance\n99 USDC',
+    'Gas fee 0.000001 ETH\n<$0.01',
+    'Fee\n0.000001\nETH\n(<$0.01)',
+  ]) {
+    assert.equal(classifyOkxTransactionSnapshot(snapshot(`${confirmText}\n${details}`, buttons('Confirm')), expected).stage, 'confirm_send');
+  }
+  for (const conflict of ['Send 9 USDC', 'Amount 10.50 DAI', '9 USDC', '9\nUSDC']) {
+    assert.equal(classifyOkxTransactionSnapshot(snapshot(`${confirmText}\nFee 0.01 USDC\n${conflict}`, buttons('Confirm')), expected).stage, 'unknown');
+  }
+});
+
+test('extracts exact native and same-asset fees independently of payment amount', () => {
+  assert.deepEqual(extractWalletNetworkFee(`${confirmText}\nFee 0.01 USDC`), {
+    amount: '0.01', asset: 'USDC', usd: '', display: '0.01 USDC',
+    status: 'observed', source: 'okx_confirm',
+  });
+  assert.deepEqual(extractWalletNetworkFee('Network fee\n0.000001 ETH\n($0.002)'), {
+    amount: '0.000001', asset: 'ETH', usd: '0.002', display: '0.000001 ETH ($0.002)',
+    status: 'observed', source: 'okx_confirm',
+  });
+  assert.equal(extractWalletNetworkFee('Gas fee 0 ETH').amount, '0');
+  assert.equal(extractWalletNetworkFee('Fee $0.00').usd, '0.00');
+});
+
+test('records displayed fee estimates numerically while preserving original comparison text', () => {
+  const fee = extractWalletNetworkFee('Gas fee\n0.000001 ETH\n<$0.01');
+  assert.equal(fee.amount, '0.000001');
+  assert.equal(fee.usd, '0.01');
+  assert.equal(fee.display, '0.000001 ETH <$0.01');
+  const upperNative = extractWalletNetworkFee('Fee <0.01 USDC');
+  assert.equal(upperNative.amount, '0.01');
+  assert.deepEqual(extractWalletNetworkFee('Fee <$0.01'), {
+    amount: '0.01', asset: 'USD', usd: '0.01', display: '<$0.01',
+    status: 'observed', source: 'okx_confirm',
+  });
+  const approximate = extractWalletNetworkFee('Network fee ≈0.000001 ETH');
+  assert.equal(approximate.amount, '0.000001');
+  assert.equal(approximate.display, '≈0.000001 ETH');
+});
+
+test('extracts adjacent standalone asset fee lines without absorbing payment or network labels', () => {
+  const feeText = 'Fee\n0.000001\nETH\n(<$0.01)';
+  for (const suffix of ['', '\nAmount 10.50 USDC', '\nNetwork\nArbitrum One']) {
+    assert.deepEqual(extractWalletNetworkFee(feeText + suffix), {
+      amount: '0.000001', asset: 'ETH', usd: '0.01', display: '0.000001 ETH (<$0.01)',
+      status: 'observed', source: 'okx_confirm',
+    });
+  }
+  const expected = {amount: '10.50', asset: 'USDC', network: 'Arbitrum One'};
+  assert.equal(classifyOkxTransactionSnapshot(snapshot(`${confirmText}\n${feeText}\n9\nUSDC`, buttons('Confirm')), expected).stage, 'unknown');
+  assert.equal(extractWalletNetworkFee(`${feeText}\n0.000002\nETH`).status, 'unavailable');
+  assert.equal(extractWalletNetworkFee('Fee\n0.000001\nUNKNOWN').status, 'unavailable');
+});
+
+test('does not guess fees from missing, unsupported, or ambiguous evidence', () => {
+  for (const text of [confirmText, 'Fee unavailable', 'Fee 0.01 USDC\nFee 0.02 USDC', 'Fee 0.01 USDC 0.02 USDC', 'Network fee\nEstimate unavailable\n0.01 ETH']) {
+    const fee = extractWalletNetworkFee(text);
+    assert.equal(fee.status, 'unavailable', text);
+    assert.equal(fee.amount, '', text);
+    assert.equal(fee.usd, '', text);
+  }
 });

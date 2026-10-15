@@ -1,5 +1,6 @@
 import {spawnSync} from 'node:child_process';
 import {redact} from './common.mjs';
+import {cryptoAmountsWithCheckpoint, beginCryptoAccountingAttempt} from './crypto-amount-fields.mjs';
 
 export function parseChildJson(stdout, stderr) {
   for (const text of [stdout, stderr]) {
@@ -17,6 +18,7 @@ export function parseChildJson(stdout, stderr) {
 }
 
 export function runClosedLoopChild(bindScript, task, args) {
+  if (args.rechargeMode === 'crypto') beginCryptoAccountingAttempt(task);
   const childArgs = [bindScript, '--stdin'];
   if (args.rechargeMode !== 'crypto') {
     if (args.scopeAutoTopup) childArgs.push('--configure-auto-topup');
@@ -31,10 +33,12 @@ export function runClosedLoopChild(bindScript, task, args) {
     killSignal: 'SIGTERM',
   });
   const parsed = parseChildJson(child.stdout, child.stderr);
-  if (child.status === 0 && parsed?.ok) return {ok: true, result: parsed};
+  const cryptoAmounts = cryptoAmountsWithCheckpoint(task, parsed);
+  if (child.status === 0 && parsed?.ok) return {ok: true, result: {...parsed, cryptoAmounts}};
   if (child.error?.code === 'ETIMEDOUT') {
     return {
       ok: false,
+      result: {cryptoAmounts},
       error: `bind script timed out after ${args.rowTimeoutMs}ms`,
       child: args.verbose ? {stdout: redact(child.stdout), stderr: redact(child.stderr)} : undefined,
     };
@@ -42,6 +46,7 @@ export function runClosedLoopChild(bindScript, task, args) {
   const message = parsed?.error || child.stderr || child.stdout || `bind script exited ${child.status}`;
   return {
     ok: false,
+    result: {cryptoAmounts},
     error: message,
     child: args.verbose ? {stdout: redact(child.stdout), stderr: redact(child.stderr)} : undefined,
   };

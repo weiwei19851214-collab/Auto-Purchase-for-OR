@@ -1507,7 +1507,10 @@
 
   async function refreshJobs() {
     const data = await requestJson('/api/jobs');
-    el.appVersion.textContent = /^[a-f0-9]{7,40}$/.test(data.version || '') ? `版本 ${data.version}` : '版本未知';
+    const release = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(data.appVersion || '') ? `v${data.appVersion}` : '';
+    const revision = /^[a-f0-9]{7,40}$/.test(data.version || '') ? data.version : '';
+    el.appVersion.textContent = [release, revision].filter(Boolean).join(' · ') || '版本未知';
+    el.appVersion.title = `当前运行版本：${release || '未知'}；代码提交：${revision || '未知'}`;
     state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
     state.worker = data.worker || {};
     state.schedulers = data.schedulers || {bank_card: data.scheduler || {}};
